@@ -20,7 +20,7 @@ fn write_value(v: &Value, out: &mut Vec<u8>) -> Result<(), Error> {
         Value::Number(n) => {
             let i = n
                 .as_i64()
-                .filter(|i| i.abs() <= MAX_SAFE)
+                .filter(|i| (-MAX_SAFE..=MAX_SAFE).contains(i))
                 .ok_or_else(|| Error::Jcs(format!("unsupported number {n}")))?;
             out.extend_from_slice(i.to_string().as_bytes());
         }
@@ -120,6 +120,13 @@ mod tests {
         );
         assert!(canonicalize(&json!(1.5)).is_err());
         assert!(canonicalize(&json!(9007199254740992i64)).is_err());
+        assert!(canonicalize(&json!(-9007199254740992i64)).is_err());
+    }
+
+    #[test]
+    fn i64_min_is_rejected_not_panicking() {
+        let err = canonicalize(&json!(i64::MIN)).unwrap_err();
+        assert!(matches!(err, crate::Error::Jcs(_)));
     }
 
     #[test]
