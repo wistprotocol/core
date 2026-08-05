@@ -21,3 +21,11 @@ fn spec_checkout_present() {
         "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
     );
 }
+
+#[test]
+fn wist1_canonical_bytes() {
+    let env = read_json("vectors/wist1/envelope.json");
+    let expected = std::fs::read(spec_dir().join("vectors/wist1/delta.canonical")).unwrap();
+    let got = wist_core::jcs::canonicalize(&env["delta"]).unwrap();
+    assert_eq!(got, expected);
+}
