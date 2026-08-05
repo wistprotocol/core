@@ -80,6 +80,30 @@ fn example_envelopes_verify() {
 }
 
 #[test]
+fn verify_envelope_rejects_missing_and_tampered() {
+    let keys = read_json("vectors/wist1/keypair.json");
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    let doc = read_json("examples/delta.json");
+
+    assert!(wist_core::envelope::verify_envelope(&doc, "nope", &pk).is_err());
+
+    let mut no_sig_value = doc.clone();
+    no_sig_value["sig"].as_object_mut().unwrap().remove("value");
+    assert!(wist_core::envelope::verify_envelope(&no_sig_value, "delta", &pk).is_err());
+
+    let mut bad_sig = doc.clone();
+    let mut sig = bad_sig["sig"]["value"].as_str().unwrap().to_owned();
+    let flipped = if sig.ends_with('A') { 'B' } else { 'A' };
+    sig.replace_range(sig.len() - 1.., &flipped.to_string());
+    bad_sig["sig"]["value"] = sig.into();
+    assert!(wist_core::envelope::verify_envelope(&bad_sig, "delta", &pk).is_err());
+
+    let mut tampered_field = doc.clone();
+    tampered_field["delta"]["url"] = "https://example.com/blog/post-2".into();
+    assert!(wist_core::envelope::verify_envelope(&tampered_field, "delta", &pk).is_err());
+}
+
+#[test]
 fn payload_commitment_recomputes_and_tamper_fails() {
     let payload = read_json("examples/payload.json");
     let delta = read_json("examples/delta.json");
