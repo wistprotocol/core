@@ -29,3 +29,20 @@ fn wist1_canonical_bytes() {
     let got = wist_core::jcs::canonicalize(&env["delta"]).unwrap();
     assert_eq!(got, expected);
 }
+
+#[test]
+fn wist1_signature_and_deterministic_resign() {
+    let env = read_json("vectors/wist1/envelope.json");
+    let keys = read_json("vectors/wist1/keypair.json");
+    let canonical = wist_core::jcs::canonicalize(&env["delta"]).unwrap();
+
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    wist_core::crypto::verify(&pk, &canonical, env["sig"]["value"].as_str().unwrap()).unwrap();
+
+    let seed: [u8; 32] = wist_core::crypto::hex_decode(keys["seed_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let sk = wist_core::crypto::SigningKey::from_seed(&seed);
+    assert_eq!(sk.sign(&canonical), env["sig"]["value"].as_str().unwrap());
+}
