@@ -6,4 +6,8 @@ pub enum Error {
     Encoding(String),
     #[error("signature verification failed")]
     Signature,
+    #[error("envelope: {0}")]
+    Envelope(String),
+    #[error("commitment: {0}")]
+    Commitment(String),
 }

@@ -46,3 +46,54 @@ fn wist1_signature_and_deterministic_resign() {
     let sk = wist_core::crypto::SigningKey::from_seed(&seed);
     assert_eq!(sk.sign(&canonical), env["sig"]["value"].as_str().unwrap());
 }
+
+#[test]
+fn wist1_delta_id() {
+    let env = read_json("vectors/wist1/envelope.json");
+    let expected = std::fs::read_to_string(spec_dir().join("vectors/wist1/id.txt")).unwrap();
+    assert_eq!(
+        wist_core::delta::delta_id(&env["delta"]).unwrap(),
+        expected.trim()
+    );
+}
+
+#[test]
+fn example_envelopes_verify() {
+    let keys = read_json("vectors/wist1/keypair.json");
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    for (file, inner) in [
+        ("delta.json", "delta"),
+        ("publisher.json", "publisher"),
+        ("feed.json", "feed"),
+        ("checkpoint.json", "checkpoint"),
+        ("snapshot-manifest.json", "manifest"),
+        ("snapshot-index.json", "index"),
+        ("snapshot-state.json", "state"),
+        ("audit-record.json", "record"),
+        ("registry-update.json", "update"),
+        ("log-anchor.json", "anchor"),
+    ] {
+        let doc = read_json(&format!("examples/{file}"));
+        wist_core::envelope::verify_envelope(&doc, inner, &pk)
+            .unwrap_or_else(|e| panic!("{file}: {e}"));
+    }
+}
+
+#[test]
+fn payload_commitment_recomputes_and_tamper_fails() {
+    let payload = read_json("examples/payload.json");
+    let delta = read_json("examples/delta.json");
+    let salt = payload["salt"].as_str().unwrap();
+    let declared = delta["delta"]["payload"]["commitment"].as_str().unwrap();
+    wist_core::delta::verify_commitment(salt, &payload["content"], declared).unwrap();
+    assert_eq!(
+        wist_core::delta::content_bytes(&payload["content"]).unwrap(),
+        delta["delta"]["payload"]["bytes"].as_u64().unwrap()
+    );
+
+    let mut tampered = payload["content"].clone();
+    let ex = tampered["extract"].as_str().unwrap().to_owned() + "x";
+    tampered["extract"] = ex.into();
+    assert!(wist_core::delta::verify_commitment(salt, &tampered, declared).is_err());
+    assert!(wist_core::delta::verify_commitment("AAAA", &payload["content"], declared).is_err());
+}
