@@ -280,6 +280,46 @@ fn required_nullable_field_must_be_present() {
 }
 
 #[test]
+fn wist2_link_extraction_vector() {
+    let vec = read_json("vectors/wist2/link-extraction.json");
+    let cap = vec["links_cap_bytes"].as_u64().unwrap() as usize;
+    for case in vec["cases"].as_array().unwrap() {
+        let html = wist_core::crypto::hex_decode(case["html_hex"].as_str().unwrap()).unwrap();
+        let (urls, total) = wist_core::extract::extract_links(
+            &html,
+            case["base_url"].as_str().unwrap(),
+            case["publisher_domain"].as_str().unwrap(),
+        );
+        let member = wist_core::extract::links_member(&urls, total, cap);
+        assert_eq!(member, case["expected"], "{}", case["label"]);
+    }
+}
+
+#[test]
+fn wist2_text_extraction_vector() {
+    let vec = read_json("vectors/wist2/text-extraction.json");
+    let guard = vec["min_observed_words"].as_u64().unwrap();
+    for case in vec["extraction"].as_array().unwrap() {
+        let html = wist_core::crypto::hex_decode(case["html_hex"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            wist_core::extract::extract_text(&html),
+            case["expected"].as_str().unwrap(),
+            "{}",
+            case["label"]
+        );
+    }
+    for case in vec["similarity"].as_array().unwrap() {
+        let got = wist_core::extract::similarity(
+            case["reference"].as_str().unwrap(),
+            case["observed"].as_str().unwrap(),
+            guard,
+        );
+        let expected = case["similarity"].as_u64();
+        assert_eq!(got, expected, "{}", case["label"]);
+    }
+}
+
+#[test]
 fn manifest_anchored_to_block() {
     let manifest = read_json("examples/snapshot-manifest.json");
     let block = read_json("examples/block.json");
