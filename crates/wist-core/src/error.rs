@@ -10,4 +10,6 @@ pub enum Error {
     Envelope(String),
     #[error("commitment: {0}")]
     Commitment(String),
+    #[error("merkle: {0}")]
+    Merkle(String),
 }
