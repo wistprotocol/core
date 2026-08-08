@@ -715,6 +715,8 @@ mod tests {
             ("https://example.com:443/x", Some("https://example.com/x")),
             ("https://example.com", Some("https://example.com/")),
             ("https://example.com/\tx", None),
+            ("a//b", Some("https://example.com/blog/a//b")),
+            ("x//", Some("https://example.com/blog/x//")),
         ];
         for (candidate, expected) in cases {
             assert_eq!(
