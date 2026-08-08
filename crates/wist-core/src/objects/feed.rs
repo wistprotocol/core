@@ -8,6 +8,7 @@ pub struct Feed {
     pub domain: String,
     pub generated_at: String,
     pub deltas: Vec<String>,
+    #[serde(deserialize_with = "crate::objects::required_nullable")]
     pub next: Option<String>,
 }
 
