@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod block;
 pub mod crypto;
 pub mod delta;
 pub mod envelope;
