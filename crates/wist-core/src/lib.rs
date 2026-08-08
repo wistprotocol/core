@@ -1,3 +1,9 @@
+//! Rust implementation of the WIST-1..3 primitives: JCS canonicalization,
+//! Ed25519 envelopes, delta identity, Merkle trees/proofs, block/checkpoint
+//! verification, snapshot digests, and WIST-2 link/text extraction.
+//! Conformance is defined by the sibling spec repo's schemas and vectors,
+//! not by this crate — every normative behavior is verified against those
+//! vectors in `tests/conformance.rs`.
 #![forbid(unsafe_code)]
 
 pub mod block;

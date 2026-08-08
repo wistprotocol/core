@@ -1,0 +1,21 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: core }
+      - uses: actions/checkout@v4
+        with: { repository: wistprotocol/spec, path: spec }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: "rustfmt, clippy" }
+      - run: cargo fmt --all --check
+        working-directory: core
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: core
+      - run: cargo test
+        working-directory: core
+        env: { WIST_SPEC_DIR: "${{ github.workspace }}/spec" }
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with: { manifest-path: core/Cargo.toml }
