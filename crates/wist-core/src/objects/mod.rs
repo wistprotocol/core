@@ -29,7 +29,7 @@ pub use snapshot::{
 };
 pub use status::{PublisherState, Status, StatusRejection};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,4 +37,12 @@ pub struct Sig {
     pub key_id: String,
     pub alg: String,
     pub value: String,
+}
+
+pub(crate) fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }

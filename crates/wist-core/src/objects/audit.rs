@@ -35,6 +35,7 @@ pub struct AuditRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robots_excluded: Option<bool>,
     pub vrf_proof: String,
+    #[serde(deserialize_with = "crate::objects::required_nullable")]
     pub prev_record: Option<String>,
 }
 

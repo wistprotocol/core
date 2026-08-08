@@ -25,6 +25,7 @@ pub struct StatusRejection {
 pub struct Status {
     pub wist_version: String,
     pub domain: String,
+    #[serde(deserialize_with = "crate::objects::required_nullable")]
     pub last_pull_at: Option<String>,
     pub quota_remaining: u64,
     pub state: PublisherState,

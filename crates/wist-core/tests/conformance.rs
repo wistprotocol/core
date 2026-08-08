@@ -267,6 +267,19 @@ fn state_tuple_over_arity_rejected() {
 }
 
 #[test]
+fn required_nullable_field_must_be_present() {
+    let mut omitted = read_json("examples/feed.json");
+    omitted["feed"].as_object_mut().unwrap().remove("next");
+    let res: Result<wist_core::objects::FeedEnvelope, _> = serde_json::from_value(omitted);
+    assert!(res.is_err());
+
+    let mut present_null = read_json("examples/feed.json");
+    present_null["feed"]["next"] = serde_json::Value::Null;
+    let res: Result<wist_core::objects::FeedEnvelope, _> = serde_json::from_value(present_null);
+    assert!(res.is_ok());
+}
+
+#[test]
 fn manifest_anchored_to_block() {
     let manifest = read_json("examples/snapshot-manifest.json");
     let block = read_json("examples/block.json");
