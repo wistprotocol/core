@@ -121,3 +121,40 @@ fn payload_commitment_recomputes_and_tamper_fails() {
     assert!(wist_core::delta::verify_commitment(salt, &tampered, declared).is_err());
     assert!(wist_core::delta::verify_commitment("AAAA", &payload["content"], declared).is_err());
 }
+
+#[test]
+fn wist3_merkle_vectors() {
+    let block = read_json("vectors/wist3/block.json");
+    let leaves: Vec<[u8; 32]> = block["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| wist_core::merkle::leaf_hash(&wist_core::jcs::canonicalize(e).unwrap()))
+        .collect();
+    let root = wist_core::merkle::merkle_root(&leaves).unwrap();
+    assert_eq!(
+        format!("sha256:{}", wist_core::crypto::hex_encode(&root)),
+        block["header"]["merkle_root"].as_str().unwrap()
+    );
+
+    let proof = read_json("vectors/wist3/inclusion-proof.json");
+    let idx = proof["index"].as_u64().unwrap() as usize;
+    let n = proof["entry_count"].as_u64().unwrap() as usize;
+    assert_eq!(n, block["header"]["entry_count"].as_u64().unwrap() as usize);
+    let path: Vec<[u8; 32]> = proof["path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            wist_core::crypto::hex_decode(h.as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        })
+        .collect();
+    let leaf = wist_core::merkle::leaf_hash(
+        &wist_core::jcs::canonicalize(&block["entries"][idx]).unwrap(),
+    );
+    wist_core::merkle::verify_inclusion(&leaf, idx, n, &path, &root).unwrap();
+    assert_eq!(wist_core::merkle::audit_path(idx, &leaves).unwrap(), path);
+}
