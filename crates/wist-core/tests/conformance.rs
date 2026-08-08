@@ -187,3 +187,50 @@ fn genesis_chain_link() {
     wist_core::block::verify_chain_link(&block["header"], "sha256:genesis").unwrap();
     assert!(wist_core::block::verify_chain_link(&block["header"], "sha256:0000").is_err());
 }
+
+#[test]
+fn wist3_snapshot_records_digest() {
+    let v = read_json("vectors/wist3/snapshot-records.json");
+    let records: Vec<_> = v["records"].as_array().unwrap().clone();
+    for r in &records {
+        wist_core::snapshot::check_record_shape(r).unwrap();
+    }
+    let digest = wist_core::snapshot::content_digest(&records).unwrap();
+    assert_eq!(digest, v["content_digest"].as_str().unwrap());
+
+    let mut reversed = records.clone();
+    reversed.reverse();
+    assert_eq!(
+        wist_core::snapshot::content_digest(&reversed).unwrap(),
+        digest
+    );
+
+    let manifest = read_json("examples/snapshot-manifest.json");
+    assert_eq!(
+        manifest["manifest"]["content_digest"].as_str().unwrap(),
+        digest
+    );
+}
+
+#[test]
+fn state_digest_matches_manifest() {
+    let state = read_json("examples/snapshot-state.json");
+    let manifest = read_json("examples/snapshot-manifest.json");
+    let entries: Vec<_> = state["state"]["entries"].as_array().unwrap().clone();
+    assert_eq!(
+        wist_core::snapshot::state_digest(&entries).unwrap(),
+        manifest["manifest"]["state"]["state_digest"]
+            .as_str()
+            .unwrap()
+    );
+}
+
+#[test]
+fn manifest_anchored_to_block() {
+    let manifest = read_json("examples/snapshot-manifest.json");
+    let block = read_json("examples/block.json");
+    assert_eq!(
+        manifest["manifest"]["anchor_block_hash"].as_str().unwrap(),
+        wist_core::block::block_hash(&block["header"]).unwrap()
+    );
+}
