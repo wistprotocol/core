@@ -158,3 +158,32 @@ fn wist3_merkle_vectors() {
     wist_core::merkle::verify_inclusion(&leaf, idx, n, &path, &root).unwrap();
     assert_eq!(wist_core::merkle::audit_path(idx, &leaves).unwrap(), path);
 }
+
+#[test]
+fn example_block_and_checkpoint() {
+    let keys = read_json("vectors/wist1/keypair.json");
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    let block = read_json("examples/block.json");
+    let cp = read_json("examples/checkpoint.json");
+
+    wist_core::block::verify_block(&block, &pk).unwrap();
+    wist_core::block::verify_checkpoint_binding(&cp, &block).unwrap();
+
+    let mut bad = block.clone();
+    bad["header"]["entry_count"] = 99.into();
+    assert!(wist_core::block::verify_block(&bad, &pk).is_err());
+
+    let mut swapped = block.clone();
+    let e0 = swapped["entries"][0].clone();
+    swapped["entries"][0] = swapped["entries"][1].clone();
+    swapped["entries"][1] = e0;
+    assert!(wist_core::block::verify_block(&swapped, &pk).is_err());
+}
+
+#[test]
+fn genesis_chain_link() {
+    let block = read_json("vectors/wist3/block.json");
+    assert_eq!(block["header"]["block_number"], 0);
+    wist_core::block::verify_chain_link(&block["header"], "sha256:genesis").unwrap();
+    assert!(wist_core::block::verify_chain_link(&block["header"], "sha256:0000").is_err());
+}

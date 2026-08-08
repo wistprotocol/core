@@ -12,4 +12,6 @@ pub enum Error {
     Commitment(String),
     #[error("merkle: {0}")]
     Merkle(String),
+    #[error("block: {0}")]
+    Block(String),
 }
