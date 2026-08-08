@@ -181,11 +181,53 @@ fn example_block_and_checkpoint() {
 }
 
 #[test]
+fn entry_count_mismatch_survives_resign() {
+    let keys = read_json("vectors/wist1/keypair.json");
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    let seed: [u8; 32] = wist_core::crypto::hex_decode(keys["seed_hex"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let sk = wist_core::crypto::SigningKey::from_seed(&seed);
+    let block = read_json("examples/block.json");
+
+    let mut control = block.clone();
+    let control_sig = sk.sign(&wist_core::jcs::canonicalize(&control["header"]).unwrap());
+    control["sig"]["value"] = control_sig.into();
+    wist_core::block::verify_block(&control, &pk).unwrap();
+
+    let mut mutated = block.clone();
+    let real_count = mutated["header"]["entry_count"].as_u64().unwrap();
+    mutated["header"]["entry_count"] = (real_count + 1).into();
+    let mutated_sig = sk.sign(&wist_core::jcs::canonicalize(&mutated["header"]).unwrap());
+    mutated["sig"]["value"] = mutated_sig.into();
+
+    let err = wist_core::block::verify_block(&mutated, &pk).unwrap_err();
+    assert!(
+        err.to_string().contains("entry_count"),
+        "expected entry_count mismatch past a passing signature check, got: {err}"
+    );
+}
+
+#[test]
 fn genesis_chain_link() {
     let block = read_json("vectors/wist3/block.json");
     assert_eq!(block["header"]["block_number"], 0);
     wist_core::block::verify_chain_link(&block["header"], "sha256:genesis").unwrap();
     assert!(wist_core::block::verify_chain_link(&block["header"], "sha256:0000").is_err());
+}
+
+#[test]
+fn chain_link_rejects_non_genesis_block_zero_even_when_prev_matches() {
+    let block = read_json("vectors/wist3/block.json");
+    let mut header = block["header"].clone();
+    assert_eq!(header["block_number"], 0);
+    header["prev_block_hash"] = "sha256:notgenesis".into();
+    let err = wist_core::block::verify_chain_link(&header, "sha256:notgenesis").unwrap_err();
+    assert!(
+        err.to_string().contains("genesis"),
+        "expected the block-0-must-carry-genesis branch, got: {err}"
+    );
 }
 
 #[test]

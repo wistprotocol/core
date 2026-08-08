@@ -667,11 +667,17 @@ fn contained_micro<T: Eq + std::hash::Hash + Clone>(a_units: &[T], b_units: &[T]
     (inter * 1_000_000) / (a.len() as u64)
 }
 
+/// ASCII-domain limitation: uses `to_lowercase()`, not full Unicode case
+/// folding + NFC normalization like the Python reference; WIST-2 fixtures
+/// are ASCII-only by construction, so non-ASCII parity is deferred.
 pub fn similarity(reference: &str, observed: &str, min_observed_words: u64) -> Option<u64> {
     let ref_folded = reference.to_lowercase();
     let obs_folded = observed.to_lowercase();
     let ref_words: Vec<&str> = ref_folded.split_whitespace().collect();
     let obs_words: Vec<&str> = obs_folded.split_whitespace().collect();
+    if ref_words.is_empty() {
+        return None;
+    }
     if (obs_words.len() as u64) < min_observed_words {
         return None;
     }
@@ -765,6 +771,18 @@ mod tests {
         assert_eq!(
             extract_links(arabic, BASE, "example.com").0,
             vec!["https://example.org/x?y=&"]
+        );
+    }
+
+    #[test]
+    fn similarity_empty_reference_is_none() {
+        assert_eq!(
+            similarity("", "some observed words to satisfy the guard", 3),
+            None
+        );
+        assert_eq!(
+            similarity("   ", "some observed words to satisfy the guard", 3),
+            None
         );
     }
 }
