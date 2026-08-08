@@ -7,4 +7,5 @@ pub mod envelope;
 pub mod error;
 pub mod jcs;
 pub mod merkle;
+pub mod snapshot;
 pub use error::Error;

@@ -14,4 +14,6 @@ pub enum Error {
     Merkle(String),
     #[error("block: {0}")]
     Block(String),
+    #[error("snapshot: {0}")]
+    Snapshot(String),
 }
