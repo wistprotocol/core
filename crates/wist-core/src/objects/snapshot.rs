@@ -365,3 +365,53 @@ pub struct SnapshotStateEnvelope {
     pub state: SnapshotState,
     pub sig: Sig,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_entry_round_trips_every_kind() {
+        let pk = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
+        let evidence_digest = format!("sha256:{}", "a".repeat(64));
+        let url_digest = "b".repeat(32);
+        let delta_id = format!("sha256:{}", "c".repeat(64));
+        let cases = [
+            serde_json::json!(["aggregator_key", "key-1", pk, 10, Value::Null]),
+            serde_json::json!(["auditor", "auditor.example.com", "key-2", pk, 5, 20]),
+            serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42]),
+            serde_json::json!(["parameter", "max_shard_bytes", -5, 100]),
+            serde_json::json!([
+                "sanction_state",
+                "example.com",
+                2,
+                [evidence_digest],
+                [["appeal", "2026-08-02T12:00:00Z"]]
+            ]),
+            serde_json::json!(["recovery_window", "example.com", 7, "2026-08-02T12:00:00Z"]),
+            serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
+            serde_json::json!(["coverage_failure", "auditor.example.com", 12]),
+            serde_json::json!([
+                "reputation_inputs",
+                "example.com",
+                "2026-08-02T12:00:00Z",
+                Value::Null,
+                9,
+                [url_digest],
+                [["2026-08-02T12:00:00Z", 1]]
+            ]),
+            serde_json::json!([
+                "record",
+                "example.com",
+                "https://example.com/blog/post-1",
+                delta_id
+            ]),
+        ];
+        assert_eq!(cases.len(), 10);
+        for tuple in cases {
+            let entry: StateEntry =
+                serde_json::from_value(tuple.clone()).unwrap_or_else(|e| panic!("{tuple}: {e}"));
+            assert_eq!(serde_json::to_value(&entry).unwrap(), tuple);
+        }
+    }
+}
