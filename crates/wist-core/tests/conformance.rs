@@ -226,6 +226,47 @@ fn state_digest_matches_manifest() {
 }
 
 #[test]
+fn every_example_parses_typed() {
+    use wist_core::objects as o;
+    fn p<T: serde::de::DeserializeOwned>(file: &str) -> T {
+        let bytes = std::fs::read(spec_dir().join("examples").join(file)).unwrap();
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{file}: {e}"))
+    }
+    let _: o::DeltaEnvelope = p("delta.json");
+    let _: o::PublisherEnvelope = p("publisher.json");
+    let _: o::FeedEnvelope = p("feed.json");
+    let _: o::Block = p("block.json");
+    let _: o::CheckpointEnvelope = p("checkpoint.json");
+    let _: o::LogAnchorEnvelope = p("log-anchor.json");
+    let _: o::SnapshotIndexEnvelope = p("snapshot-index.json");
+    let _: o::SnapshotManifestEnvelope = p("snapshot-manifest.json");
+    let _: o::SnapshotStateEnvelope = p("snapshot-state.json");
+    let _: o::Status = p("status.json");
+    let _: o::Payload = p("payload.json");
+    let _: o::AuditRecordEnvelope = p("audit-record.json");
+    let _: o::RegistryUpdateEnvelope = p("registry-update.json");
+}
+
+#[test]
+fn unknown_field_rejected() {
+    let mut doc = read_json("examples/delta.json");
+    doc["delta"]["surprise"] = 1.into();
+    let res: Result<wist_core::objects::DeltaEnvelope, _> = serde_json::from_value(doc);
+    assert!(res.is_err());
+}
+
+#[test]
+fn state_tuple_over_arity_rejected() {
+    let mut doc = read_json("examples/snapshot-state.json");
+    doc["state"]["entries"][1]
+        .as_array_mut()
+        .unwrap()
+        .push("extra".into());
+    let res: Result<wist_core::objects::SnapshotStateEnvelope, _> = serde_json::from_value(doc);
+    assert!(res.is_err());
+}
+
+#[test]
 fn manifest_anchored_to_block() {
     let manifest = read_json("examples/snapshot-manifest.json");
     let block = read_json("examples/block.json");
