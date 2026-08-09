@@ -25,7 +25,7 @@ pub fn sign_envelope(
     let value = sk.sign(&canonical);
     Ok(serde_json::json!({
         inner_key: inner,
-        "sig": {"key_id": key_id, "alg": "ed25519", "value": value}
+        "sig": {"key_id": key_id, "alg": "Ed25519", "value": value}
     }))
 }
 
@@ -45,7 +45,7 @@ mod tests {
         let sk = crate::crypto::SigningKey::from_seed(&[7u8; 32]);
         let inner = serde_json::json!({"b": 1, "a": "x"});
         let env = sign_envelope(&inner, "delta", "k1", &sk).unwrap();
-        assert_eq!(env["sig"]["alg"], "ed25519");
+        assert_eq!(env["sig"]["alg"], "Ed25519");
         assert_eq!(env["sig"]["key_id"], "k1");
         verify_envelope(&env, "delta", &sk.public()).unwrap();
     }
