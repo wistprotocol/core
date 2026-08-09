@@ -32,3 +32,38 @@ pub fn verify_commitment(salt_b64u: &str, content: &Value, declared: &str) -> Re
     }
     Ok(())
 }
+
+pub fn make_commitment(salt_b64u: &str, content: &Value) -> Result<String, Error> {
+    let salt = b64u_decode(salt_b64u)?;
+    if salt.len() < 16 {
+        return Err(Error::Commitment("salt shorter than 128 bits".into()));
+    }
+    let canonical = jcs::canonicalize(content)?;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(&salt).map_err(|e| Error::Commitment(e.to_string()))?;
+    mac.update(&canonical);
+    Ok(format!(
+        "hmac-sha256:{}",
+        hex_encode(&mac.finalize().into_bytes())
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_commitment_matches_verify() {
+        let salt = crate::crypto::b64u_encode(&[9u8; 16]);
+        let content = serde_json::json!({"extract": "hi", "links": {"total": 0, "urls": []}, "summary": {"title": "t"}});
+        let c = make_commitment(&salt, &content).unwrap();
+        assert!(c.starts_with("hmac-sha256:"));
+        verify_commitment(&salt, &content, &c).unwrap();
+    }
+
+    #[test]
+    fn make_commitment_rejects_short_salt() {
+        let salt = crate::crypto::b64u_encode(&[9u8; 8]);
+        assert!(make_commitment(&salt, &serde_json::json!({})).is_err());
+    }
+}
