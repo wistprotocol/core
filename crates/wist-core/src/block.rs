@@ -34,11 +34,18 @@ pub fn verify_block(doc: &Value, key: &PublicKey) -> Result<(), Error> {
         return Err(Error::Block("entry_count mismatch".into()));
     }
 
-    let leaves: Vec<[u8; 32]> = entries
-        .iter()
-        .map(|e| Ok(merkle::leaf_hash(&jcs::canonicalize(e)?)))
-        .collect::<Result<_, Error>>()?;
-    let root = merkle::merkle_root(&leaves)?;
+    // WIST-3 §4: empty Blocks pin merkle_root to the leaf hash of zero
+    // bytes, not RFC 6962's MTH({}) = SHA-256(""); merkle_root() errors on
+    // an empty leaf set, so this case is handled separately.
+    let root = if entries.is_empty() {
+        merkle::leaf_hash(&[])
+    } else {
+        let leaves: Vec<[u8; 32]> = entries
+            .iter()
+            .map(|e| Ok(merkle::leaf_hash(&jcs::canonicalize(e)?)))
+            .collect::<Result<_, Error>>()?;
+        merkle::merkle_root(&leaves)?
+    };
     let declared_root = field(header, "/merkle_root")?
         .as_str()
         .ok_or_else(|| Error::Block("merkle_root is not a string".into()))?;
@@ -75,4 +82,45 @@ pub fn verify_checkpoint_binding(checkpoint: &Value, block: &Value) -> Result<()
         return Err(Error::Block("block_number mismatch".into()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::SigningKey;
+
+    const EMPTY_MERKLE_ROOT: &str =
+        "sha256:6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d";
+
+    fn empty_block(sk: &SigningKey, merkle_root: &str) -> Value {
+        let header = serde_json::json!({
+            "wist_version": "1.0.0",
+            "block_number": 0,
+            "prev_block_hash": "sha256:genesis",
+            "sealed_at": "2026-08-02T13:00:00Z",
+            "merkle_root": merkle_root,
+            "entry_count": 0
+        });
+        let sig = sk.sign(&jcs::canonicalize(&header).unwrap());
+        serde_json::json!({
+            "header": header,
+            "entries": [],
+            "sig": {"key_id": "test-agg-k1", "alg": "Ed25519", "value": sig}
+        })
+    }
+
+    #[test]
+    fn verify_block_accepts_spec_conformant_empty_block() {
+        let sk = SigningKey::from_seed(&[7u8; 32]);
+        let block = empty_block(&sk, EMPTY_MERKLE_ROOT);
+        verify_block(&block, &sk.public()).unwrap();
+    }
+
+    #[test]
+    fn verify_block_rejects_empty_block_with_wrong_root() {
+        let sk = SigningKey::from_seed(&[7u8; 32]);
+        let wrong_root = format!("sha256:{}", "0".repeat(64));
+        let block = empty_block(&sk, &wrong_root);
+        assert!(verify_block(&block, &sk.public()).is_err());
+    }
 }
