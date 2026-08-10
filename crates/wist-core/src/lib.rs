@@ -18,4 +18,5 @@ pub mod merkle;
 pub mod objects;
 pub mod reputation;
 pub mod snapshot;
+pub mod vrf;
 pub use error::Error;
