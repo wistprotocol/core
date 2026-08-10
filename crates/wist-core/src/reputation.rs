@@ -43,3 +43,28 @@ impl DecayTable {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_bytes_rejects_wrong_hash() {
+        assert!(DecayTable::from_bytes(b"not json").is_err());
+    }
+
+    #[test]
+    fn decay_boundary_values() {
+        let t = DecayTable::builtin();
+        assert_eq!(t.decay(0), 1_000_000_000);
+        assert_eq!(t.decay(DECAY_MAX_DAYS), 39_512);
+        assert_eq!(t.decay(DECAY_MAX_DAYS + 1), 0);
+    }
+
+    #[test]
+    fn builtin_returns_same_reference() {
+        let a = DecayTable::builtin();
+        let b = DecayTable::builtin();
+        assert!(std::ptr::eq(a, b));
+    }
+}
