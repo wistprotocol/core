@@ -18,4 +18,6 @@ pub enum Error {
     Snapshot(String),
     #[error("decay table: {0}")]
     DecayTable(String),
+    #[error("reputation: {0}")]
+    Reputation(String),
 }
