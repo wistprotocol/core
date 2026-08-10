@@ -15,7 +15,10 @@ enum Command {
         flags: ScenarioFlags,
     },
     Report,
-    Calibrate,
+    Calibrate {
+        #[arg(long)]
+        payload_dir: std::path::PathBuf,
+    },
 }
 
 fn main() {
@@ -25,7 +28,8 @@ fn main() {
             println!("{}", wist_bench::cli::simulate_json(&sc));
         }),
         Command::Report => Ok(()),
-        Command::Calibrate => Ok(()),
+        Command::Calibrate { payload_dir } => wist_bench::calibrate::measure(&payload_dir)
+            .map(|c| println!("{}", serde_json::to_string_pretty(&c).unwrap())),
     };
     if let Err(e) = outcome {
         eprintln!("error: {e}");
