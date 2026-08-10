@@ -49,10 +49,17 @@ pub fn make_commitment(salt_b64u: &str, content: &Value) -> Result<String, Error
 pub fn make_commitment_bytes(salt_b64u: &str, octets: &[u8]) -> Result<String, Error> {
     let mut mac = commitment_mac(salt_b64u)?;
     mac.update(octets);
-    Ok(format!("hmac-sha256:{}", hex_encode(&mac.finalize().into_bytes())))
+    Ok(format!(
+        "hmac-sha256:{}",
+        hex_encode(&mac.finalize().into_bytes())
+    ))
 }
 
-pub fn verify_commitment_bytes(salt_b64u: &str, octets: &[u8], declared: &str) -> Result<(), Error> {
+pub fn verify_commitment_bytes(
+    salt_b64u: &str,
+    octets: &[u8],
+    declared: &str,
+) -> Result<(), Error> {
     let got = make_commitment_bytes(salt_b64u, octets)?;
     if got != declared {
         return Err(Error::Commitment("commitment mismatch".into()));

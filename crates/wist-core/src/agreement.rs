@@ -34,7 +34,11 @@ mod tests {
     #[test]
     fn duplicates_dedup_and_order_is_irrelevant() {
         let a = vec!["https://a/1".to_string(), "https://a/2".to_string()];
-        let b = vec!["https://a/2".to_string(), "https://a/1".to_string(), "https://a/1".to_string()];
+        let b = vec![
+            "https://a/2".to_string(),
+            "https://a/1".to_string(),
+            "https://a/1".to_string(),
+        ];
         assert_eq!(link_agreement(&a, &b, 2, 2), 1_000_000);
     }
 

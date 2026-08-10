@@ -20,10 +20,13 @@ impl DecayTable {
         struct File {
             values: Vec<u32>,
         }
-        let f: File = serde_json::from_slice(bytes)
-            .map_err(|e| Error::DecayTable(e.to_string()))?;
+        let f: File =
+            serde_json::from_slice(bytes).map_err(|e| Error::DecayTable(e.to_string()))?;
         if f.values.len() != (DECAY_MAX_DAYS + 1) as usize {
-            return Err(Error::DecayTable(format!("expected 1826 values, got {}", f.values.len())));
+            return Err(Error::DecayTable(format!(
+                "expected 1826 values, got {}",
+                f.values.len()
+            )));
         }
         Ok(DecayTable(f.values))
     }
