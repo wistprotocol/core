@@ -370,3 +370,23 @@ fn manifest_anchored_to_block() {
         wist_core::block::block_hash(&block["header"]).unwrap()
     );
 }
+
+#[test]
+fn wist4_link_agreement_vector() {
+    let v = read_json("vectors/wist4/link-agreement.json");
+    for case in v["cases"].as_array().unwrap() {
+        let declared: Vec<String> = case["declared_urls"]
+            .as_array().unwrap().iter()
+            .map(|u| u.as_str().unwrap().to_string()).collect();
+        let observed: Vec<String> = case["observed_urls"]
+            .as_array().unwrap().iter()
+            .map(|u| u.as_str().unwrap().to_string()).collect();
+        let got = wist_core::agreement::link_agreement(
+            &declared,
+            &observed,
+            case["declared_total"].as_u64().unwrap(),
+            case["observed_total"].as_u64().unwrap(),
+        );
+        assert_eq!(got, case["link_agreement"].as_u64().unwrap(), "case {}", case["label"]);
+    }
+}
