@@ -1,0 +1,18 @@
+[package]
+name = "wist-bench"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "WIST-4 audit sampling simulation and cost benchmarks"
+publish = false
+
+[dependencies]
+wist-core = { path = "../wist-core" }
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
