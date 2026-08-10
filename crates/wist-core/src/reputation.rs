@@ -64,7 +64,10 @@ pub fn whole_days(seconds_x: i64, seconds_y: i64) -> Result<u64, Error> {
     if seconds_y < seconds_x {
         return Err(Error::Reputation("whole_days: y precedes x".into()));
     }
-    Ok(((seconds_y - seconds_x) / 86_400) as u64)
+    let diff = seconds_y
+        .checked_sub(seconds_x)
+        .ok_or_else(|| Error::Reputation("whole_days: overflow".into()))?;
+    Ok((diff / 86_400) as u64)
 }
 
 pub fn base_u(a_days: u64) -> u64 {
@@ -81,7 +84,7 @@ pub fn penalty_n(confirmed: &[(u8, u64)], table: &DecayTable) -> u128 {
 pub fn reputation_formula_u(base_u: u64, c: u64, penalty_n: u128) -> u64 {
     let c1 = (c.min(C_CAP) + 1) as u128;
     let numerator = base_u as u128 * c1 * DECAY_SCALE;
-    let denominator = c1 * DECAY_SCALE + PENALTY_WEIGHT.saturating_mul(penalty_n);
+    let denominator = (c1 * DECAY_SCALE).saturating_add(PENALTY_WEIGHT.saturating_mul(penalty_n));
     ((numerator / denominator).min(MICRO_SCALE as u128)) as u64
 }
 
@@ -98,7 +101,8 @@ pub fn apply_provisional_cap(rep_u: u64, a_days: u64, c: u64) -> u64 {
 }
 
 pub fn quota_q(reputation_u: u64) -> u64 {
-    QUOTA_BASE + ((QUOTA_SLOPE * reputation_u) / MICRO_SCALE)
+    let rep = reputation_u.min(MICRO_SCALE);
+    QUOTA_BASE + ((QUOTA_SLOPE * rep) / MICRO_SCALE)
 }
 
 pub fn next_block_eligible(reputation_u: u64) -> bool {
@@ -149,6 +153,12 @@ mod tests {
         assert_eq!(apply_provisional_cap(135_753, 29, 10), 100_000);
         assert_eq!(apply_provisional_cap(76_717, 29, 10), 76_717);
         assert_eq!(apply_provisional_cap(135_753, 30, 10), 135_753);
+    }
+
+    #[test]
+    fn inclusion_latency_threshold_boundary() {
+        assert!(!next_block_eligible(499_999));
+        assert!(next_block_eligible(500_000));
     }
 
     #[test]
