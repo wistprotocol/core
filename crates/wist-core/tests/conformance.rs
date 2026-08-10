@@ -426,3 +426,58 @@ fn wist4_decay_table_vendored_and_normative() {
     tampered[n / 2] ^= 1;
     assert!(wist_core::reputation::DecayTable::from_bytes(&tampered).is_err());
 }
+
+#[test]
+fn wist4_reputation_vectors() {
+    let v = read_json("vectors/wist4/reputation.json");
+    let table = wist_core::reputation::DecayTable::builtin();
+    let mut cases: Vec<&serde_json::Value> = vec![&v["worked_example"]];
+    cases.extend(v["boundary"].as_array().unwrap().iter());
+    for case in cases {
+        let label = case["label"].as_str().unwrap();
+        let a = case["A"].as_u64().unwrap();
+        let c = case["C"].as_u64().unwrap();
+        let base = wist_core::reputation::base_u(a);
+        assert_eq!(base, case["base_u"].as_u64().unwrap(), "{label} base_u");
+        let confirmed: Vec<(u8, u64)> = case["inconsistencies"].as_array().unwrap().iter()
+            .map(|i| {
+                assert_eq!(
+                    table.decay(i["t_days"].as_u64().unwrap()),
+                    i["decay"].as_u64().unwrap(),
+                    "{label} decay"
+                );
+                (i["severity"].as_u64().unwrap() as u8, i["t_days"].as_u64().unwrap())
+            })
+            .collect();
+        let pen = wist_core::reputation::penalty_n(&confirmed, table);
+        assert_eq!(pen, case["penalty_n"].as_u64().unwrap() as u128, "{label} penalty_n");
+        let c1 = (c.min(500) + 1) as u128;
+        assert_eq!(base as u128 * c1 * 1_000_000_000, case["numerator"].as_u64().unwrap() as u128, "{label} numerator");
+        assert_eq!(c1 * 1_000_000_000 + 5 * pen, case["denominator"].as_u64().unwrap() as u128, "{label} denominator");
+        let f = wist_core::reputation::reputation_formula_u(base, c, pen);
+        assert_eq!(f, case["formula_u"].as_u64().unwrap(), "{label} formula_u");
+        assert_eq!(
+            wist_core::reputation::is_provisional(a, c),
+            case["provisional"].as_bool().unwrap(),
+            "{label} provisional"
+        );
+        let rep = wist_core::reputation::apply_provisional_cap(f, a, c);
+        assert_eq!(rep, case["reputation_u"].as_u64().unwrap(), "{label} reputation_u");
+        assert_eq!(wist_core::reputation::quota_q(rep), case["Q"].as_u64().unwrap(), "{label} Q");
+    }
+}
+
+#[test]
+fn wist4_reputation_worked_example_day_counts() {
+    let v = read_json("vectors/wist4/reputation.json");
+    let s = &v["worked_example"]["sealed_at"];
+    assert_eq!(s["first_delta_block"].as_str().unwrap(), "2026-08-02T13:00:00Z");
+    assert_eq!(s["confirming_block"].as_str().unwrap(), "2027-08-07T17:00:00Z");
+    assert_eq!(s["block_n"].as_str().unwrap(), "2027-09-06T18:00:00Z");
+    const FIRST_DELTA: i64 = 1_785_675_600;
+    const CONFIRMING: i64 = 1_817_658_000;
+    const BLOCK_N: i64 = 1_820_253_600;
+    assert_eq!(wist_core::reputation::whole_days(FIRST_DELTA, BLOCK_N).unwrap(), 400);
+    assert_eq!(wist_core::reputation::whole_days(CONFIRMING, BLOCK_N).unwrap(), 30);
+    assert!(wist_core::reputation::whole_days(BLOCK_N, CONFIRMING).is_err());
+}
