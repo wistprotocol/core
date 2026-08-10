@@ -16,4 +16,6 @@ pub enum Error {
     Block(String),
     #[error("snapshot: {0}")]
     Snapshot(String),
+    #[error("decay table: {0}")]
+    DecayTable(String),
 }

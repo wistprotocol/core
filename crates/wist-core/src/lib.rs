@@ -16,5 +16,6 @@ pub mod extract;
 pub mod jcs;
 pub mod merkle;
 pub mod objects;
+pub mod reputation;
 pub mod snapshot;
 pub use error::Error;
