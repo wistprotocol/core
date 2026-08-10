@@ -49,7 +49,9 @@ fn encode_to_curve(pk: &[u8; 32], alpha: &[u8]) -> Result<(EdwardsPoint, [u8; 32
             }
         }
     }
-    Err(Error::Vrf("encode_to_curve: no valid point in 256 attempts".into()))
+    Err(Error::Vrf(
+        "encode_to_curve: no valid point in 256 attempts".into(),
+    ))
 }
 
 fn challenge(points: [&[u8; 32]; 5]) -> Scalar {
@@ -118,7 +120,11 @@ pub fn proof_to_hash(pi: &[u8; PROOF_LEN]) -> Result<[u8; OUTPUT_LEN], Error> {
     Ok(h.finalize().into())
 }
 
-pub fn verify(pk: &[u8; 32], alpha: &[u8], pi: &[u8; PROOF_LEN]) -> Result<[u8; OUTPUT_LEN], Error> {
+pub fn verify(
+    pk: &[u8; 32],
+    alpha: &[u8],
+    pi: &[u8; PROOF_LEN],
+) -> Result<[u8; OUTPUT_LEN], Error> {
     let y = CompressedEdwardsY(*pk)
         .decompress()
         .ok_or_else(|| Error::Vrf("pk: invalid point".into()))?;
@@ -246,7 +252,10 @@ mod tests {
         let pi = prove(&hx32(tv.sk), &alpha).unwrap();
         let mut identity_pk = [0u8; 32];
         identity_pk[0] = 1;
-        assert!(matches!(verify(&identity_pk, &alpha, &pi), Err(Error::Vrf(_))));
+        assert!(matches!(
+            verify(&identity_pk, &alpha, &pi),
+            Err(Error::Vrf(_))
+        ));
     }
 
     proptest::proptest! {

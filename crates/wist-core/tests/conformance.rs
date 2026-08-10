@@ -376,18 +376,29 @@ fn wist4_link_agreement_vector() {
     let v = read_json("vectors/wist4/link-agreement.json");
     for case in v["cases"].as_array().unwrap() {
         let declared: Vec<String> = case["declared_urls"]
-            .as_array().unwrap().iter()
-            .map(|u| u.as_str().unwrap().to_string()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u.as_str().unwrap().to_string())
+            .collect();
         let observed: Vec<String> = case["observed_urls"]
-            .as_array().unwrap().iter()
-            .map(|u| u.as_str().unwrap().to_string()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u.as_str().unwrap().to_string())
+            .collect();
         let got = wist_core::agreement::link_agreement(
             &declared,
             &observed,
             case["declared_total"].as_u64().unwrap(),
             case["observed_total"].as_u64().unwrap(),
         );
-        assert_eq!(got, case["link_agreement"].as_u64().unwrap(), "case {}", case["label"]);
+        assert_eq!(
+            got,
+            case["link_agreement"].as_u64().unwrap(),
+            "case {}",
+            case["label"]
+        );
     }
 }
 
@@ -417,7 +428,10 @@ fn wist4_decay_table_vendored_and_normative() {
     assert_eq!(t.decay(1826), 0);
     assert_eq!(t.decay(u64::MAX), 0);
     for day in 1..=1825u64 {
-        assert!(t.decay(day) < t.decay(day - 1), "not strictly decreasing at {day}");
+        assert!(
+            t.decay(day) < t.decay(day - 1),
+            "not strictly decreasing at {day}"
+        );
     }
     let b = wist_core::reputation::DecayTable::builtin();
     assert_eq!(b.decay(30), 846_481_724);
@@ -439,21 +453,39 @@ fn wist4_reputation_vectors() {
         let c = case["C"].as_u64().unwrap();
         let base = wist_core::reputation::base_u(a);
         assert_eq!(base, case["base_u"].as_u64().unwrap(), "{label} base_u");
-        let confirmed: Vec<(u8, u64)> = case["inconsistencies"].as_array().unwrap().iter()
+        let confirmed: Vec<(u8, u64)> = case["inconsistencies"]
+            .as_array()
+            .unwrap()
+            .iter()
             .map(|i| {
                 assert_eq!(
                     table.decay(i["t_days"].as_u64().unwrap()),
                     i["decay"].as_u64().unwrap(),
                     "{label} decay"
                 );
-                (i["severity"].as_u64().unwrap() as u8, i["t_days"].as_u64().unwrap())
+                (
+                    i["severity"].as_u64().unwrap() as u8,
+                    i["t_days"].as_u64().unwrap(),
+                )
             })
             .collect();
         let pen = wist_core::reputation::penalty_n(&confirmed, table);
-        assert_eq!(pen, case["penalty_n"].as_u64().unwrap() as u128, "{label} penalty_n");
+        assert_eq!(
+            pen,
+            case["penalty_n"].as_u64().unwrap() as u128,
+            "{label} penalty_n"
+        );
         let c1 = (c.min(500) + 1) as u128;
-        assert_eq!(base as u128 * c1 * 1_000_000_000, case["numerator"].as_u64().unwrap() as u128, "{label} numerator");
-        assert_eq!(c1 * 1_000_000_000 + 5 * pen, case["denominator"].as_u64().unwrap() as u128, "{label} denominator");
+        assert_eq!(
+            base as u128 * c1 * 1_000_000_000,
+            case["numerator"].as_u64().unwrap() as u128,
+            "{label} numerator"
+        );
+        assert_eq!(
+            c1 * 1_000_000_000 + 5 * pen,
+            case["denominator"].as_u64().unwrap() as u128,
+            "{label} denominator"
+        );
         let f = wist_core::reputation::reputation_formula_u(base, c, pen);
         assert_eq!(f, case["formula_u"].as_u64().unwrap(), "{label} formula_u");
         assert_eq!(
@@ -462,8 +494,16 @@ fn wist4_reputation_vectors() {
             "{label} provisional"
         );
         let rep = wist_core::reputation::apply_provisional_cap(f, a, c);
-        assert_eq!(rep, case["reputation_u"].as_u64().unwrap(), "{label} reputation_u");
-        assert_eq!(wist_core::reputation::quota_q(rep), case["Q"].as_u64().unwrap(), "{label} Q");
+        assert_eq!(
+            rep,
+            case["reputation_u"].as_u64().unwrap(),
+            "{label} reputation_u"
+        );
+        assert_eq!(
+            wist_core::reputation::quota_q(rep),
+            case["Q"].as_u64().unwrap(),
+            "{label} Q"
+        );
     }
 }
 
@@ -471,14 +511,26 @@ fn wist4_reputation_vectors() {
 fn wist4_reputation_worked_example_day_counts() {
     let v = read_json("vectors/wist4/reputation.json");
     let s = &v["worked_example"]["sealed_at"];
-    assert_eq!(s["first_delta_block"].as_str().unwrap(), "2026-08-02T13:00:00Z");
-    assert_eq!(s["confirming_block"].as_str().unwrap(), "2027-08-07T17:00:00Z");
+    assert_eq!(
+        s["first_delta_block"].as_str().unwrap(),
+        "2026-08-02T13:00:00Z"
+    );
+    assert_eq!(
+        s["confirming_block"].as_str().unwrap(),
+        "2027-08-07T17:00:00Z"
+    );
     assert_eq!(s["block_n"].as_str().unwrap(), "2027-09-06T18:00:00Z");
     const FIRST_DELTA: i64 = 1_785_675_600;
     const CONFIRMING: i64 = 1_817_658_000;
     const BLOCK_N: i64 = 1_820_253_600;
-    assert_eq!(wist_core::reputation::whole_days(FIRST_DELTA, BLOCK_N).unwrap(), 400);
-    assert_eq!(wist_core::reputation::whole_days(CONFIRMING, BLOCK_N).unwrap(), 30);
+    assert_eq!(
+        wist_core::reputation::whole_days(FIRST_DELTA, BLOCK_N).unwrap(),
+        400
+    );
+    assert_eq!(
+        wist_core::reputation::whole_days(CONFIRMING, BLOCK_N).unwrap(),
+        30
+    );
     assert!(wist_core::reputation::whole_days(BLOCK_N, CONFIRMING).is_err());
 }
 
@@ -487,25 +539,45 @@ fn wist4_sampling_vector() {
     let v = read_json("vectors/wist4/sampling.json");
     let raw = std::fs::read_to_string(spec_dir().join("vectors/wist4/sampling.json")).unwrap();
     let pk: [u8; 32] = wist_core::crypto::b64u_decode(v["auditor_public_key"].as_str().unwrap())
-        .unwrap().try_into().unwrap();
+        .unwrap()
+        .try_into()
+        .unwrap();
     let alpha =
         wist_core::sampling::alpha_from_block_hash(v["block_hash"].as_str().unwrap()).unwrap();
-    assert_eq!(wist_core::crypto::hex_encode(&alpha), v["alpha_hex"].as_str().unwrap());
+    assert_eq!(
+        wist_core::crypto::hex_encode(&alpha),
+        v["alpha_hex"].as_str().unwrap()
+    );
     let pi: [u8; 80] = wist_core::crypto::hex_decode(v["vrf_proof_hex"].as_str().unwrap())
-        .unwrap().try_into().unwrap();
+        .unwrap()
+        .try_into()
+        .unwrap();
     let beta = wist_core::vrf::verify(&pk, &alpha, &pi).unwrap();
-    assert_eq!(wist_core::crypto::hex_encode(&beta), v["beta_hex"].as_str().unwrap());
+    assert_eq!(
+        wist_core::crypto::hex_encode(&beta),
+        v["beta_hex"].as_str().unwrap()
+    );
     for row in v["selection"].as_array().unwrap() {
         let label = row["label"].as_str().unwrap();
         let d = wist_core::sampling::draw(&beta, row["delta_id"].as_str().unwrap());
-        assert_eq!(format!("{d:016x}"), row["draw_first8_hex"].as_str().unwrap(), "{label}");
+        assert_eq!(
+            format!("{d:016x}"),
+            row["draw_first8_hex"].as_str().unwrap(),
+            "{label}"
+        );
         assert_eq!(d, row["D"].as_u64().unwrap(), "{label}");
         let p = wist_core::sampling::p_1e7(row["reputation_u"].as_u64().unwrap(), false);
         assert_eq!(p, row["p_1e7"].as_u64().unwrap(), "{label}");
         let lhs = d as u128 * 10_000_000;
         let rhs = (p as u128) << 64;
-        assert!(raw.contains(&format!("\"lhs\": {lhs}")), "{label} lhs {lhs} not in vector");
-        assert!(raw.contains(&format!("\"rhs\": {rhs}")), "{label} rhs {rhs} not in vector");
+        assert!(
+            raw.contains(&format!("\"lhs\": {lhs}")),
+            "{label} lhs {lhs} not in vector"
+        );
+        assert!(
+            raw.contains(&format!("\"rhs\": {rhs}")),
+            "{label} rhs {rhs} not in vector"
+        );
         assert_eq!(
             wist_core::sampling::selected(d, p),
             row["selected"].as_bool().unwrap(),

@@ -1,9 +1,9 @@
 [package]
 name = "wist-core"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "WIST protocol primitives: JCS, Ed25519 envelopes, Merkle trees, block verification"
+description = "WIST protocol primitives: JCS, Ed25519 envelopes, Merkle trees, block verification, WIST-4 audit math"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
