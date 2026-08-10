@@ -405,3 +405,24 @@ fn wist4_audit_commitments_vector() {
         assert!(wist_core::delta::verify_commitment_bytes(salt, b"tampered", expected).is_err());
     }
 }
+
+#[test]
+fn wist4_decay_table_vendored_and_normative() {
+    let spec_bytes = std::fs::read(spec_dir().join("vectors/wist4/decay-table.json")).unwrap();
+    assert_eq!(spec_bytes, wist_core::reputation::DECAY_TABLE_BYTES);
+    let t = wist_core::reputation::DecayTable::from_bytes(&spec_bytes).unwrap();
+    assert_eq!(t.decay(0), 1_000_000_000);
+    assert_eq!(t.decay(30), 846_481_724);
+    assert_eq!(t.decay(1825), 39_512);
+    assert_eq!(t.decay(1826), 0);
+    assert_eq!(t.decay(u64::MAX), 0);
+    for day in 1..=1825u64 {
+        assert!(t.decay(day) < t.decay(day - 1), "not strictly decreasing at {day}");
+    }
+    let b = wist_core::reputation::DecayTable::builtin();
+    assert_eq!(b.decay(30), 846_481_724);
+    let mut tampered = spec_bytes.clone();
+    let n = tampered.len();
+    tampered[n / 2] ^= 1;
+    assert!(wist_core::reputation::DecayTable::from_bytes(&tampered).is_err());
+}
