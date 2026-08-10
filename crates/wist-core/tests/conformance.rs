@@ -481,3 +481,35 @@ fn wist4_reputation_worked_example_day_counts() {
     assert_eq!(wist_core::reputation::whole_days(CONFIRMING, BLOCK_N).unwrap(), 30);
     assert!(wist_core::reputation::whole_days(BLOCK_N, CONFIRMING).is_err());
 }
+
+#[test]
+fn wist4_sampling_vector() {
+    let v = read_json("vectors/wist4/sampling.json");
+    let raw = std::fs::read_to_string(spec_dir().join("vectors/wist4/sampling.json")).unwrap();
+    let pk: [u8; 32] = wist_core::crypto::b64u_decode(v["auditor_public_key"].as_str().unwrap())
+        .unwrap().try_into().unwrap();
+    let alpha =
+        wist_core::sampling::alpha_from_block_hash(v["block_hash"].as_str().unwrap()).unwrap();
+    assert_eq!(wist_core::crypto::hex_encode(&alpha), v["alpha_hex"].as_str().unwrap());
+    let pi: [u8; 80] = wist_core::crypto::hex_decode(v["vrf_proof_hex"].as_str().unwrap())
+        .unwrap().try_into().unwrap();
+    let beta = wist_core::vrf::verify(&pk, &alpha, &pi).unwrap();
+    assert_eq!(wist_core::crypto::hex_encode(&beta), v["beta_hex"].as_str().unwrap());
+    for row in v["selection"].as_array().unwrap() {
+        let label = row["label"].as_str().unwrap();
+        let d = wist_core::sampling::draw(&beta, row["delta_id"].as_str().unwrap());
+        assert_eq!(format!("{d:016x}"), row["draw_first8_hex"].as_str().unwrap(), "{label}");
+        assert_eq!(d, row["D"].as_u64().unwrap(), "{label}");
+        let p = wist_core::sampling::p_1e7(row["reputation_u"].as_u64().unwrap(), false);
+        assert_eq!(p, row["p_1e7"].as_u64().unwrap(), "{label}");
+        let lhs = d as u128 * 10_000_000;
+        let rhs = (p as u128) << 64;
+        assert!(raw.contains(&format!("\"lhs\": {lhs}")), "{label} lhs {lhs} not in vector");
+        assert!(raw.contains(&format!("\"rhs\": {rhs}")), "{label} rhs {rhs} not in vector");
+        assert_eq!(
+            wist_core::sampling::selected(d, p),
+            row["selected"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
