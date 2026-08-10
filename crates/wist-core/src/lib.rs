@@ -6,6 +6,7 @@
 //! vectors in `tests/conformance.rs`.
 #![forbid(unsafe_code)]
 
+pub mod agreement;
 pub mod block;
 pub mod crypto;
 pub mod delta;
