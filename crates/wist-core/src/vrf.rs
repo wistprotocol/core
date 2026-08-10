@@ -208,4 +208,57 @@ mod tests {
             assert_eq!(proof_to_hash(&pi).unwrap(), beta);
         }
     }
+
+    #[test]
+    fn verify_rejects_tampered_inputs() {
+        let tv = &TVS[0];
+        let sk = hx32(tv.sk);
+        let pk = hx32(tv.pk);
+        let alpha = hx(tv.alpha);
+        let pi = prove(&sk, &alpha).unwrap();
+
+        let mut bad = pi;
+        bad[0] ^= 1;
+        assert!(verify(&pk, &alpha, &bad).is_err());
+
+        let mut bad = pi;
+        bad[40] ^= 1;
+        assert!(verify(&pk, &alpha, &bad).is_err());
+
+        assert!(verify(&hx32(TVS[1].pk), &alpha, &pi).is_err());
+        assert!(verify(&pk, b"different alpha", &pi).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_non_canonical_s() {
+        let tv = &TVS[0];
+        let pk = hx32(tv.pk);
+        let alpha = hx(tv.alpha);
+        let mut pi = prove(&hx32(tv.sk), &alpha).unwrap();
+        pi[48..].copy_from_slice(&[0xff; 32]);
+        assert!(matches!(verify(&pk, &alpha, &pi), Err(Error::Vrf(_))));
+    }
+
+    #[test]
+    fn verify_rejects_small_order_pk() {
+        let tv = &TVS[0];
+        let alpha = hx(tv.alpha);
+        let pi = prove(&hx32(tv.sk), &alpha).unwrap();
+        let mut identity_pk = [0u8; 32];
+        identity_pk[0] = 1;
+        assert!(matches!(verify(&identity_pk, &alpha, &pi), Err(Error::Vrf(_))));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn prove_verify_roundtrip(
+            seed in proptest::prelude::any::<[u8; 32]>(),
+            alpha in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            let pi = prove(&seed, &alpha).unwrap();
+            let pk = public_key(&seed);
+            let beta = verify(&pk, &alpha, &pi).unwrap();
+            proptest::prop_assert_eq!(beta, proof_to_hash(&pi).unwrap());
+        }
+    }
 }
