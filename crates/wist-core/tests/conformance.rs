@@ -390,3 +390,18 @@ fn wist4_link_agreement_vector() {
         assert_eq!(got, case["link_agreement"].as_u64().unwrap(), "case {}", case["label"]);
     }
 }
+
+#[test]
+fn wist4_audit_commitments_vector() {
+    let v = read_json("vectors/wist4/audit-commitments.json");
+    let payload = read_json("examples/payload.json");
+    let salt = payload["salt"].as_str().unwrap();
+    for (name, c) in v["commitments"].as_object().unwrap() {
+        let msg = wist_core::crypto::hex_decode(c["message_hex"].as_str().unwrap()).unwrap();
+        let expected = c["value"].as_str().unwrap();
+        let got = wist_core::delta::make_commitment_bytes(salt, &msg).unwrap();
+        assert_eq!(got, expected, "commitment {name}");
+        wist_core::delta::verify_commitment_bytes(salt, &msg, expected).unwrap();
+        assert!(wist_core::delta::verify_commitment_bytes(salt, b"tampered", expected).is_err());
+    }
+}
