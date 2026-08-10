@@ -504,6 +504,11 @@ fn wist4_reputation_vectors() {
             case["Q"].as_u64().unwrap(),
             "{label} Q"
         );
+        assert_eq!(
+            wist_core::sampling::p_1e7(rep, false),
+            case["p_1e7"].as_u64().unwrap(),
+            "{label} p_1e7"
+        );
     }
 }
 
