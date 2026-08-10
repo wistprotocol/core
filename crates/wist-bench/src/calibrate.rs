@@ -14,7 +14,7 @@ pub fn measure(dir: &Path) -> Result<Calibration, String> {
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json") {
+        if path.is_file() && path.extension().is_some_and(|e| e == "json") {
             sizes.push(entry.metadata().map_err(|e| e.to_string())?.len());
         }
     }
@@ -52,9 +52,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_dir_is_an_error() {
+    fn missing_dir_is_an_error() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         assert!(measure(&dir.join("no-such")).is_err());
+    }
+
+    #[test]
+    fn empty_payloads_dir_is_an_error() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/empty-payloads");
+        assert!(measure(&dir).is_err());
+    }
+
+    #[test]
+    fn ignores_directories_with_json_extension() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dir-trap");
+        let c = measure(&dir).unwrap();
+        assert_eq!(c.count, 1);
+        assert_eq!(c.payload_p50, 500);
+        assert_eq!(c.payload_max, 500);
     }
 
     #[test]
