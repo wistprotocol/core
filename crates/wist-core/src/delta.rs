@@ -26,8 +26,8 @@ fn commitment_mac(salt_b64u: &str) -> Result<Hmac<Sha256>, Error> {
 }
 
 pub fn verify_commitment(salt_b64u: &str, content: &Value, declared: &str) -> Result<(), Error> {
-    let canonical = jcs::canonicalize(content)?;
     let mut mac = commitment_mac(salt_b64u)?;
+    let canonical = jcs::canonicalize(content)?;
     mac.update(&canonical);
     let got = format!("hmac-sha256:{}", hex_encode(&mac.finalize().into_bytes()));
     if got != declared {
@@ -37,8 +37,8 @@ pub fn verify_commitment(salt_b64u: &str, content: &Value, declared: &str) -> Re
 }
 
 pub fn make_commitment(salt_b64u: &str, content: &Value) -> Result<String, Error> {
-    let canonical = jcs::canonicalize(content)?;
     let mut mac = commitment_mac(salt_b64u)?;
+    let canonical = jcs::canonicalize(content)?;
     mac.update(&canonical);
     Ok(format!(
         "hmac-sha256:{}",
@@ -86,5 +86,16 @@ mod tests {
         let c = make_commitment_bytes(&salt, b"octets").unwrap();
         verify_commitment_bytes(&salt, b"octets", &c).unwrap();
         assert!(verify_commitment_bytes(&other, b"octets", &c).is_err());
+    }
+
+    #[test]
+    fn short_salt_error_precedes_jcs_error() {
+        let short_salt = crate::crypto::b64u_encode(&[9u8; 8]);
+        let bad_content = serde_json::json!({"f": 1.5});
+        let err = make_commitment(&short_salt, &bad_content).unwrap_err();
+        assert!(
+            err.to_string().contains("salt"),
+            "expected salt error before JCS error, got: {err}"
+        );
     }
 }
