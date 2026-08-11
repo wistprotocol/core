@@ -190,12 +190,10 @@ pub fn render(inputs: &ReportInputs) -> String {
     out.push_str(
         "Every figure below is one Auditor's daily load: `cost::compute` is fed the mean selected-Delta count over the auditors × days matrix, not a roster total.\n\n",
     );
-    let variants: [(&str, u64); 2] = [
-        ("Full page", inputs.params.page_bytes_full),
-        ("HTML only", inputs.params.page_bytes_html),
-    ];
-    for (label, page_bytes) in variants {
-        out.push_str(&format!("### {label}\n\n"));
+    out.push_str(
+        "Each fetch is one HTML document plus one reference Payload. An Auditor never renders a page or retrieves its subresources: WIST-4 §5 defines the similarity dimension over WIST-2 §12's extraction from a fetched HTML representation, rules any non-HTML representation `not_auditable`, and sends a script-shell whose text exists only after execution to the same verdict through the observed-text mass guard. Stylesheets, scripts, fonts and images are therefore outside what an audit fetches, and full-page transfer weight is not the applicable figure.\n\n",
+    );
+    {
         let rows: Vec<Vec<String>> = inputs
             .scenarios
             .iter()
@@ -205,7 +203,7 @@ pub fn render(inputs: &ReportInputs) -> String {
                     r.mean_per_day,
                     sc,
                     &inputs.params,
-                    page_bytes,
+                    inputs.params.page_bytes,
                     &inputs.timing,
                 );
                 vec![
@@ -247,9 +245,8 @@ pub fn render(inputs: &ReportInputs) -> String {
 
     out.push_str("## Assumptions and sources\n\n");
     out.push_str(&format!(
-        "- page weights: full {} B (`--page-bytes`), HTML {} B (`--html-bytes`) — HTTP Archive Web Almanac (median page weight; retrieved 2026-08)\n",
-        human_int(inputs.params.page_bytes_full as f64),
-        human_int(inputs.params.page_bytes_html as f64)
+        "- page bytes: {} B (`--page-bytes`) — HTTP Archive Web Almanac (median HTML document transfer size; retrieved 2026-08). The HTML document is the whole of what an audit fetches from the URL (WIST-4 §5, WIST-2 §12); subresources are not fetched\n",
+        human_int(inputs.params.page_bytes as f64)
     ));
     out.push_str(
         "- churn: assumed; published web-change studies report 0.1–8 %/day depending on cohort\n",

@@ -4,8 +4,7 @@ use std::time::Instant;
 use wist_core::{sampling, vrf};
 
 pub struct CostParams {
-    pub page_bytes_full: u64,
-    pub page_bytes_html: u64,
+    pub page_bytes: u64,
     pub payload_bytes: u64,
     pub inconsistency_bp: u32,
     pub warc_retention_days: u32,
@@ -18,8 +17,7 @@ pub struct CostParams {
 impl Default for CostParams {
     fn default() -> Self {
         CostParams {
-            page_bytes_full: 2_200_000,
-            page_bytes_html: 31_000,
+            page_bytes: 31_000,
             payload_bytes: 38_944,
             inconsistency_bp: 10,
             warc_retention_days: 90,
@@ -135,11 +133,11 @@ mod tests {
             prove_ns: 100_000,
             draw_ns: 300,
         };
-        let c = compute(940.0, &sc, &params, params.page_bytes_full, &timing);
+        let c = compute(940.0, &sc, &params, params.page_bytes, &timing);
         assert!((c.fetches_per_day - 1880.0).abs() < 1e-9);
-        let expect_gb = 940.0 * (2_200_000.0 + 38_944.0) / 1e9;
+        let expect_gb = 940.0 * (31_000.0 + 38_944.0) / 1e9;
         assert!((c.gb_per_day - expect_gb).abs() < 1e-9);
-        let wd = 940.0 * 0.001 * (2_200_000.0 + 38_944.0) / 1e9;
+        let wd = 940.0 * 0.001 * (31_000.0 + 38_944.0) / 1e9;
         assert!((c.warc_gb_steady - wd * 90.0).abs() < 1e-9);
         assert_eq!(c.warc_gb_at[0].0, 30);
         assert_eq!(c.warc_gb_at[1].0, 90);

@@ -20,8 +20,6 @@ enum Command {
         #[arg(long)]
         page_bytes: Option<u64>,
         #[arg(long)]
-        html_bytes: Option<u64>,
-        #[arg(long)]
         inconsistency_bp: Option<u32>,
         #[arg(long)]
         transfer_usd_gb: Option<f64>,
@@ -69,7 +67,6 @@ fn main() {
         Command::Report {
             calibration,
             page_bytes,
-            html_bytes,
             inconsistency_bp,
             transfer_usd_gb,
             storage_usd_gb_month,
@@ -83,10 +80,7 @@ fn main() {
         } => (|| {
             let mut params = wist_bench::cost::CostParams::default();
             if let Some(v) = page_bytes {
-                params.page_bytes_full = v;
-            }
-            if let Some(v) = html_bytes {
-                params.page_bytes_html = v;
+                params.page_bytes = v;
             }
             if let Some(v) = inconsistency_bp {
                 params.inconsistency_bp = v;
