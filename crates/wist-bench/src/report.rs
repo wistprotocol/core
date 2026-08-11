@@ -11,21 +11,28 @@ pub struct ReportInputs {
     pub command_line: String,
 }
 
-fn f2(v: f64) -> String {
-    format!("{v:.2}")
-}
-
-fn human_int(v: f64) -> String {
-    let n = v.round() as i64;
-    let s = n.to_string();
+fn group_digits(digits: &str) -> String {
     let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(' ');
         }
         out.push(c);
     }
     out
+}
+
+fn f2(v: f64) -> String {
+    let s = format!("{v:.2}");
+    let (sign, rest) = s.strip_prefix('-').map_or(("", s.as_str()), |r| ("-", r));
+    let (int_part, frac_part) = rest.split_once('.').unwrap_or((rest, "00"));
+    format!("{sign}{}.{frac_part}", group_digits(int_part))
+}
+
+fn human_int(v: f64) -> String {
+    let n = v.round() as i64;
+    let sign = if n < 0 { "-" } else { "" };
+    format!("{sign}{}", group_digits(&n.unsigned_abs().to_string()))
 }
 
 fn band_name(b: Band) -> &'static str {
@@ -243,7 +250,7 @@ pub fn render(inputs: &ReportInputs) -> String {
         )),
     }
     out.push_str(&format!(
-        "- inconsistency rate: {} bp (`--inconsistency-bp`) — assumed\n",
+        "- inconsistency rate: {} bp (`--inconsistency-bp`) — assumed; also sets the fraction of fetched bytes assumed archived as WARC evidence, since only Records with an `inconsistent` or `link_inconsistent` verdict retain their WARC capture (WIST-4 §5)\n",
         inputs.params.inconsistency_bp
     ));
     out.push_str(&format!(
