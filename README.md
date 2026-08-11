@@ -40,3 +40,11 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 Protocol definitions and conformance vectors live in the sibling
 [spec repo](../spec) (WIST-1 delta format, WIST-2 site publication, WIST-3
 logbook & distribution, WIST-4 audit math).
+
+## wist-bench
+
+`crates/wist-bench` simulates WIST-4 §4 audit sampling with this crate's
+normative arithmetic at three scenario tiers and derives fetch-volume,
+bandwidth, storage, and compute figures for an Auditor.
+`docs/audit-cost-report.md` is its committed output; the exact command to
+regenerate it is recorded in the report header.
