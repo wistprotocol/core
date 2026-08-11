@@ -37,24 +37,24 @@ pub struct Timing {
     pub draw_ns: u64,
 }
 
-pub fn measure_timing() -> Timing {
+pub fn measure_timing(proves: u32, draws: u64) -> Timing {
     let sk = [7u8; 32];
     let alpha = [9u8; 32];
     let pi = vrf::prove(&sk, &alpha).unwrap();
     let beta = vrf::proof_to_hash(&pi).unwrap();
     let start = Instant::now();
-    for _ in 0..200 {
+    for _ in 0..proves {
         let pi = vrf::prove(std::hint::black_box(&sk), std::hint::black_box(&alpha)).unwrap();
         std::hint::black_box(vrf::proof_to_hash(&pi).unwrap());
     }
-    let prove_ns = (start.elapsed().as_nanos() / 200) as u64;
+    let prove_ns = (start.elapsed().as_nanos() / proves as u128) as u64;
     let start = Instant::now();
     let mut acc = 0u64;
-    for i in 0..2_000_000u64 {
+    for i in 0..draws {
         let d = sampling::draw(&beta, &format!("sha256:{i:064x}"));
         acc += u64::from(sampling::selected(d, 200_000));
     }
-    let draw_ns = (start.elapsed().as_nanos() / 2_000_000) as u64;
+    let draw_ns = (start.elapsed().as_nanos() / draws as u128) as u64;
     std::hint::black_box(acc);
     Timing {
         prove_ns: prove_ns.max(1),
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn timing_is_positive() {
-        let t = measure_timing();
+        let t = measure_timing(5, 50_000);
         assert!(t.prove_ns > 0);
         assert!(t.draw_ns > 0);
     }
