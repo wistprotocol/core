@@ -44,15 +44,7 @@ Mean/day, Min, Max and Stddev range over the auditors × days observations (each
 
 Every figure below is one Auditor's daily load: `cost::compute` is fed the mean selected-Delta count over the auditors × days matrix, not a roster total.
 
-### Full page
-
-| Tier | Fetches/day | GB/day | Mbps | WARC GB@30d | WARC GB@90d | WARC GB@365d | vCPU-s/day | USD/mo transfer | USD/mo storage | USD/mo CPU | USD/mo requests | USD/mo total |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| small | 1 880 | 2.07 | 0.19 | 0.06 | 0.19 | 0.19 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
-| medium | 141 893 | 156.35 | 14.48 | 4.69 | 14.07 | 14.07 | 0.10 | 0.00 | 0.32 | 0.00 | 0.00 | 0.32 |
-| large | 926 025 | 1 020.38 | 94.48 | 30.61 | 91.83 | 91.83 | 0.47 | 0.00 | 2.11 | 0.00 | 0.00 | 2.11 |
-
-### HTML only
+Each fetch is one HTML document plus one reference Payload. An Auditor never renders a page or retrieves its subresources: WIST-4 §5 defines the similarity dimension over WIST-2 §12's extraction from a fetched HTML representation, rules any non-HTML representation `not_auditable`, and sends a script-shell whose text exists only after execution to the same verdict through the observed-text mass guard. Stylesheets, scripts, fonts and images are therefore outside what an audit fetches, and full-page transfer weight is not the applicable figure.
 
 | Tier | Fetches/day | GB/day | Mbps | WARC GB@30d | WARC GB@90d | WARC GB@365d | vCPU-s/day | USD/mo transfer | USD/mo storage | USD/mo CPU | USD/mo requests | USD/mo total |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -62,7 +54,7 @@ Every figure below is one Auditor's daily load: `cost::compute` is fed the mean 
 
 ## Assumptions and sources
 
-- page weights: full 2 200 000 B (`--page-bytes`), HTML 31 000 B (`--html-bytes`) — HTTP Archive Web Almanac (median page weight; retrieved 2026-08)
+- page bytes: 31 000 B (`--page-bytes`) — HTTP Archive Web Almanac (median HTML document transfer size; retrieved 2026-08). The HTML document is the whole of what an audit fetches from the URL (WIST-4 §5, WIST-2 §12); subresources are not fetched
 - churn: assumed; published web-change studies report 0.1–8 %/day depending on cohort
 - payload bytes: 3 792 (`--calibration`; measured p50 of 15 Publisher-built payload objects; max 41 624, above the WIST-1 §3.6 content-cap sum of 38 944 because a served Payload object carries envelope overhead the content caps do not govern)
 - inconsistency rate: 10 bp (`--inconsistency-bp`) — assumed; also sets the fraction of fetched bytes assumed archived as WARC evidence, since only Records with an `inconsistent` or `link_inconsistent` verdict retain their WARC capture (WIST-4 §5)
