@@ -232,7 +232,7 @@ pub fn render(inputs: &ReportInputs) -> String {
     );
     match &inputs.calibration {
         Some(c) => out.push_str(&format!(
-            "- payload bytes: {} (`--calibration`; measured p50 of {} publisher-built payload objects; max {})\n",
+            "- payload bytes: {} (`--calibration`; measured p50 of {} Publisher-built payload objects; max {})\n",
             human_int(inputs.params.payload_bytes as f64),
             c.count,
             human_int(c.payload_max as f64)
@@ -245,6 +245,10 @@ pub fn render(inputs: &ReportInputs) -> String {
     out.push_str(&format!(
         "- inconsistency rate: {} bp (`--inconsistency-bp`) — assumed\n",
         inputs.params.inconsistency_bp
+    ));
+    out.push_str(&format!(
+        "- WARC retention floor: {} days (`warc_retention_days`, not a report flag) — WIST-4 §5 Parameter Registry default; caps the WARC GB@90d and WARC GB@365d columns at the same value\n",
+        inputs.params.warc_retention_days
     ));
     out.push_str(&format!(
         "- storage price: ${}/GB-month (`--storage-usd-gb-month`) — commodity cloud list prices (retrieved 2026-08)\n",
