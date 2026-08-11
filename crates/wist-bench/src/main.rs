@@ -48,6 +48,18 @@ enum Command {
     },
 }
 
+fn cpu_model() -> String {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn main() {
     let cli = Cli::parse();
     let outcome = match cli.command {
@@ -97,6 +109,7 @@ fn main() {
             if let Some(c) = &calibration {
                 params.payload_bytes = c.payload_p50;
             }
+            let timing_supplied = prove_ns.is_some() && draw_ns.is_some();
             let timing = match (prove_ns, draw_ns) {
                 (Some(prove_ns), Some(draw_ns)) => wist_bench::cost::Timing { prove_ns, draw_ns },
                 _ => wist_bench::cost::measure_timing(200, 2_000_000),
@@ -114,9 +127,10 @@ fn main() {
                     if let Some(v) = &seed {
                         sc.seed = v.clone();
                     }
-                    sc
+                    sc.validate()?;
+                    Ok(sc)
                 })
-                .collect();
+                .collect::<Result<Vec<_>, String>>()?;
             let mut args: Vec<String> = std::env::args().collect();
             if let Some(first) = args.first_mut() {
                 *first = "wist-bench".to_string();
@@ -129,6 +143,8 @@ fn main() {
                     params,
                     calibration,
                     timing,
+                    timing_supplied,
+                    machine: cpu_model(),
                     command_line,
                 })
             );

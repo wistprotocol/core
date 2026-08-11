@@ -62,9 +62,10 @@ fn block_sizes(total: u64, blocks: u32) -> Vec<u64> {
 }
 
 pub fn expected_selected_per_day(sc: &Scenario) -> f64 {
-    band_counts(sc.deltas_per_day(), &sc.mix)
+    block_sizes(sc.deltas_per_day(), sc.blocks_per_day)
         .iter()
-        .map(|(b, n)| *n as f64 * band_p_1e7(*b) as f64 / 1e7)
+        .flat_map(|&n| band_counts(n, &sc.mix))
+        .map(|(b, n)| n as f64 * band_p_1e7(b) as f64 / 1e7)
         .sum()
 }
 
@@ -174,9 +175,32 @@ mod tests {
     #[test]
     fn expectation_formula() {
         let sc = Scenario::tier("small").unwrap();
-        let expect = 20_000.0
-            * (0.9 * band_p_1e7(Band::Mature) as f64 + 0.1 * band_p_1e7(Band::Provisional) as f64)
-            / 1e7;
+        let sizes = block_sizes(sc.deltas_per_day(), sc.blocks_per_day);
+        let mature: u64 = sizes
+            .iter()
+            .map(|&n| {
+                band_counts(n, &sc.mix)
+                    .into_iter()
+                    .find(|(b, _)| *b == Band::Mature)
+                    .unwrap()
+                    .1
+            })
+            .sum();
+        let provisional: u64 = sizes
+            .iter()
+            .map(|&n| {
+                band_counts(n, &sc.mix)
+                    .into_iter()
+                    .find(|(b, _)| *b == Band::Provisional)
+                    .unwrap()
+                    .1
+            })
+            .sum();
+        assert_eq!(mature, 18_008);
+        assert_eq!(provisional, 1_992);
+        let expect = mature as f64 * band_p_1e7(Band::Mature) as f64 / 1e7
+            + provisional as f64 * band_p_1e7(Band::Provisional) as f64 / 1e7;
+        assert!((expect - 937.84).abs() < 1e-6);
         assert!((expected_selected_per_day(&sc) - expect).abs() < 1e-6);
     }
 

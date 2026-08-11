@@ -3,11 +3,33 @@ use wist_core::reputation::PROVISIONAL_CAP_U;
 use wist_core::sampling;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Band {
     Mature,
     Mid,
     Provisional,
     Sanctioned,
+}
+
+impl Band {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Band::Mature => "mature",
+            Band::Mid => "mid",
+            Band::Provisional => "provisional",
+            Band::Sanctioned => "sanctioned",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Band> {
+        match s {
+            "mature" => Some(Band::Mature),
+            "mid" => Some(Band::Mid),
+            "provisional" => Some(Band::Provisional),
+            "sanctioned" => Some(Band::Sanctioned),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
@@ -112,8 +134,15 @@ impl Scenario {
         })
     }
 
+    pub fn checked_deltas_per_day(&self) -> Option<u64> {
+        self.pages
+            .checked_mul(self.churn_bp as u64)
+            .map(|v| v / 10_000)
+    }
+
     pub fn deltas_per_day(&self) -> u64 {
-        self.pages * self.churn_bp as u64 / 10_000
+        self.checked_deltas_per_day()
+            .expect("pages * churn_bp overflows u64; call validate() first")
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -124,7 +153,13 @@ impl Scenario {
         if self.blocks_per_day == 0 || self.days == 0 || self.auditors == 0 {
             return Err("blocks_per_day, days, auditors must be nonzero".into());
         }
-        if self.deltas_per_day() == 0 {
+        let deltas = self.checked_deltas_per_day().ok_or_else(|| {
+            format!(
+                "pages ({}) * churn_bp ({}) overflows u64",
+                self.pages, self.churn_bp
+            )
+        })?;
+        if deltas == 0 {
             return Err("scenario produces zero deltas per day".into());
         }
         Ok(())
@@ -169,5 +204,25 @@ mod tests {
         let mut sc = Scenario::tier("small").unwrap();
         sc.mix[0].share_bp -= 1;
         assert!(sc.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_deltas_per_day_overflow() {
+        let mut sc = Scenario::tier("small").unwrap();
+        sc.pages = u64::MAX;
+        sc.churn_bp = 10_000;
+        assert!(sc.validate().is_err());
+    }
+
+    #[test]
+    fn band_as_str_and_parse_round_trip_and_match_serde() {
+        for b in [Band::Mature, Band::Mid, Band::Provisional, Band::Sanctioned] {
+            assert_eq!(Band::parse(b.as_str()), Some(b));
+            assert_eq!(
+                serde_json::to_string(&b).unwrap(),
+                format!("\"{}\"", b.as_str())
+            );
+        }
+        assert_eq!(Band::parse("nonsense"), None);
     }
 }

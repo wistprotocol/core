@@ -1,4 +1,4 @@
-use crate::scenario::Scenario;
+use crate::scenario::{band_p_1e7, Band, Scenario};
 use serde::Serialize;
 use std::time::Instant;
 use wist_core::{sampling, vrf};
@@ -20,7 +20,7 @@ impl Default for CostParams {
         CostParams {
             page_bytes_full: 2_200_000,
             page_bytes_html: 31_000,
-            payload_bytes: 34_816,
+            payload_bytes: 38_944,
             inconsistency_bp: 10,
             warc_retention_days: 90,
             usd_per_gb_transfer: 0.0,
@@ -48,11 +48,15 @@ pub fn measure_timing(proves: u32, draws: u64) -> Timing {
         std::hint::black_box(vrf::proof_to_hash(&pi).unwrap());
     }
     let prove_ns = (start.elapsed().as_nanos() / proves as u128) as u64;
+    const ID_RING: usize = 256;
+    let ids: Vec<String> = (0..ID_RING).map(|i| format!("sha256:{i:064x}")).collect();
+    let mature_p_1e7 = band_p_1e7(Band::Mature);
     let start = Instant::now();
     let mut acc = 0u64;
     for i in 0..draws {
-        let d = sampling::draw(&beta, &format!("sha256:{i:064x}"));
-        acc += u64::from(sampling::selected(d, 200_000));
+        let id = std::hint::black_box(&ids[(i % ID_RING as u64) as usize]);
+        let d = sampling::draw(&beta, id);
+        acc += u64::from(sampling::selected(d, mature_p_1e7));
     }
     let draw_ns = (start.elapsed().as_nanos() / draws as u128) as u64;
     std::hint::black_box(acc);
@@ -133,16 +137,30 @@ mod tests {
         };
         let c = compute(940.0, &sc, &params, params.page_bytes_full, &timing);
         assert!((c.fetches_per_day - 1880.0).abs() < 1e-9);
-        let expect_gb = 940.0 * (2_200_000.0 + 34_816.0) / 1e9;
+        let expect_gb = 940.0 * (2_200_000.0 + 38_944.0) / 1e9;
         assert!((c.gb_per_day - expect_gb).abs() < 1e-9);
-        let wd = 940.0 * 0.001 * (2_200_000.0 + 34_816.0) / 1e9;
+        let wd = 940.0 * 0.001 * (2_200_000.0 + 38_944.0) / 1e9;
         assert!((c.warc_gb_steady - wd * 90.0).abs() < 1e-9);
         assert_eq!(c.warc_gb_at[0].0, 30);
+        assert_eq!(c.warc_gb_at[1].0, 90);
+        assert!((c.warc_gb_at[1].1 - wd * 90.0).abs() < 1e-9);
         assert!((c.warc_gb_at[2].1 - wd * 90.0).abs() < 1e-9);
         let cpu = (24.0 * 100_000.0 + 20_000.0 * 300.0) / 1e9;
         assert!((c.vcpu_sec_per_day - cpu).abs() < 1e-9);
+        assert!((c.mbps_sustained - expect_gb * 8000.0 / 86_400.0).abs() < 1e-9);
         assert!((c.usd_month_storage - c.warc_gb_steady * 0.023).abs() < 1e-9);
         assert!((c.usd_month_transfer - 0.0).abs() < 1e-12);
+        assert!((c.usd_month_cpu - cpu * 30.0 / 3600.0 * 0.04).abs() < 1e-9);
+        assert!((c.usd_month_requests - 0.0).abs() < 1e-12);
+        assert!(
+            (c.usd_month_total
+                - (c.usd_month_transfer
+                    + c.usd_month_storage
+                    + c.usd_month_cpu
+                    + c.usd_month_requests))
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]

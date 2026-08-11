@@ -1,6 +1,6 @@
 use crate::calibrate::Calibration;
 use crate::cost::{self, CostParams, Timing};
-use crate::scenario::{Band, Scenario};
+use crate::scenario::{band_p_1e7, band_rep_u, Band, Scenario};
 use crate::sim;
 
 pub struct ReportInputs {
@@ -8,6 +8,8 @@ pub struct ReportInputs {
     pub params: CostParams,
     pub calibration: Option<Calibration>,
     pub timing: Timing,
+    pub timing_supplied: bool,
+    pub machine: String,
     pub command_line: String,
 }
 
@@ -35,19 +37,10 @@ fn human_int(v: f64) -> String {
     format!("{sign}{}", group_digits(&n.unsigned_abs().to_string()))
 }
 
-fn band_name(b: Band) -> &'static str {
-    match b {
-        Band::Mature => "mature",
-        Band::Mid => "mid",
-        Band::Provisional => "provisional",
-        Band::Sanctioned => "sanctioned",
-    }
-}
-
 fn mix_str(sc: &Scenario) -> String {
     sc.mix
         .iter()
-        .map(|m| format!("{}:{}", band_name(m.band), m.share_bp))
+        .map(|m| format!("{}:{}", m.band.as_str(), m.share_bp))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -78,12 +71,10 @@ fn md_table(cols: &[&str], rows: &[Vec<String>]) -> String {
 pub fn render(inputs: &ReportInputs) -> String {
     let mut out = String::new();
 
-    let timing_source = if inputs.command_line.contains("--prove-ns")
-        && inputs.command_line.contains("--draw-ns")
-    {
-        "supplied"
+    let timing_desc = if inputs.timing_supplied {
+        format!("supplied; pinned from a measurement on {}", inputs.machine)
     } else {
-        "measured"
+        format!("measured on {}", inputs.machine)
     };
     let seeds = inputs
         .scenarios
@@ -94,22 +85,42 @@ pub fn render(inputs: &ReportInputs) -> String {
 
     out.push_str("# Audit Sampling Volume and Cost Report\n\n");
     out.push_str(&format!(
-        "- wist-bench version: {}\n",
-        env!("CARGO_PKG_VERSION")
+        "- wist-bench version: {}, wist-core version: {}\n",
+        env!("CARGO_PKG_VERSION"),
+        wist_core::VERSION
     ));
     out.push_str(&format!("- seed(s): {seeds}\n"));
     out.push_str(&format!("- rerun: `{}`\n", inputs.command_line));
     out.push_str(&format!(
-        "- timing: prove_ns={}, draw_ns={} ({timing_source})\n\n",
+        "- timing: prove_ns={}, draw_ns={} ({timing_desc})\n\n",
         inputs.timing.prove_ns, inputs.timing.draw_ns
     ));
 
     out.push_str("## Model\n\n");
     out.push_str(
-        "Each Auditor computes one Verifiable Random Function output per sealed Block over the Block Hash with its own key, then tests every Delta the Block carries against an integer draw from that output, selecting the Delta if and only if the draw falls under the Delta's sampling rate (WIST-4 §4). The sampling rate is `p_1e7 = clamp(200 000 + 3 × (1 000 000 − reputation_u), 200 000, 5 000 000)`, an integer floor of 200 000 (0.02) and ceiling of 5 000 000 (0.50) out of 10^7, with the ceiling substituted whenever a level-1 sanction is in force against the Delta's domain. Each selected Delta costs the Auditor two fetches: the live page and the reference Payload it commits to.\n\n",
+        "Each Auditor computes one Verifiable Random Function output per sealed Block over the Block Hash with its own key, then tests every Delta the Block carries against an integer draw from that output, selecting the Delta when the draw falls under the Delta's sampling rate. This covers only the VRF-selected set: WIST-4 §4 also puts a Delta into an Auditor's selection set through the **extension rule** — whenever a Block seals an `inconsistent` or `link_inconsistent` Record for a Delta with no earlier such Record in the confirmation window, that Delta enters the selection set of every other independent Auditor, a path no VRF draw gates — and this model excludes it. The excluded volume is bounded: a triggering Record only extends selection while its signing Auditor has triggered fewer than `extension_triggers_max` (Parameter Registry default 3, §9) extensions in the trailing 30 days, so the figures below miss at most that many forced fetches per Auditor per month. The sampling rate is `p_1e7 = clamp(200 000 + 3 × (1 000 000 − reputation_u), 200 000, 5 000 000)`, an integer floor of 200 000 (0.02) and ceiling of 5 000 000 (0.50) out of 10^7, with the ceiling substituted whenever a level-1 sanction is in force against the Delta's domain. Each VRF-selected Delta costs the Auditor two fetches: the live page and the reference Payload it commits to.\n\n",
     );
+    let band_rows: Vec<Vec<String>> =
+        [Band::Mature, Band::Mid, Band::Provisional, Band::Sanctioned]
+            .into_iter()
+            .map(|b| {
+                vec![
+                    b.as_str().to_string(),
+                    human_int(band_rep_u(b) as f64),
+                    human_int(band_p_1e7(b) as f64),
+                ]
+            })
+            .collect();
+    out.push_str(&md_table(&["Band", "reputation_u", "p_1e7"], &band_rows));
+    out.push_str(
+        "`reputation_u` is the input the Model formula reads; `p_1e7` is its output, the same column the Expected/day figures below are built from. `sanctioned` forces the ceiling via the level-1-sanction override, independent of its `reputation_u`.\n\n",
+    );
+    out.push_str("Units: GB = 10^9 bytes; month = 30 days, throughout this report.\n\n");
 
     out.push_str("## Scenarios\n\n");
+    out.push_str(
+        "Mix shares (`Mix` column) are basis points of that tier's `Deltas/day`; churn (`Churn (bp)` column) is basis points of `Pages` that produce a Delta per day.\n\n",
+    );
     let scenario_rows: Vec<Vec<String>> = inputs
         .scenarios
         .iter()
@@ -142,7 +153,10 @@ pub fn render(inputs: &ReportInputs) -> String {
 
     let results: Vec<_> = inputs.scenarios.iter().map(sim::run).collect();
 
-    out.push_str("## Selection: simulated vs expected\n\n");
+    out.push_str("## Selection: simulated vs expected, per Auditor\n\n");
+    out.push_str(
+        "Mean/day, Min, Max and Stddev range over the auditors × days observations (each cell one Auditor's selected count for one day); Expected/day is the closed-form expectation of that same per-Auditor daily count.\n\n",
+    );
     let selection_rows: Vec<Vec<String>> = inputs
         .scenarios
         .iter()
@@ -172,7 +186,10 @@ pub fn render(inputs: &ReportInputs) -> String {
         &selection_rows,
     ));
 
-    out.push_str("## Volume and cost\n\n");
+    out.push_str("## Volume and cost, per Auditor\n\n");
+    out.push_str(
+        "Every figure below is one Auditor's daily load: `cost::compute` is fed the mean selected-Delta count over the auditors × days matrix, not a roster total.\n\n",
+    );
     let variants: [(&str, u64); 2] = [
         ("Full page", inputs.params.page_bytes_full),
         ("HTML only", inputs.params.page_bytes_html),
@@ -237,15 +254,26 @@ pub fn render(inputs: &ReportInputs) -> String {
     out.push_str(
         "- churn: assumed; published web-change studies report 0.1–8 %/day depending on cohort\n",
     );
+    const PAYLOAD_CONTENT_CAP_SUM: u64 = 38_944;
     match &inputs.calibration {
-        Some(c) => out.push_str(&format!(
-            "- payload bytes: {} (`--calibration`; measured p50 of {} Publisher-built payload objects; max {})\n",
-            human_int(inputs.params.payload_bytes as f64),
-            c.count,
-            human_int(c.payload_max as f64)
-        )),
+        Some(c) => {
+            let envelope_note = if c.payload_max > PAYLOAD_CONTENT_CAP_SUM {
+                format!(
+                    ", above the WIST-1 §3.6 content-cap sum of {} because a served Payload object carries envelope overhead the content caps do not govern",
+                    human_int(PAYLOAD_CONTENT_CAP_SUM as f64)
+                )
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "- payload bytes: {} (`--calibration`; measured p50 of {} Publisher-built payload objects; max {}{envelope_note})\n",
+                human_int(inputs.params.payload_bytes as f64),
+                c.count,
+                human_int(c.payload_max as f64)
+            ));
+        }
         None => out.push_str(&format!(
-            "- payload bytes: {} (upper bound from WIST-1 §3.6 caps, 32 768 extract + 2 048 summary)\n",
+            "- payload bytes: {} — sum of the WIST-1 §3.6 content caps (32 768 extract + 4 096 links + 2 048 summary + 32 structure); excludes envelope overhead, so not a bound on transferred bytes\n",
             human_int(inputs.params.payload_bytes as f64)
         )),
     }
@@ -254,9 +282,12 @@ pub fn render(inputs: &ReportInputs) -> String {
         inputs.params.inconsistency_bp
     ));
     out.push_str(&format!(
-        "- WARC retention floor: {} days (`warc_retention_days`, not a report flag) — WIST-4 §5 Parameter Registry default; caps the WARC GB@90d and WARC GB@365d columns at the same value\n",
+        "- WARC retention floor: {} days (`warc_retention_days`, not a report flag) — WIST-4 §5 Parameter Registry default; §5 extends this floor while a `notice` naming the Record has an open appeal window, sealing deadline or ruling deadline, so the WARC GB@30d/90d/365d columns are lower bounds, not caps\n",
         inputs.params.warc_retention_days
     ));
+    out.push_str(
+        "- fetch model: two fetches per **VRF-selected** Delta only (live page + Payload); excludes the Block/Delta stream ingest an Auditor performs on every Delta to run the selection test, the Auditor's own Record-serving traffic, retries and redirects, and the extension-rule fetches (bounded by `extension_triggers_max`, WIST-4 §4, §9) — the GB/day and vCPU-s/day columns are not total Auditor bandwidth or compute\n",
+    );
     out.push_str(&format!(
         "- storage price: ${}/GB-month (`--storage-usd-gb-month`) — commodity cloud list prices (retrieved 2026-08)\n",
         inputs.params.usd_per_gb_month_storage
@@ -301,6 +332,8 @@ mod tests {
                 prove_ns: 100_000,
                 draw_ns: 300,
             },
+            timing_supplied: false,
+            machine: "test-cpu".into(),
             command_line: "wist-bench report --seed report-test".into(),
         }
     }
@@ -320,6 +353,9 @@ mod tests {
         }
         assert!(md.contains("wist-bench report --seed report-test"));
         assert!(md.contains("32 768"));
+        assert!(md.contains(
+            "This report states measurements and assumptions only; it makes no claim about any particular operator's budget."
+        ));
     }
 
     #[test]
@@ -327,6 +363,20 @@ mod tests {
         let a = render(&tiny_inputs());
         let b = render(&tiny_inputs());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn timing_supplied_and_machine_appear_in_header() {
+        let mut inputs = tiny_inputs();
+        inputs.timing_supplied = true;
+        inputs.machine = "Test CPU Model".into();
+        let md = render(&inputs);
+        assert!(md.contains("supplied; pinned from a measurement on Test CPU Model"));
+        let mut inputs2 = tiny_inputs();
+        inputs2.timing_supplied = false;
+        inputs2.machine = "Another CPU".into();
+        let md2 = render(&inputs2);
+        assert!(md2.contains("measured on Another CPU"));
     }
 
     #[test]
