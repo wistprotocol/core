@@ -30,13 +30,7 @@ pub fn parse_mix(s: &str) -> Result<Vec<MixEntry>, String> {
         let (name, bp) = part
             .split_once(':')
             .ok_or_else(|| format!("bad mix entry {part}, want band:bp"))?;
-        let band = match name {
-            "mature" => Band::Mature,
-            "mid" => Band::Mid,
-            "provisional" => Band::Provisional,
-            "sanctioned" => Band::Sanctioned,
-            _ => return Err(format!("unknown band {name}")),
-        };
+        let band = Band::parse(name).ok_or_else(|| format!("unknown band {name}"))?;
         let share_bp: u32 = bp.parse().map_err(|_| format!("bad share {bp}"))?;
         mix.push(MixEntry { band, share_bp });
     }
