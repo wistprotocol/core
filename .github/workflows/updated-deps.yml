@@ -1,0 +1,19 @@
+name: updated-deps
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: core }
+      - uses: actions/checkout@v4
+        with: { repository: wistprotocol/spec, path: spec }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo update
+        working-directory: core
+      - run: cargo test
+        working-directory: core
+        env: { WIST_SPEC_DIR: "${{ github.workspace }}/spec" }
