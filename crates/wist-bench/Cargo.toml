@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "WIST-4 audit sampling simulation and cost benchmarks"
+repository = "https://github.com/wistprotocol/core"
 publish = false
 
 [dependencies]
