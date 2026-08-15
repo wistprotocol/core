@@ -20,6 +20,8 @@ pub enum Error {
     DecayTable(String),
     #[error("reputation: {0}")]
     Reputation(String),
+    #[error("confirmation: {0}")]
+    Confirmation(String),
     #[error("vrf: {0}")]
     Vrf(String),
 }
