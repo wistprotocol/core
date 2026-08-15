@@ -18,6 +18,7 @@ pub mod delta;
 pub mod derivation;
 pub mod envelope;
 pub mod error;
+pub mod extension;
 pub mod extract;
 pub mod jcs;
 pub mod merkle;

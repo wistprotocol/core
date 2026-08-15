@@ -25,10 +25,7 @@ pub fn independent(a: &str, b: &str) -> bool {
     }
 }
 
-pub fn confirming_index(
-    records: &[CandidateRecord],
-    window_hours: u64,
-) -> Result<Option<usize>, Error> {
+pub fn validate_log_order(records: &[CandidateRecord]) -> Result<(), Error> {
     for pair in records.windows(2) {
         let (prev, next) = (&pair[0], &pair[1]);
         if (next.block_height, next.entry_index) <= (prev.block_height, prev.entry_index) {
@@ -40,6 +37,14 @@ pub fn confirming_index(
             ));
         }
     }
+    Ok(())
+}
+
+pub fn confirming_index(
+    records: &[CandidateRecord],
+    window_hours: u64,
+) -> Result<Option<usize>, Error> {
+    validate_log_order(records)?;
     let window_s = (window_hours as i64) * 3_600;
     for (i, record) in records.iter().enumerate() {
         let confirms = records[..i].iter().any(|earlier| {
