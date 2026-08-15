@@ -20,6 +20,7 @@ pub mod envelope;
 pub mod error;
 pub mod extension;
 pub mod extract;
+pub mod host;
 pub mod jcs;
 pub mod merkle;
 pub mod objects;
