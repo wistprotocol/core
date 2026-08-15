@@ -12,6 +12,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod agreement;
 pub mod block;
 pub mod confirmation;
+pub mod coverage;
 pub mod crypto;
 pub mod delta;
 pub mod derivation;
