@@ -14,6 +14,7 @@ pub mod block;
 pub mod confirmation;
 pub mod crypto;
 pub mod delta;
+pub mod derivation;
 pub mod envelope;
 pub mod error;
 pub mod extract;
