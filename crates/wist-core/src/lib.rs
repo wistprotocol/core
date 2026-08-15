@@ -25,6 +25,7 @@ pub mod merkle;
 pub mod objects;
 pub mod reputation;
 pub mod sampling;
+pub mod sanctions;
 pub mod snapshot;
 pub mod verdict;
 pub mod vrf;
