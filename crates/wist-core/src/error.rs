@@ -24,4 +24,6 @@ pub enum Error {
     Confirmation(String),
     #[error("vrf: {0}")]
     Vrf(String),
+    #[error("host: {0}")]
+    Host(String),
 }
