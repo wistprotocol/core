@@ -590,3 +590,393 @@ fn wist4_sampling_vector() {
         );
     }
 }
+
+fn confirmation_records(case: &serde_json::Value) -> Vec<serde_json::Value> {
+    case["records"].as_array().unwrap().to_vec()
+}
+
+fn candidate_records(
+    raw: &[serde_json::Value],
+) -> Vec<wist_core::confirmation::CandidateRecord<'_>> {
+    raw.iter()
+        .map(|r| wist_core::confirmation::CandidateRecord {
+            block_height: r["block_height"].as_u64().unwrap(),
+            entry_index: r["entry_index"].as_u64().unwrap(),
+            block_sealed_at_s: r["sealed_at_s"].as_i64().unwrap(),
+            auditor_id: r["auditor"].as_str().unwrap(),
+            effective_similarity: r["effective_similarity"].as_u64().unwrap(),
+        })
+        .collect()
+}
+
+fn i64_list(v: &serde_json::Value) -> Vec<i64> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_i64().unwrap())
+        .collect()
+}
+
+#[test]
+fn wist4_confirmation_vectors() {
+    let v = read_json("vectors/wist4/confirmation.json");
+    let window = v["confirm_window_hours"].as_u64().unwrap();
+    for row in v["independence"].as_array().unwrap() {
+        assert_eq!(
+            wist_core::confirmation::independent(
+                row["a"].as_str().unwrap(),
+                row["b"].as_str().unwrap()
+            ),
+            row["independent"].as_bool().unwrap(),
+            "{} vs {}",
+            row["a"],
+            row["b"]
+        );
+    }
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let raw = confirmation_records(case);
+        let records = candidate_records(&raw);
+        let idx = wist_core::confirmation::confirming_index(&records, window).unwrap();
+        assert_eq!(
+            idx.map(|i| i as u64),
+            case["confirming_index"].as_u64(),
+            "{label}"
+        );
+        if let Some(i) = idx {
+            assert_eq!(
+                wist_core::confirmation::ci_severity(&records, i).unwrap() as u64,
+                case["severity"].as_u64().unwrap(),
+                "{label}"
+            );
+        } else {
+            assert!(case["severity"].is_null(), "{label}");
+        }
+    }
+}
+
+#[test]
+fn wist4_derivation_vectors() {
+    let v = read_json("vectors/wist4/derivation.json");
+    assert_eq!(v["c_cap"].as_u64().unwrap(), wist_core::reputation::C_CAP);
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let resets: Vec<u64> = case["resets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h.as_u64().unwrap())
+            .collect();
+        let n_height = case["n"]["height"].as_u64().unwrap();
+        let n_sealed = case["n"]["sealed_at_s"].as_i64().unwrap();
+        let expected = &case["expected"];
+        let reset = wist_core::derivation::most_recent_reset(&resets, n_height);
+        assert_eq!(reset, expected["reset"].as_u64(), "{label}");
+        let accepted: Vec<wist_core::derivation::DeltaEvent> = case["accepted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| wist_core::derivation::DeltaEvent {
+                height: d["height"].as_u64().unwrap(),
+                sealed_at_s: d["sealed_at_s"].as_i64().unwrap(),
+            })
+            .collect();
+        assert_eq!(
+            wist_core::derivation::age_days(&accepted, reset, n_height, n_sealed).unwrap(),
+            expected["a_days"].as_u64().unwrap(),
+            "{label}"
+        );
+        let audits: Vec<wist_core::derivation::ConsistentAudit> = case["consistent_audits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| wist_core::derivation::ConsistentAudit {
+                height: a["height"].as_u64().unwrap(),
+                url: a["url"].as_str().unwrap(),
+                change: match a["change"].as_str().unwrap() {
+                    "new" => wist_core::verdict::ChangeType::New,
+                    "update" => wist_core::verdict::ChangeType::Update,
+                    "attest" => wist_core::verdict::ChangeType::Attest,
+                    "delete" => wist_core::verdict::ChangeType::Delete,
+                    other => panic!("unknown change type {other}"),
+                },
+            })
+            .collect();
+        assert_eq!(
+            wist_core::derivation::c_count(&audits, reset, n_height),
+            expected["c"].as_u64().unwrap(),
+            "{label}"
+        );
+        let findings: Vec<wist_core::derivation::ConfirmedFinding> = case["confirmed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| wist_core::derivation::ConfirmedFinding {
+                confirming_height: f["height"].as_u64().unwrap(),
+                confirming_sealed_at_s: f["sealed_at_s"].as_i64().unwrap(),
+                delta_id: f["delta_id"].as_str().unwrap(),
+                severity: f["severity"].as_u64().unwrap() as u8,
+            })
+            .collect();
+        let penalty =
+            wist_core::derivation::penalty_inputs(&findings, reset, n_height, n_sealed).unwrap();
+        let expected_penalty: Vec<(u8, u64)> = expected["penalty_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let row = row.as_array().unwrap();
+                (row[0].as_u64().unwrap() as u8, row[1].as_u64().unwrap())
+            })
+            .collect();
+        assert_eq!(penalty, expected_penalty, "{label}");
+    }
+}
+
+#[test]
+fn wist4_coverage_vectors() {
+    let v = read_json("vectors/wist4/coverage.json");
+    let failures_max = v["coverage_failures_max"].as_u64().unwrap();
+    assert_eq!(failures_max, wist_core::coverage::COVERAGE_FAILURES_MAX);
+    for case in v["pair_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let selected: Vec<&str> = case["selected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_str().unwrap())
+            .collect();
+        let recorded: Vec<&str> = case["recorded"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d.as_str().unwrap())
+            .collect();
+        let status = wist_core::coverage::pair_status(
+            &selected,
+            &recorded,
+            case["attested"].as_bool().unwrap(),
+        );
+        let expected = match case["status"].as_str().unwrap() {
+            "discharged" => wist_core::coverage::PairStatus::Discharged,
+            "failed" => wist_core::coverage::PairStatus::Failed,
+            other => panic!("unknown status {other}"),
+        };
+        assert_eq!(status, expected, "{label}");
+    }
+    for case in v["counting_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let attestation = match case["attestation"].as_str().unwrap() {
+            "unmet" => wist_core::coverage::Attestation::Unmet {
+                chain_contradicts: false,
+            },
+            "unmet-chain-contradicted" => wist_core::coverage::Attestation::Unmet {
+                chain_contradicts: true,
+            },
+            "missing" => wist_core::coverage::Attestation::Missing,
+            other => panic!("unknown attestation {other}"),
+        };
+        assert_eq!(
+            wist_core::coverage::pair_counts(
+                attestation,
+                case["chain_proof_in_window"].as_bool().unwrap()
+            ),
+            case["counts"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+    for case in v["state_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        assert_eq!(
+            wist_core::coverage::in_coverage_failure(
+                &i64_list(&case["counting_failure_times_s"]),
+                case["n_sealed_at_s"].as_i64().unwrap(),
+                failures_max
+            ),
+            case["in_coverage_failure"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn wist4_extension_vectors() {
+    let v = read_json("vectors/wist4/extension.json");
+    let window = v["confirm_window_hours"].as_u64().unwrap();
+    let triggers_max = v["extension_triggers_max"].as_u64().unwrap();
+    let contradictions_max = v["contradictions_max"].as_u64().unwrap();
+    let ration_days = v["ration_window_days"].as_u64().unwrap();
+    assert_eq!(triggers_max, wist_core::extension::EXTENSION_TRIGGERS_MAX);
+    assert_eq!(contradictions_max, wist_core::extension::CONTRADICTIONS_MAX);
+    for case in v["deadline_cases"].as_array().unwrap() {
+        assert_eq!(
+            wist_core::extension::extension_deadline_s(
+                case["b1_sealed_at_s"].as_i64().unwrap(),
+                case["confirm_window_hours"].as_u64().unwrap()
+            ),
+            case["deadline_s"].as_i64().unwrap()
+        );
+    }
+    for case in v["trigger_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let raw = confirmation_records(case);
+        let records = candidate_records(&raw);
+        let expected: Vec<usize> = case["trigger_indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as usize)
+            .collect();
+        assert_eq!(
+            wist_core::extension::trigger_indices(&records, window).unwrap(),
+            expected,
+            "{label}"
+        );
+    }
+    for case in v["ration_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let triggers: Vec<(&str, i64)> = case["triggers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let t = t.as_array().unwrap();
+                (t[0].as_str().unwrap(), t[1].as_i64().unwrap())
+            })
+            .collect();
+        let expected: Vec<bool> = case["summons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b.as_bool().unwrap())
+            .collect();
+        assert_eq!(
+            wist_core::extension::rationed_summons(&triggers, ration_days, triggers_max),
+            expected,
+            "{label}"
+        );
+    }
+    for case in v["summons_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let roster: Vec<&str> = case["roster"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        let filers: Vec<&str> = case["already_sealed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        let expected: Vec<usize> = case["summoned_indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as usize)
+            .collect();
+        assert_eq!(
+            wist_core::extension::summoned(
+                &roster,
+                &filers,
+                case["publisher_domain"].as_str().unwrap()
+            ),
+            expected,
+            "{label}"
+        );
+    }
+    for case in v["divergence_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        assert_eq!(
+            wist_core::extension::in_divergence(
+                &i64_list(&case["contradiction_times_s"]),
+                case["n_sealed_at_s"].as_i64().unwrap(),
+                contradictions_max
+            ),
+            case["in_divergence"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn wist4_sanctions_vectors() {
+    let v = read_json("vectors/wist4/sanctions.json");
+    for case in v["criterion_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let findings: Vec<wist_core::sanctions::Finding> = case["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| wist_core::sanctions::Finding {
+                sealed_at_s: f["sealed_at_s"].as_i64().unwrap(),
+                severity: f["severity"].as_u64().unwrap() as u8,
+            })
+            .collect();
+        assert_eq!(
+            wist_core::sanctions::criterion_times(
+                &findings,
+                case["count"].as_u64().unwrap(),
+                case["span_days"].as_u64(),
+                case["min_severity"].as_u64().unwrap() as u8
+            ),
+            i64_list(&case["met_times_s"]),
+            "{label}"
+        );
+    }
+    for case in v["accrual_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let findings: Vec<wist_core::sanctions::Finding> = case["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| wist_core::sanctions::Finding {
+                sealed_at_s: f["sealed_at_s"].as_i64().unwrap(),
+                severity: f["severity"].as_u64().unwrap() as u8,
+            })
+            .collect();
+        assert_eq!(
+            wist_core::sanctions::l4_accrual_times(
+                &findings,
+                &i64_list(&case["l3_met_times_s"]),
+                &i64_list(&case["l3_clear_times_s"])
+            ),
+            i64_list(&case["accrual_times_s"]),
+            "{label}"
+        );
+    }
+    for case in v["void_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let ruling = case["ruling"].as_array().map(|r| {
+            let outcome = match r[0].as_str().unwrap() {
+                "overturned" => wist_core::sanctions::Outcome::Overturned,
+                "upheld" => wist_core::sanctions::Outcome::Upheld,
+                "unappealed" => wist_core::sanctions::Outcome::Unappealed,
+                other => panic!("unknown outcome {other}"),
+            };
+            (outcome, r[1].as_i64().unwrap())
+        });
+        assert_eq!(
+            wist_core::sanctions::state_void_at(
+                case["notice_sealed_at_s"].as_i64(),
+                case["appeal_sealed_at_s"].as_i64(),
+                ruling
+            ),
+            case["void_at_s"].as_i64(),
+            "{label}"
+        );
+    }
+    for case in v["in_force_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        assert_eq!(
+            wist_core::sanctions::in_force(
+                &i64_list(&case["met_times_s"]),
+                &i64_list(&case["clear_times_s"]),
+                case["n_s"].as_i64().unwrap()
+            ),
+            case["in_force"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
