@@ -1,13 +1,21 @@
 use crate::error::Error;
+use idna::uts46::{AsciiDenyList, DnsLength, Hyphens, Uts46};
 
-/// WIST-1 §2 Canonical Host: lowercase, then UTS #46 processing with
-/// `UseSTD3ASCIIRules=true`, `Transitional_Processing=false` and
+/// WIST-1 §2 Canonical Host: UTS #46 processing with
+/// `UseSTD3ASCIIRules=true`, `CheckHyphens=false`, `CheckBidi=true`,
+/// `CheckJoiners=true`, `Transitional_Processing=false` and
 /// `VerifyDnsLength=true` to IDNA2008 A-labels, trailing dot removed,
-/// no port.
+/// no port. Case is folded by the mapping step and by nothing before it.
 pub fn canonical_host(host: &str) -> Result<String, Error> {
-    let lowered = host.to_lowercase();
-    let trimmed = lowered.strip_suffix('.').unwrap_or(&lowered);
-    idna::domain_to_ascii_strict(trimmed)
+    let trimmed = host.strip_suffix('.').unwrap_or(host);
+    Uts46::new()
+        .to_ascii(
+            trimmed.as_bytes(),
+            AsciiDenyList::STD3,
+            Hyphens::Allow,
+            DnsLength::Verify,
+        )
+        .map(|c| c.into_owned())
         .map_err(|e| Error::Host(format!("host {host:?} has no canonicalization: {e}")))
 }
 
@@ -16,7 +24,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lowercases_and_strips_trailing_dot() {
+    fn folds_case_and_strips_trailing_dot() {
         assert_eq!(canonical_host("EXAMPLE.org.").unwrap(), "example.org");
         assert_eq!(canonical_host("example.org").unwrap(), "example.org");
     }
@@ -35,6 +43,20 @@ mod tests {
     }
 
     #[test]
+    fn maps_final_sigma_context_free() {
+        assert_eq!(canonical_host("example.ΑΣ").unwrap(), "example.xn--mxa0b");
+    }
+
+    #[test]
+    fn allows_positional_hyphens() {
+        assert_eq!(
+            canonical_host("r2---sn-x.example").unwrap(),
+            "r2---sn-x.example"
+        );
+        assert_eq!(canonical_host("-foo.example").unwrap(), "-foo.example");
+    }
+
+    #[test]
     fn already_canonical_a_labels_pass_through() {
         assert_eq!(
             canonical_host("xn--bcher-kva.example").unwrap(),
@@ -48,6 +70,12 @@ mod tests {
         assert!(canonical_host("").is_err());
         let long_label = format!("{}.example", "a".repeat(64));
         assert!(canonical_host(&long_label).is_err());
+    }
+
+    #[test]
+    fn rejects_joiner_and_bidi_violations() {
+        assert!(canonical_host("a\u{200c}b.example").is_err());
+        assert!(canonical_host("\u{05d0}a.example").is_err());
     }
 
     #[test]

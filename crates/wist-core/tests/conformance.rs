@@ -980,3 +980,42 @@ fn wist4_sanctions_vectors() {
         );
     }
 }
+
+#[test]
+fn wist1_host_canonicalization() {
+    let v = read_json("vectors/wist1/host-canonicalization.json");
+    for case in v["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let input = case["input"].as_str().unwrap();
+        let got = wist_core::host::canonical_host(input);
+        match case["expected"].as_str() {
+            Some(expected) => assert_eq!(got.as_deref().ok(), Some(expected), "{name}"),
+            None => assert!(
+                got.is_err(),
+                "{name}: expected no canonicalization, got {got:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn wist1_ed25519_verification_profile() {
+    let v = read_json("vectors/wist1/ed25519-strictness.json");
+    let msg = wist_core::crypto::hex_decode(v["message_hex"].as_str().unwrap()).unwrap();
+    for case in v["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let key_raw =
+            wist_core::crypto::hex_decode(case["public_key_hex"].as_str().unwrap()).unwrap();
+        let sig_raw =
+            wist_core::crypto::hex_decode(case["signature_hex"].as_str().unwrap()).unwrap();
+        let sig_b64u = wist_core::crypto::b64u_encode(&sig_raw);
+        let accepted = match wist_core::crypto::PublicKey::from_b64u(
+            &wist_core::crypto::b64u_encode(&key_raw),
+        ) {
+            Ok(pk) => wist_core::crypto::verify(&pk, &msg, &sig_b64u).is_ok(),
+            Err(_) => false,
+        };
+        let expected = case["expected"].as_str().unwrap() == "accept";
+        assert_eq!(accepted, expected, "{name}");
+    }
+}
