@@ -1,7 +1,7 @@
 use crate::error::Error;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, VerifyingKey};
 
 pub fn b64u_encode(b: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(b)
@@ -33,15 +33,46 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
 
 pub struct PublicKey(VerifyingKey);
 
+/// WIST-1 §4: the encoded `y` must be below `p = 2^255 - 19`. Decoders that
+/// reduce mod p instead read a second encoding of a point already encodable.
+fn canonically_encoded(point: &[u8; 32]) -> bool {
+    const P: [u8; 32] = {
+        let mut p = [0xffu8; 32];
+        p[0] = 0xed;
+        p[31] = 0x7f;
+        p
+    };
+    let mut y = *point;
+    y[31] &= 0x7f;
+    for i in (0..32).rev() {
+        match y[i].cmp(&P[i]) {
+            std::cmp::Ordering::Less => return true,
+            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    false
+}
+
 impl PublicKey {
     pub fn from_b64u(s: &str) -> Result<Self, Error> {
         let raw = b64u_decode(s)?;
         let arr: [u8; 32] = raw
             .try_into()
             .map_err(|_| Error::Encoding("public key must be 32 octets".into()))?;
-        VerifyingKey::from_bytes(&arr)
-            .map(PublicKey)
-            .map_err(|_| Error::Encoding("invalid Ed25519 public key".into()))
+        if !canonically_encoded(&arr) {
+            return Err(Error::Encoding(
+                "Ed25519 public key is not canonically encoded".into(),
+            ));
+        }
+        let key = VerifyingKey::from_bytes(&arr)
+            .map_err(|_| Error::Encoding("invalid Ed25519 public key".into()))?;
+        if key.is_weak() {
+            return Err(Error::Encoding(
+                "Ed25519 public key is of small order".into(),
+            ));
+        }
+        Ok(PublicKey(key))
     }
 }
 
@@ -50,8 +81,12 @@ pub fn verify(key: &PublicKey, msg: &[u8], sig_b64u: &str) -> Result<(), Error> 
     let arr: [u8; 64] = raw
         .try_into()
         .map_err(|_| Error::Encoding("signature must be 64 octets".into()))?;
+    let r: [u8; 32] = arr[..32].try_into().unwrap();
+    if !canonically_encoded(&r) {
+        return Err(Error::Signature);
+    }
     key.0
-        .verify(msg, &Signature::from_bytes(&arr))
+        .verify_strict(msg, &Signature::from_bytes(&arr))
         .map_err(|_| Error::Signature)
 }
 
