@@ -24,6 +24,7 @@ pub mod host;
 pub mod jcs;
 pub mod merkle;
 pub mod objects;
+pub mod recovery;
 pub mod reputation;
 pub mod sampling;
 pub mod sanctions;

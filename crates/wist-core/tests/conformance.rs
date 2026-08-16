@@ -1019,3 +1019,70 @@ fn wist1_ed25519_verification_profile() {
         assert_eq!(accepted, expected, "{name}");
     }
 }
+
+#[test]
+fn wist1_recovery_settlement() {
+    use wist_core::recovery::{admits_to_queue, settle, WindowDeclaration};
+
+    fn strings(v: &serde_json::Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    }
+    fn declaration(v: &serde_json::Value) -> WindowDeclaration {
+        WindowDeclaration {
+            label: v["label"].as_str().unwrap().to_string(),
+            signer: v["signer"].as_str().unwrap().to_string(),
+            keys: strings(&v["keys"]),
+            recovery_keys: strings(&v["recovery_keys"]),
+        }
+    }
+
+    let vector = read_json("vectors/wist1/recovery-settlement.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let pre = strings(&case["pre_recovery_keys"]);
+        let recovery = declaration(&case["recovery_declaration"]);
+        let window: Vec<_> = case["window_declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(declaration)
+            .collect();
+        let expected = &case["expected"];
+
+        let mut queued = Vec::new();
+        let mut not_queued = Vec::new();
+        for served in case["served"].as_array().unwrap() {
+            let delta_id = served["delta_id"].as_str().unwrap().to_string();
+            let signer = served["signer"].as_str().unwrap().to_string();
+            if admits_to_queue(&pre, &recovery.keys, &signer) {
+                queued.push((delta_id, signer));
+            } else {
+                not_queued.push(delta_id);
+            }
+        }
+        assert_eq!(
+            queued.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            strings(&expected["queued"]),
+            "{name}: queue admission"
+        );
+        assert_eq!(
+            not_queued,
+            strings(&expected["not_queued"]),
+            "{name}: not queued"
+        );
+
+        let out = settle(&recovery, &window, &queued);
+        assert_eq!(
+            out.effective_keys,
+            strings(&expected["effective_keys"]),
+            "{name}"
+        );
+        assert_eq!(out.superseded, strings(&expected["superseded"]), "{name}");
+        assert_eq!(out.sealed, strings(&expected["sealed"]), "{name}");
+        assert_eq!(out.rejected, strings(&expected["rejected"]), "{name}");
+    }
+}
