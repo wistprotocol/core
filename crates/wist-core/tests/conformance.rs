@@ -1086,3 +1086,29 @@ fn wist1_recovery_settlement() {
         assert_eq!(out.rejected, strings(&expected["rejected"]), "{name}");
     }
 }
+
+#[test]
+fn wist3_empty_block_verifies() {
+    let v = read_json("vectors/wist3/empty-block.json");
+    let block = &v["block"];
+    let keys = read_json("vectors/wist1/keypair.json");
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+
+    assert_eq!(
+        wist_core::block::block_hash(&block["header"]).unwrap(),
+        v["block_hash"].as_str().unwrap()
+    );
+    wist_core::block::verify_block(block, &pk).unwrap();
+    let entries: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
+    assert!(entries.is_empty());
+    let root = wist_core::merkle::leaf_hash(&[]);
+    assert_eq!(
+        format!("sha256:{}", wist_core::crypto::hex_encode(&root)),
+        block["header"]["merkle_root"].as_str().unwrap(),
+        "the empty tree is SHA-256(0x00), not RFC 6962's SHA-256(\"\")"
+    );
+    assert_ne!(
+        block["header"]["merkle_root"].as_str().unwrap(),
+        v["rfc6962_empty_root"].as_str().unwrap()
+    );
+}

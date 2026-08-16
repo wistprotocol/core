@@ -111,8 +111,8 @@ pub struct DeclarationEntry {
 #[derive(Debug, Clone)]
 pub struct ParameterEntry {
     pub name: String,
-    pub value: i64,
     pub effective_at: String,
+    pub value: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -233,8 +233,8 @@ impl<'de> Deserialize<'de> for StateEntry {
                 check_arity::<D::Error>(&kind, tail, 3)?;
                 Ok(StateEntry::Parameter(ParameterEntry {
                     name: field(tail, 0)?,
-                    value: field(tail, 1)?,
-                    effective_at: field(tail, 2)?,
+                    effective_at: field(tail, 1)?,
+                    value: field(tail, 2)?,
                 }))
             }
             "sanction_state" => {
@@ -317,7 +317,7 @@ impl Serialize for StateEntry {
                 serde_json::json!(["declaration", e.domain, e.declaration, e.sealing_height])
             }
             StateEntry::Parameter(e) => {
-                serde_json::json!(["parameter", e.name, e.value, e.effective_at])
+                serde_json::json!(["parameter", e.name, e.effective_at, e.value])
             }
             StateEntry::SanctionState(e) => {
                 serde_json::json!(["sanction_state", e.domain, e.level, e.evidence, e.deadlines])
@@ -380,7 +380,7 @@ mod tests {
             serde_json::json!(["aggregator_key", "key-1", pk, 10, Value::Null]),
             serde_json::json!(["auditor", "auditor.example.com", "key-2", pk, 5, 20]),
             serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42]),
-            serde_json::json!(["parameter", "max_shard_bytes", -5, "2026-08-09T13:00:00Z"]),
+            serde_json::json!(["parameter", "max_shard_bytes", "2026-08-09T13:00:00Z", -5]),
             serde_json::json!([
                 "sanction_state",
                 "example.com",
