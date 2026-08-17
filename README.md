@@ -7,6 +7,10 @@ snapshot digests, and WIST-2 link/text extraction, and WIST-4 audit math
 the sibling spec repo's schemas and vectors, not by this crate — every
 normative behavior is verified against those vectors in `tests/conformance.rs`.
 
+Developed with generative-AI assistance — provenance record in
+[AI-USAGE.md](AI-USAGE.md), per-commit `Assisted-by:` trailers from its
+introduction onward.
+
 ## Build & test
 
 ```bash
