@@ -3,7 +3,7 @@
 - wist-bench version: 0.1.0, wist-core version: 0.2.0
 - seed(s): small=wist-bench-v1, medium=wist-bench-v1, large=wist-bench-v1
 - rerun: `wist-bench report --calibration docs/audit-cost-calibration.json --prove-ns 104576 --draw-ns 93`
-- timing: prove_ns=104576, draw_ns=93 (supplied; pinned from a measurement on AMD Ryzen 7 5700X 8-Core Processor)
+- timing: prove_ns=104576, draw_ns=93 (supplied; pinned from a prior local measurement)
 
 ## Model
 

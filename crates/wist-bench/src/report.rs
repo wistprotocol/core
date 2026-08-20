@@ -9,7 +9,6 @@ pub struct ReportInputs {
     pub calibration: Option<Calibration>,
     pub timing: Timing,
     pub timing_supplied: bool,
-    pub machine: String,
     pub command_line: String,
 }
 
@@ -72,9 +71,9 @@ pub fn render(inputs: &ReportInputs) -> String {
     let mut out = String::new();
 
     let timing_desc = if inputs.timing_supplied {
-        format!("supplied; pinned from a measurement on {}", inputs.machine)
+        "supplied; pinned from a prior local measurement".to_string()
     } else {
-        format!("measured on {}", inputs.machine)
+        "measured locally".to_string()
     };
     let seeds = inputs
         .scenarios
@@ -330,7 +329,6 @@ mod tests {
                 draw_ns: 300,
             },
             timing_supplied: false,
-            machine: "test-cpu".into(),
             command_line: "wist-bench report --seed report-test".into(),
         }
     }
@@ -363,17 +361,15 @@ mod tests {
     }
 
     #[test]
-    fn timing_supplied_and_machine_appear_in_header() {
+    fn timing_source_appears_in_header() {
         let mut inputs = tiny_inputs();
         inputs.timing_supplied = true;
-        inputs.machine = "Test CPU Model".into();
         let md = render(&inputs);
-        assert!(md.contains("supplied; pinned from a measurement on Test CPU Model"));
+        assert!(md.contains("supplied; pinned from a prior local measurement"));
         let mut inputs2 = tiny_inputs();
         inputs2.timing_supplied = false;
-        inputs2.machine = "Another CPU".into();
         let md2 = render(&inputs2);
-        assert!(md2.contains("measured on Another CPU"));
+        assert!(md2.contains("measured locally"));
     }
 
     #[test]
