@@ -138,7 +138,6 @@ fn main() {
                     calibration,
                     timing,
                     timing_supplied,
-                    machine: cpu_model(),
                     command_line,
                 })
             );
