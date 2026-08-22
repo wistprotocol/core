@@ -1112,3 +1112,75 @@ fn wist3_empty_block_verifies() {
         v["rfc6962_empty_root"].as_str().unwrap()
     );
 }
+
+fn change_type(s: &str) -> wist_core::verdict::ChangeType {
+    use wist_core::verdict::ChangeType::*;
+    match s {
+        "new" => New,
+        "update" => Update,
+        "attest" => Attest,
+        "delete" => Delete,
+        other => panic!("unknown change type {other}"),
+    }
+}
+
+fn chain_deltas(v: &serde_json::Value) -> Vec<wist_core::reference::ChainDelta<'_>> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|d| wist_core::reference::ChainDelta {
+            id: d["id"].as_str().unwrap(),
+            height: d["height"].as_u64().unwrap(),
+            sealed_at_s: d["sealed_at_s"].as_i64().unwrap(),
+            change: change_type(d["change"].as_str().unwrap()),
+            payload: d["payload"].as_str(),
+        })
+        .collect()
+}
+
+#[test]
+fn wist4_superseded_audit_vectors() {
+    let v = read_json("vectors/wist4/superseded-audit.json");
+    let chain = chain_deltas(&v["chain"]);
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let audited = case["audited"].as_str().unwrap();
+        let reference = case["reference"].as_str().unwrap();
+        let fetched = case["fetched_at_s"].as_i64().unwrap();
+        assert_eq!(
+            wist_core::reference::newest_at_or_before(&chain, fetched),
+            case["expected_reference"].as_str(),
+            "{label}: expected_reference"
+        );
+        let valid = wist_core::reference::reference_valid(&chain, audited, reference, fetched);
+        match case["valid"].as_bool() {
+            Some(true) => {
+                valid.unwrap_or_else(|e| panic!("{label}: rejected: {e}"));
+                assert_eq!(
+                    wist_core::reference::resolve_anchor(&chain, reference).unwrap(),
+                    case["resolved_payload"].as_str(),
+                    "{label}: resolved_payload"
+                );
+                let change = change_type(case["reading_change"].as_str().unwrap());
+                if let Some(sim) = case["similarity"].as_u64() {
+                    assert_eq!(
+                        wist_core::verdict::effective_similarity(sim, change),
+                        case["effective_similarity"].as_u64().unwrap(),
+                        "{label}: effective_similarity"
+                    );
+                }
+            }
+            _ => {
+                assert_eq!(case["valid"].as_str(), Some("WIST4-E02"), "{label}");
+                assert!(valid.is_err(), "{label}: should be WIST4-E02");
+            }
+        }
+    }
+}
+
+#[test]
+fn wist4_example_record_carries_reference_delta() {
+    let v = read_json("examples/audit-record.json");
+    let env: wist_core::objects::AuditRecordEnvelope = serde_json::from_value(v).unwrap();
+    assert_eq!(env.record.reference_delta, env.record.audited_delta);
+}

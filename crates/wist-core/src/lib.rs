@@ -1,7 +1,8 @@
 //! Rust implementation of the WIST-1..3 primitives: JCS canonicalization,
 //! Ed25519 envelopes, delta identity, Merkle trees/proofs, block/checkpoint
 //! verification, snapshot digests, and WIST-2 link/text extraction, and
-//! WIST-4 audit math (ECVRF sampling, reputation, decay, link agreement).
+//! WIST-4 audit math (ECVRF sampling, reputation, decay, link agreement,
+//! the audit reference Delta).
 //! Conformance is defined by the sibling spec repo's schemas and vectors,
 //! not by this crate — every normative behavior is verified against those
 //! vectors in `tests/conformance.rs`.
@@ -25,6 +26,7 @@ pub mod jcs;
 pub mod merkle;
 pub mod objects;
 pub mod recovery;
+pub mod reference;
 pub mod reputation;
 pub mod sampling;
 pub mod sanctions;

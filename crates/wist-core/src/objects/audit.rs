@@ -19,6 +19,7 @@ pub enum Verdict {
 pub struct AuditRecord {
     pub wist_version: String,
     pub audited_delta: String,
+    pub reference_delta: String,
     pub auditor_id: String,
     pub fetched_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
