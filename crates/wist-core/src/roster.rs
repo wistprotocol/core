@@ -79,11 +79,29 @@ impl Roster {
                 }
             }
         }
+        let admits: Vec<&RosterAct<'_>> = acts
+            .iter()
+            .filter(|act| act.action == RosterAction::Admit)
+            .collect();
         for (i, act) in acts.iter().enumerate() {
-            if act.action == RosterAction::Admit {
-                if let Err(e) = self.admit(sealed_at_s, act) {
-                    rejected.push((i, e));
-                }
+            if act.action != RosterAction::Admit {
+                continue;
+            }
+            let twice = admits
+                .iter()
+                .filter(|a| a.auditor_id == act.auditor_id)
+                .count()
+                > 1;
+            let result = if twice {
+                Err(Error::Roster(format!(
+                    "WIST4-E07: {} is named by two admits in one Block",
+                    act.auditor_id
+                )))
+            } else {
+                self.admit(sealed_at_s, act)
+            };
+            if let Err(e) = result {
+                rejected.push((i, e));
             }
         }
         rejected.sort_by_key(|(i, _)| *i);
@@ -237,13 +255,15 @@ mod tests {
     }
 
     #[test]
-    fn a_second_admit_in_the_same_block_is_rejected() {
+    fn two_admits_for_one_subject_in_one_block_are_both_rejected() {
         let mut roster = Roster::new(LOG);
         let rejected = roster
-            .apply_block(0, &[admit(A, "k1"), admit(A, "k2")])
+            .apply_block(0, &[admit(A, "k1"), admit(A, "k2"), admit(B, "k3")])
             .unwrap();
-        assert_eq!(indices(&rejected), vec![1]);
-        assert_eq!(roster.key_at(A, 0), Some("k1"));
+        assert_eq!(indices(&rejected), vec![0, 1]);
+        assert_eq!(roster.key_at(A, 0), None);
+        assert_eq!(roster.key_at(B, 0), Some("k3"));
+        assert!(roster.apply_block(1, &[admit(A, "k1")]).unwrap().is_empty());
     }
 
     #[test]
