@@ -1266,3 +1266,64 @@ fn wist1_keyset_at_height_vectors() {
         );
     }
 }
+
+#[test]
+fn wist2_page_keyset_vectors() {
+    use wist_core::keyset::{
+        page_key_set_current, page_key_set_next, page_resolution, DeclarationAtInstant,
+        PageResolution,
+    };
+
+    let vector = read_json("vectors/wist2/page-keyset.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let declarations: Vec<DeclarationAtInstant> = case["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| DeclarationAtInstant {
+                seq: d["seq"].as_u64().unwrap(),
+                sealed_at_s: d["sealed_at_s"].as_i64().unwrap(),
+                keys: string_list(&d["keys"]),
+            })
+            .collect();
+        let pages = case["pages"].as_array().unwrap();
+        let expected = case["expected"].as_array().unwrap();
+        assert_eq!(pages.len(), expected.len(), "{name}: one row per page");
+
+        for (page, row) in pages.iter().zip(expected) {
+            let number = page["page"].as_u64().unwrap();
+            assert_eq!(row["page"].as_u64().unwrap(), number, "{name}: row order");
+            let generated_at_s = page["generated_at_s"].as_i64().unwrap();
+            let signer = page["signer"].as_str().unwrap();
+
+            assert_eq!(
+                page_key_set_current(&declarations, generated_at_s),
+                string_list(&row["current_keys"]),
+                "{name}: page {number} current key set"
+            );
+            assert_eq!(
+                page_key_set_next(&declarations, generated_at_s),
+                string_list(&row["next_keys"]),
+                "{name}: page {number} next key set"
+            );
+
+            let resolution = page_resolution(&declarations, generated_at_s, signer);
+            let expected_under = match row["verifies_under"].as_str() {
+                Some("current") => Some(PageResolution::Current),
+                Some("next") => Some(PageResolution::Next),
+                Some(other) => panic!("{name}: unknown resolution {other}"),
+                None => None,
+            };
+            assert_eq!(
+                resolution, expected_under,
+                "{name}: page {number} verifies under"
+            );
+            assert_eq!(
+                resolution.is_some(),
+                row["verifies"].as_bool().unwrap(),
+                "{name}: page {number} verifies"
+            );
+        }
+    }
+}
