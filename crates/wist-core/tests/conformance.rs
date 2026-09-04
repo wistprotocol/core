@@ -1618,3 +1618,77 @@ fn wist4_extension_proof_vectors() {
     }
     assert!(selected_rows > 0, "sampling.json must hold a selected row");
 }
+
+#[test]
+fn wist4_unauditable_vectors() {
+    use wist_core::objects::audit::Verdict;
+    use wist_core::unauditable::{
+        clears, unauditable_at, SealedBy, VerdictRecord, UNAUDITABLE_HORIZON_DAYS,
+    };
+    let v = read_json("vectors/wist4/unauditable.json");
+    let horizon = v["unauditable_horizon_days"].as_u64().unwrap();
+    assert_eq!(horizon, UNAUDITABLE_HORIZON_DAYS);
+    let every_verdict = [
+        Verdict::Consistent,
+        Verdict::Inconsistent,
+        Verdict::Unreachable,
+        Verdict::DynamicVariance,
+        Verdict::NotAuditable,
+        Verdict::LinkVariance,
+        Verdict::LinkInconsistent,
+    ];
+    let mut clearing: Vec<String> = every_verdict
+        .iter()
+        .filter(|verdict| clears(verdict))
+        .map(|verdict| {
+            serde_json::to_value(verdict)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    clearing.sort();
+    let mut expected_clearing: Vec<String> = v["clearing_verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_owned())
+        .collect();
+    expected_clearing.sort();
+    assert_eq!(clearing, expected_clearing);
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let blocking: Vec<SealedBy<'_>> = case["blocking"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| SealedBy {
+                auditor_id: r["auditor"].as_str().unwrap(),
+                sealed_at_s: r["sealed_at_s"].as_i64().unwrap(),
+            })
+            .collect();
+        let others: Vec<VerdictRecord<'_>> = case["other_records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| VerdictRecord {
+                sealed_by: SealedBy {
+                    auditor_id: r["auditor"].as_str().unwrap(),
+                    sealed_at_s: r["sealed_at_s"].as_i64().unwrap(),
+                },
+                verdict: serde_json::from_value(r["verdict"].clone()).unwrap(),
+            })
+            .collect();
+        assert_eq!(
+            unauditable_at(
+                &blocking,
+                &others,
+                case["n_sealed_at_s"].as_i64().unwrap(),
+                horizon
+            ),
+            case["unauditable"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
