@@ -1524,3 +1524,97 @@ fn wist4_selection_domain_vectors() {
         );
     }
 }
+
+fn proof80(hex: &str) -> [u8; 80] {
+    wist_core::crypto::hex_decode(hex)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+#[test]
+fn wist4_extension_proof_vectors() {
+    use wist_core::extension::{standing, ProofBlock, Standing, StandingClaim};
+    let v = read_json("vectors/wist4/extension-proof.json");
+    let pk: [u8; 32] = wist_core::crypto::b64u_decode(v["auditor_public_key"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let alpha_of = |block: &serde_json::Value| -> [u8; 32] {
+        let alpha =
+            wist_core::sampling::alpha_from_block_hash(block["block_hash"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            wist_core::crypto::hex_encode(&alpha),
+            block["alpha_hex"].as_str().unwrap()
+        );
+        alpha
+    };
+    let audited_alpha = alpha_of(&v["audited_block"]);
+    let trigger_alpha = alpha_of(&v["trigger_block"]);
+    let audited_delta = v["audited_delta"].as_str().unwrap();
+    let reputation_u = v["reputation_u"].as_u64().unwrap();
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let pi = proof80(case["vrf_proof_hex"].as_str().unwrap());
+        let over_audited = wist_core::vrf::verify(&pk, &audited_alpha, &pi).is_ok();
+        let over_trigger = wist_core::vrf::verify(&pk, &trigger_alpha, &pi).is_ok();
+        let expected_block = match case["proof_block"].as_str() {
+            Some("audited") => (true, false),
+            Some("trigger") => (false, true),
+            None => (false, false),
+            Some(other) => panic!("unknown proof_block {other}"),
+        };
+        assert_eq!((over_audited, over_trigger), expected_block, "{label}");
+        let named = case["named_by_extension"].as_bool().unwrap();
+        let claim = StandingClaim {
+            audited_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &audited_alpha,
+            }),
+            audited_delta,
+            reputation_u,
+            level1_sanction: false,
+            trigger_block: named.then_some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &trigger_alpha,
+            }),
+            vrf_proof: &pi,
+        };
+        let expected = match case["standing"].as_str().unwrap() {
+            "selected" => Standing::Selected,
+            "extension" => Standing::Extension,
+            "WIST4-E01" => Standing::Void,
+            other => panic!("unknown standing {other}"),
+        };
+        assert_eq!(standing(&claim), expected, "{label}");
+    }
+
+    let s = read_json("vectors/wist4/sampling.json");
+    assert_eq!(s["auditor_public_key"], v["auditor_public_key"]);
+    assert_eq!(s["block_hash"], v["audited_block"]["block_hash"]);
+    let pi = proof80(s["vrf_proof_hex"].as_str().unwrap());
+    let mut selected_rows = 0;
+    for row in s["selection"].as_array().unwrap() {
+        let label = row["label"].as_str().unwrap();
+        let claim = StandingClaim {
+            audited_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &audited_alpha,
+            }),
+            audited_delta: row["delta_id"].as_str().unwrap(),
+            reputation_u: row["reputation_u"].as_u64().unwrap(),
+            level1_sanction: false,
+            trigger_block: None,
+            vrf_proof: &pi,
+        };
+        let expected = if row["selected"].as_bool().unwrap() {
+            selected_rows += 1;
+            Standing::Selected
+        } else {
+            Standing::Void
+        };
+        assert_eq!(standing(&claim), expected, "{label}");
+    }
+    assert!(selected_rows > 0, "sampling.json must hold a selected row");
+}

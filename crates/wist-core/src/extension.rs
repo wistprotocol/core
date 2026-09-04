@@ -1,10 +1,57 @@
 use crate::confirmation::{independent, validate_log_order, CandidateRecord};
 use crate::coverage::within_days_ending_at;
 use crate::error::Error;
+use crate::sampling::{draw, p_1e7, selected};
+use crate::vrf::{self, PROOF_LEN};
 
 pub const EXTENSION_TRIGGERS_MAX: u64 = 3;
 pub const CONTRADICTIONS_MAX: u64 = 2;
 pub const RATION_WINDOW_DAYS: u64 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    Selected,
+    Extension,
+    Void,
+}
+
+/// A Block a proof may be over, with the key the Auditor held at its
+/// `sealed_at`.
+#[derive(Debug, Clone, Copy)]
+pub struct ProofBlock<'a> {
+    pub admitted_key: &'a [u8; 32],
+    pub alpha: &'a [u8; 32],
+}
+
+/// `audited_block` is `None` when the Auditor held no key at the audited
+/// Block; `trigger_block` is B₁ when the extension rule names
+/// `audited_delta` for this Auditor, else `None`.
+#[derive(Debug, Clone, Copy)]
+pub struct StandingClaim<'a> {
+    pub audited_block: Option<ProofBlock<'a>>,
+    pub audited_delta: &'a str,
+    pub reputation_u: u64,
+    pub level1_sanction: bool,
+    pub trigger_block: Option<ProofBlock<'a>>,
+    pub vrf_proof: &'a [u8; PROOF_LEN],
+}
+
+pub fn standing(claim: &StandingClaim<'_>) -> Standing {
+    if let Some(block) = claim.audited_block {
+        if let Ok(beta) = vrf::verify(block.admitted_key, block.alpha, claim.vrf_proof) {
+            let d = draw(&beta, claim.audited_delta);
+            if selected(d, p_1e7(claim.reputation_u, claim.level1_sanction)) {
+                return Standing::Selected;
+            }
+        }
+    }
+    if let Some(block) = claim.trigger_block {
+        if vrf::verify(block.admitted_key, block.alpha, claim.vrf_proof).is_ok() {
+            return Standing::Extension;
+        }
+    }
+    Standing::Void
+}
 
 pub fn trigger_indices(
     records: &[CandidateRecord],
@@ -263,5 +310,121 @@ mod tests {
             n,
             CONTRADICTIONS_MAX
         ));
+    }
+
+    const AUDITED_ALPHA: [u8; 32] = [1; 32];
+    const TRIGGER_ALPHA: [u8; 32] = [2; 32];
+
+    fn keypair(seed: u8) -> ([u8; 32], [u8; 32]) {
+        let sk = [seed; 32];
+        (sk, vrf::public_key(&sk))
+    }
+
+    fn delta_where(beta: &[u8; 64], wanted: impl Fn(u64) -> bool) -> String {
+        (0u32..)
+            .map(|i| format!("sha256:{i:064x}"))
+            .find(|d| wanted(draw(beta, d)))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_selecting_proof_over_the_audited_block_stands_selected_even_when_summoned() {
+        let (sk, pk) = keypair(7);
+        let pi = vrf::prove(&sk, &AUDITED_ALPHA).unwrap();
+        let beta = vrf::verify(&pk, &AUDITED_ALPHA, &pi).unwrap();
+        let chosen = delta_where(&beta, |d| selected(d, p_1e7(1_000_000, false)));
+        let claim = StandingClaim {
+            audited_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &AUDITED_ALPHA,
+            }),
+            audited_delta: &chosen,
+            reputation_u: 1_000_000,
+            level1_sanction: false,
+            trigger_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &TRIGGER_ALPHA,
+            }),
+            vrf_proof: &pi,
+        };
+        assert_eq!(standing(&claim), Standing::Selected);
+    }
+
+    #[test]
+    fn a_level1_sanction_widens_the_draw_that_gives_standing() {
+        let (sk, pk) = keypair(7);
+        let pi = vrf::prove(&sk, &AUDITED_ALPHA).unwrap();
+        let beta = vrf::verify(&pk, &AUDITED_ALPHA, &pi).unwrap();
+        let marginal = delta_where(&beta, |d| {
+            !selected(d, p_1e7(1_000_000, false)) && selected(d, p_1e7(1_000_000, true))
+        });
+        let claim = StandingClaim {
+            audited_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &AUDITED_ALPHA,
+            }),
+            audited_delta: &marginal,
+            reputation_u: 1_000_000,
+            level1_sanction: false,
+            trigger_block: None,
+            vrf_proof: &pi,
+        };
+        assert_eq!(standing(&claim), Standing::Void);
+        let sanctioned = StandingClaim {
+            level1_sanction: true,
+            ..claim
+        };
+        assert_eq!(standing(&sanctioned), Standing::Selected);
+    }
+
+    #[test]
+    fn no_key_at_the_audited_block_leaves_only_the_extension_path() {
+        let (sk, pk) = keypair(9);
+        let pi = vrf::prove(&sk, &TRIGGER_ALPHA).unwrap();
+        let claim = StandingClaim {
+            audited_block: None,
+            audited_delta: "sha256:00",
+            reputation_u: 0,
+            level1_sanction: true,
+            trigger_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &TRIGGER_ALPHA,
+            }),
+            vrf_proof: &pi,
+        };
+        assert_eq!(standing(&claim), Standing::Extension);
+        let unsummoned = StandingClaim {
+            trigger_block: None,
+            ..claim
+        };
+        assert_eq!(standing(&unsummoned), Standing::Void);
+    }
+
+    #[test]
+    fn an_extension_proof_reads_the_key_admitted_at_b1() {
+        let (old_sk, old_pk) = keypair(3);
+        let (new_sk, new_pk) = keypair(4);
+        let pi_new = vrf::prove(&new_sk, &TRIGGER_ALPHA).unwrap();
+        let claim = StandingClaim {
+            audited_block: Some(ProofBlock {
+                admitted_key: &old_pk,
+                alpha: &AUDITED_ALPHA,
+            }),
+            audited_delta: "sha256:00",
+            reputation_u: 0,
+            level1_sanction: true,
+            trigger_block: Some(ProofBlock {
+                admitted_key: &new_pk,
+                alpha: &TRIGGER_ALPHA,
+            }),
+            vrf_proof: &pi_new,
+        };
+        assert_eq!(standing(&claim), Standing::Extension);
+        let pi_old = vrf::prove(&old_sk, &TRIGGER_ALPHA).unwrap();
+        let under_the_old_key = StandingClaim {
+            vrf_proof: &pi_old,
+            ..claim
+        };
+        assert_eq!(standing(&under_the_old_key), Standing::Void);
     }
 }
