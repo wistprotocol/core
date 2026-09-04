@@ -30,11 +30,11 @@ pub fn most_recent_reset(reset_heights: &[u64], n: u64) -> Option<u64> {
 }
 
 fn in_scope(height: u64, reset: Option<u64>, n: u64) -> bool {
-    height <= n && reset.is_none_or(|r| height > r)
+    height <= n && reset.is_none_or(|r| height >= r)
 }
 
 fn record_in_scope(record_height: u64, audited_height: u64, reset: Option<u64>, n: u64) -> bool {
-    record_height <= n && reset.is_none_or(|r| audited_height > r)
+    record_height <= n && reset.is_none_or(|r| audited_height >= r)
 }
 
 pub fn age_days(
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn age_restarts_above_a_reset() {
+    fn age_restarts_at_or_above_a_reset() {
         let deltas = [
             DeltaEvent {
                 height: 10,
@@ -148,7 +148,8 @@ mod tests {
             },
         ];
         assert_eq!(age_days(&deltas, Some(50), 100, 310 * DAY).unwrap(), 10);
-        assert_eq!(age_days(&deltas, Some(60), 100, 310 * DAY).unwrap(), 0);
+        assert_eq!(age_days(&deltas, Some(60), 100, 310 * DAY).unwrap(), 10);
+        assert_eq!(age_days(&deltas, Some(61), 100, 310 * DAY).unwrap(), 0);
     }
 
     #[test]
@@ -194,13 +195,14 @@ mod tests {
     }
 
     #[test]
-    fn c_scope_excludes_at_reset_and_above_n() {
+    fn c_scope_includes_at_reset_and_excludes_below_it_and_above_n() {
         let audits = [
+            audit(49, 49, "https://a.example/w", ChangeType::New),
             audit(50, 50, "https://a.example/x", ChangeType::New),
             audit(51, 51, "https://a.example/y", ChangeType::New),
             audit(101, 99, "https://a.example/z", ChangeType::New),
         ];
-        assert_eq!(c_count(&audits, Some(50), 100), 1);
+        assert_eq!(c_count(&audits, Some(50), 100), 2);
     }
 
     #[test]
@@ -242,14 +244,15 @@ mod tests {
     }
 
     #[test]
-    fn penalties_scoped_above_reset_and_at_most_n() {
+    fn penalties_scoped_at_or_above_reset_and_at_most_n() {
         let findings = [
+            finding(49, 49, 5, "sha256:dd", 2),
             finding(50, 50, 10, "sha256:aa", 3),
             finding(51, 51, 20, "sha256:bb", 1),
             finding(101, 99, 30, "sha256:cc", 2),
         ];
         let got = penalty_inputs(&findings, Some(50), 100, 40 * DAY).unwrap();
-        assert_eq!(got, vec![(1, 20)]);
+        assert_eq!(got, vec![(1, 20), (3, 30)]);
     }
 
     #[test]
