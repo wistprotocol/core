@@ -1457,9 +1457,12 @@ fn wist4_roster_vectors() {
             .map(|e| {
                 let action = match e["action"].as_str().unwrap() {
                     "auditor_admit" => RosterAction::Admit,
-                    "auditor_remove" => RosterAction::Remove {
-                        for_cause: e["evidence"].as_bool().unwrap(),
-                    },
+                    "auditor_remove" => {
+                        let evidence: Option<Vec<String>> = e
+                            .get("evidence")
+                            .map(|ids| serde_json::from_value(ids.clone()).unwrap());
+                        RosterAction::remove_with(evidence.as_deref())
+                    }
                     other => panic!("unknown action {other}"),
                 };
                 (

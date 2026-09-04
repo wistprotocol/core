@@ -8,6 +8,16 @@ pub enum RosterAction {
     Remove { for_cause: bool },
 }
 
+impl RosterAction {
+    /// WIST-4 §4: a removal is for cause exactly when its `evidence`
+    /// names at least one ID.
+    pub fn remove_with(evidence: Option<&[String]>) -> Self {
+        RosterAction::Remove {
+            for_cause: evidence.is_some_and(|ids| !ids.is_empty()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RosterAct<'a> {
     pub action: RosterAction,
@@ -242,6 +252,23 @@ mod tests {
 
     fn indices(rejected: &[(usize, Error)]) -> Vec<usize> {
         rejected.iter().map(|(i, _)| *i).collect()
+    }
+
+    #[test]
+    fn a_removal_is_for_cause_exactly_when_its_evidence_names_something() {
+        let none: Option<&[String]> = None;
+        assert_eq!(
+            RosterAction::remove_with(none),
+            RosterAction::Remove { for_cause: false }
+        );
+        assert_eq!(
+            RosterAction::remove_with(Some(&[])),
+            RosterAction::Remove { for_cause: false }
+        );
+        assert_eq!(
+            RosterAction::remove_with(Some(&["sha256:void".to_owned()])),
+            RosterAction::Remove { for_cause: true }
+        );
     }
 
     #[test]
