@@ -1360,3 +1360,58 @@ fn wist4_parameter_in_force_vectors() {
         }
     }
 }
+
+#[test]
+fn wist3_chain_materialization_vectors() {
+    use wist_core::chain::ChainTips;
+
+    let vector = read_json("vectors/wist3/chain-materialization.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let mut tips = ChainTips::new();
+        let mut ignored = Vec::new();
+        for (index, delta) in case["deltas"].as_array().unwrap().iter().enumerate() {
+            let applied = tips.apply(
+                delta["publisher"].as_str().unwrap(),
+                delta["url"].as_str().unwrap(),
+                delta["id"].as_str().unwrap(),
+                delta["prev"].as_str(),
+            );
+            if !applied {
+                ignored.push(index as u64);
+            }
+        }
+        let expected_ignored: Vec<u64> = case["ignored_indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap())
+            .collect();
+        assert_eq!(ignored, expected_ignored, "{label}: ignored indices");
+
+        let expected_tips: Vec<(String, String, String)> = case["tips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["publisher"].as_str().unwrap().to_string(),
+                    t["url"].as_str().unwrap().to_string(),
+                    t["delta"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let got: Vec<(String, String, String)> = tips
+            .tips()
+            .map(|(p, u, d)| (p.to_string(), u.to_string(), d.to_string()))
+            .collect();
+        assert_eq!(got, expected_tips, "{label}: tips");
+        for (publisher, url, delta) in &expected_tips {
+            assert_eq!(
+                tips.tip(publisher, url),
+                Some(delta.as_str()),
+                "{label}: tip of {publisher} {url}"
+            );
+        }
+    }
+}
