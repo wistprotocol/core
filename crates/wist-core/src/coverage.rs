@@ -15,6 +15,25 @@ pub enum Attestation {
     Missing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoidReason {
+    RemovedAfterAuditedBlock,
+    CoverageFailureAtSealing,
+    NeverAdmitted,
+    ProofWithoutStanding,
+    OutsideSelectionDomain,
+    SelfAudit,
+}
+
+pub fn void_record_discharges(void: &[VoidReason]) -> bool {
+    void.iter().all(|reason| {
+        matches!(
+            reason,
+            VoidReason::RemovedAfterAuditedBlock | VoidReason::CoverageFailureAtSealing
+        )
+    })
+}
+
 pub fn within_days_ending_at(t_s: i64, end_s: i64, days: u64) -> bool {
     t_s <= end_s && end_s - t_s < (days as i64) * 86_400
 }
@@ -155,6 +174,37 @@ mod tests {
             .map(|i| 90 * DAY + i)
             .collect();
         assert!(in_coverage_failure(&past, 100 * DAY, COVERAGE_FAILURES_MAX));
+    }
+
+    #[test]
+    fn a_standing_record_and_the_two_carve_outs_discharge() {
+        assert!(void_record_discharges(&[]));
+        assert!(void_record_discharges(&[
+            VoidReason::RemovedAfterAuditedBlock
+        ]));
+        assert!(void_record_discharges(&[
+            VoidReason::CoverageFailureAtSealing
+        ]));
+        assert!(void_record_discharges(&[
+            VoidReason::RemovedAfterAuditedBlock,
+            VoidReason::CoverageFailureAtSealing
+        ]));
+    }
+
+    #[test]
+    fn a_record_with_no_duty_behind_it_discharges_nothing() {
+        for void in [
+            VoidReason::NeverAdmitted,
+            VoidReason::ProofWithoutStanding,
+            VoidReason::OutsideSelectionDomain,
+            VoidReason::SelfAudit,
+        ] {
+            assert!(!void_record_discharges(&[void]), "{void:?}");
+            assert!(
+                !void_record_discharges(&[VoidReason::RemovedAfterAuditedBlock, void]),
+                "{void:?} beside a carve-out"
+            );
+        }
     }
 
     #[test]

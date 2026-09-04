@@ -799,6 +799,25 @@ fn wist4_coverage_vectors() {
             "{label}"
         );
     }
+    for case in v["discharge_cases"].as_array().unwrap() {
+        use wist_core::coverage::VoidReason::*;
+        let label = case["label"].as_str().unwrap();
+        let void: Vec<_> = match case["void"].as_str() {
+            None => vec![],
+            Some("removed after audited block") => vec![RemovedAfterAuditedBlock],
+            Some("coverage failure at sealing") => vec![CoverageFailureAtSealing],
+            Some("never admitted") => vec![NeverAdmitted],
+            Some("proof without standing") => vec![ProofWithoutStanding],
+            Some("outside selection domain") => vec![OutsideSelectionDomain],
+            Some("self audit") => vec![SelfAudit],
+            Some(other) => panic!("unknown void reason {other}"),
+        };
+        assert_eq!(
+            wist_core::coverage::void_record_discharges(&void),
+            case["discharges"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
 }
 
 #[test]
