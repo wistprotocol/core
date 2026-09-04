@@ -1327,3 +1327,36 @@ fn wist2_page_keyset_vectors() {
         }
     }
 }
+
+#[test]
+fn wist4_parameter_in_force_vectors() {
+    use wist_core::parameters::{value_in_force, ParameterChange};
+
+    let vector = read_json("vectors/wist4/parameter-in-force.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let default = case["default"].as_i64().unwrap();
+        let changes: Vec<ParameterChange> = case["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| ParameterChange {
+                block_number: c["block_number"].as_u64().unwrap(),
+                entry_index: c["entry_index"].as_u64().unwrap(),
+                effective_at_s: c["effective_at_s"].as_i64().unwrap(),
+                value: c["value"].as_i64().unwrap(),
+            })
+            .collect();
+
+        for query in case["queries"].as_array().unwrap() {
+            let t_s = query["t_s"].as_i64().unwrap();
+            let expected_value = query["value"].as_i64().unwrap();
+            let expected_from = query["from_index"].as_u64().map(|i| i as usize);
+            assert_eq!(
+                value_in_force(default, &changes, t_s),
+                (expected_value, expected_from),
+                "{label}: value in force at {t_s}"
+            );
+        }
+    }
+}

@@ -26,6 +26,7 @@ pub mod jcs;
 pub mod keyset;
 pub mod merkle;
 pub mod objects;
+pub mod parameters;
 pub mod recovery;
 pub mod reference;
 pub mod reputation;
