@@ -31,6 +31,7 @@ pub mod parameters;
 pub mod recovery;
 pub mod reference;
 pub mod reputation;
+pub mod roster;
 pub mod sampling;
 pub mod sanctions;
 pub mod snapshot;

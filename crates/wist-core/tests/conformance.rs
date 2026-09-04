@@ -1415,3 +1415,58 @@ fn wist3_chain_materialization_vectors() {
         }
     }
 }
+
+#[test]
+fn wist4_roster_vectors() {
+    use wist_core::roster::{RosterAct, RosterAction};
+    let v = read_json("vectors/wist4/roster.json");
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let entries: Vec<(i64, RosterAct<'_>)> = case["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                let action = match e["action"].as_str().unwrap() {
+                    "auditor_admit" => RosterAction::Admit,
+                    "auditor_remove" => RosterAction::Remove {
+                        for_cause: e["evidence"].as_bool().unwrap(),
+                    },
+                    other => panic!("unknown action {other}"),
+                };
+                (
+                    e["sealed_at_s"].as_i64().unwrap(),
+                    RosterAct {
+                        action,
+                        auditor_id: e["auditor_id"].as_str().unwrap(),
+                        key_id: e["key_id"].as_str().unwrap(),
+                    },
+                )
+            })
+            .collect();
+        let (roster, rejected) =
+            wist_core::roster::replay(case["log_id"].as_str().unwrap(), &entries).unwrap();
+        let rejected_indices: Vec<usize> = rejected.iter().map(|(i, _)| *i).collect();
+        let expected: Vec<usize> = case["rejected_indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as usize)
+            .collect();
+        assert_eq!(rejected_indices, expected, "{label}");
+        for (_, reason) in &rejected {
+            assert!(
+                reason.to_string().contains("WIST4-E07: "),
+                "{label}: {reason}"
+            );
+        }
+        for row in case["admitted_key_at"].as_array().unwrap() {
+            let at = row["sealed_at_s"].as_i64().unwrap();
+            assert_eq!(
+                roster.key_at(row["auditor_id"].as_str().unwrap(), at),
+                row["key_id"].as_str(),
+                "{label} at {at}"
+            );
+        }
+    }
+}

@@ -26,4 +26,6 @@ pub enum Error {
     Vrf(String),
     #[error("host: {0}")]
     Host(String),
+    #[error("roster: {0}")]
+    Roster(String),
 }
