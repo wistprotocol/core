@@ -11,6 +11,7 @@ pub struct DeltaEvent {
 #[derive(Debug, Clone)]
 pub struct ConsistentAudit<'a> {
     pub height: u64,
+    pub audited_height: u64,
     pub url: &'a str,
     pub change: ChangeType,
 }
@@ -18,6 +19,7 @@ pub struct ConsistentAudit<'a> {
 #[derive(Debug, Clone)]
 pub struct ConfirmedFinding<'a> {
     pub confirming_height: u64,
+    pub audited_height: u64,
     pub confirming_sealed_at_s: i64,
     pub delta_id: &'a str,
     pub severity: u8,
@@ -29,6 +31,10 @@ pub fn most_recent_reset(reset_heights: &[u64], n: u64) -> Option<u64> {
 
 fn in_scope(height: u64, reset: Option<u64>, n: u64) -> bool {
     height <= n && reset.is_none_or(|r| height > r)
+}
+
+fn record_in_scope(record_height: u64, audited_height: u64, reset: Option<u64>, n: u64) -> bool {
+    record_height <= n && reset.is_none_or(|r| audited_height > r)
 }
 
 pub fn age_days(
@@ -51,7 +57,7 @@ pub fn c_count(audits: &[ConsistentAudit], reset: Option<u64>, n_height: u64) ->
     let urls: std::collections::HashSet<&str> = audits
         .iter()
         .filter(|a| {
-            in_scope(a.height, reset, n_height)
+            record_in_scope(a.height, a.audited_height, reset, n_height)
                 && matches!(a.change, ChangeType::New | ChangeType::Update)
         })
         .map(|a| a.url)
@@ -67,7 +73,7 @@ pub fn penalty_inputs(
 ) -> Result<Vec<(u8, u64)>, Error> {
     let mut entries = Vec::new();
     for f in findings {
-        if !in_scope(f.confirming_height, reset, n_height) {
+        if !record_in_scope(f.confirming_height, f.audited_height, reset, n_height) {
             continue;
         }
         let t = whole_days(f.confirming_sealed_at_s, n_sealed_at_s)?;
@@ -154,9 +160,15 @@ mod tests {
         assert_eq!(age_days(&deltas, None, 100, 300 * DAY).unwrap(), 0);
     }
 
-    fn audit(height: u64, url: &str, change: ChangeType) -> ConsistentAudit<'_> {
+    fn audit(
+        height: u64,
+        audited_height: u64,
+        url: &str,
+        change: ChangeType,
+    ) -> ConsistentAudit<'_> {
         ConsistentAudit {
             height,
+            audited_height,
             url,
             change,
         }
@@ -165,9 +177,9 @@ mod tests {
     #[test]
     fn distinct_urls_count_once() {
         let audits = [
-            audit(1, "https://a.example/x", ChangeType::New),
-            audit(2, "https://a.example/x", ChangeType::Update),
-            audit(3, "https://a.example/y", ChangeType::New),
+            audit(1, 1, "https://a.example/x", ChangeType::New),
+            audit(2, 2, "https://a.example/x", ChangeType::Update),
+            audit(3, 3, "https://a.example/y", ChangeType::New),
         ];
         assert_eq!(c_count(&audits, None, 100), 2);
     }
@@ -175,8 +187,8 @@ mod tests {
     #[test]
     fn attest_and_delete_audits_never_contribute() {
         let audits = [
-            audit(1, "https://a.example/x", ChangeType::Attest),
-            audit(2, "https://a.example/y", ChangeType::Delete),
+            audit(1, 1, "https://a.example/x", ChangeType::Attest),
+            audit(2, 2, "https://a.example/y", ChangeType::Delete),
         ];
         assert_eq!(c_count(&audits, None, 100), 0);
     }
@@ -184,11 +196,20 @@ mod tests {
     #[test]
     fn c_scope_excludes_at_reset_and_above_n() {
         let audits = [
-            audit(50, "https://a.example/x", ChangeType::New),
-            audit(51, "https://a.example/y", ChangeType::New),
-            audit(101, "https://a.example/z", ChangeType::New),
+            audit(50, 50, "https://a.example/x", ChangeType::New),
+            audit(51, 51, "https://a.example/y", ChangeType::New),
+            audit(101, 99, "https://a.example/z", ChangeType::New),
         ];
         assert_eq!(c_count(&audits, Some(50), 100), 1);
+    }
+
+    #[test]
+    fn c_belongs_to_the_identity_by_the_audited_deltas_height() {
+        let audits = [
+            audit(58, 50, "https://a.example/x", ChangeType::New),
+            audit(58, 56, "https://a.example/y", ChangeType::Update),
+        ];
+        assert_eq!(c_count(&audits, Some(55), 100), 1);
     }
 
     #[test]
@@ -199,19 +220,21 @@ mod tests {
         let audits: Vec<ConsistentAudit> = urls
             .iter()
             .enumerate()
-            .map(|(i, url)| audit(i as u64 + 1, url, ChangeType::New))
+            .map(|(i, url)| audit(i as u64 + 1, i as u64 + 1, url, ChangeType::New))
             .collect();
         assert_eq!(c_count(&audits, None, 100_000), C_CAP);
     }
 
     fn finding<'a>(
         height: u64,
+        audited_height: u64,
         sealed_days: i64,
         delta_id: &'a str,
         severity: u8,
     ) -> ConfirmedFinding<'a> {
         ConfirmedFinding {
             confirming_height: height,
+            audited_height,
             confirming_sealed_at_s: sealed_days * DAY,
             delta_id,
             severity,
@@ -221,20 +244,30 @@ mod tests {
     #[test]
     fn penalties_scoped_above_reset_and_at_most_n() {
         let findings = [
-            finding(50, 10, "sha256:aa", 3),
-            finding(51, 20, "sha256:bb", 1),
-            finding(101, 30, "sha256:cc", 2),
+            finding(50, 50, 10, "sha256:aa", 3),
+            finding(51, 51, 20, "sha256:bb", 1),
+            finding(101, 99, 30, "sha256:cc", 2),
         ];
         let got = penalty_inputs(&findings, Some(50), 100, 40 * DAY).unwrap();
         assert_eq!(got, vec![(1, 20)]);
     }
 
     #[test]
+    fn a_finding_confirmed_above_the_reset_for_a_pre_reset_delta_leaves_the_penalty() {
+        let findings = [
+            finding(60, 50, 21, "sha256:aa", 3),
+            finding(60, 57, 21, "sha256:bb", 1),
+        ];
+        let got = penalty_inputs(&findings, Some(55), 100, 30 * DAY).unwrap();
+        assert_eq!(got, vec![(1, 9)]);
+    }
+
+    #[test]
     fn penalties_ordered_ascending_t_then_delta_id_bytes() {
         let findings = [
-            finding(10, 5, "sha256:bb", 1),
-            finding(20, 30, "sha256:zz", 2),
-            finding(11, 5, "sha256:aa", 3),
+            finding(10, 9, 5, "sha256:bb", 1),
+            finding(20, 19, 30, "sha256:zz", 2),
+            finding(11, 9, 5, "sha256:aa", 3),
         ];
         let got = penalty_inputs(&findings, None, 100, 35 * DAY).unwrap();
         assert_eq!(got, vec![(2, 5), (3, 30), (1, 30)]);
@@ -244,6 +277,7 @@ mod tests {
     fn penalty_t_is_whole_days_from_the_confirming_block() {
         let findings = [ConfirmedFinding {
             confirming_height: 1,
+            audited_height: 1,
             confirming_sealed_at_s: 0,
             delta_id: "sha256:aa",
             severity: 1,
@@ -254,7 +288,7 @@ mod tests {
 
     #[test]
     fn confirming_block_after_n_is_an_error() {
-        let findings = [finding(50, 100, "sha256:aa", 1)];
+        let findings = [finding(50, 49, 100, "sha256:aa", 1)];
         assert!(penalty_inputs(&findings, None, 100, 50 * DAY).is_err());
     }
 }

@@ -692,6 +692,7 @@ fn wist4_derivation_vectors() {
             .iter()
             .map(|a| wist_core::derivation::ConsistentAudit {
                 height: a["height"].as_u64().unwrap(),
+                audited_height: a["audited_height"].as_u64().unwrap(),
                 url: a["url"].as_str().unwrap(),
                 change: match a["change"].as_str().unwrap() {
                     "new" => wist_core::verdict::ChangeType::New,
@@ -713,6 +714,7 @@ fn wist4_derivation_vectors() {
             .iter()
             .map(|f| wist_core::derivation::ConfirmedFinding {
                 confirming_height: f["height"].as_u64().unwrap(),
+                audited_height: f["audited_height"].as_u64().unwrap(),
                 confirming_sealed_at_s: f["sealed_at_s"].as_i64().unwrap(),
                 delta_id: f["delta_id"].as_str().unwrap(),
                 severity: f["severity"].as_u64().unwrap() as u8,
