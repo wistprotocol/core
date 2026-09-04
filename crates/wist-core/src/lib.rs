@@ -1,8 +1,10 @@
 //! Rust implementation of the WIST-1..3 primitives: JCS canonicalization,
-//! Ed25519 envelopes, delta identity, Merkle trees/proofs, block/checkpoint
-//! verification, snapshot digests, and WIST-2 link/text extraction, and
-//! WIST-4 audit math (ECVRF sampling, reputation, decay, link agreement,
-//! the audit reference Delta, the Auditor roster, the unauditable predicate).
+//! Ed25519 envelopes, delta identity, Key Set resolution, chain tips,
+//! Merkle trees/proofs, block/checkpoint verification, snapshot digests,
+//! WIST-2 link/text extraction, and WIST-4 audit math (ECVRF sampling and
+//! the selection domain, Record standing, the Auditor roster, reputation,
+//! decay, link agreement, the audit reference Delta, parameters in force,
+//! the unauditable predicate).
 //! Conformance is defined by the sibling spec repo's schemas and vectors,
 //! not by this crate — every normative behavior is verified against those
 //! vectors in `tests/conformance.rs`.
