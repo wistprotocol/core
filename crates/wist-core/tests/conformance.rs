@@ -1471,6 +1471,7 @@ fn wist4_roster_vectors() {
                         action,
                         auditor_id: e["auditor_id"].as_str().unwrap(),
                         key_id: e["key_id"].as_str().unwrap(),
+                        public_key: e["public_key"].as_str().unwrap_or(""),
                     },
                 )
             })

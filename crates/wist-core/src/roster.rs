@@ -23,12 +23,14 @@ pub struct RosterAct<'a> {
     pub action: RosterAction,
     pub auditor_id: &'a str,
     pub key_id: &'a str,
+    pub public_key: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Tenure {
     auditor_id: String,
     key_id: String,
+    public_key: String,
     from_s: i64,
     until_s: Option<i64>,
 }
@@ -44,6 +46,7 @@ pub struct Roster {
     log_id: String,
     tenures: Vec<Tenure>,
     held: BTreeMap<String, usize>,
+    held_strings: BTreeSet<String>,
     retired: BTreeSet<String>,
     barred: BTreeSet<String>,
     last_sealed_at_s: Option<i64>,
@@ -55,6 +58,7 @@ impl Roster {
             log_id: log_id.to_owned(),
             tenures: Vec::new(),
             held: BTreeMap::new(),
+            held_strings: BTreeSet::new(),
             retired: BTreeSet::new(),
             barred: BTreeSet::new(),
             last_sealed_at_s: None,
@@ -135,7 +139,10 @@ impl Roster {
         };
         self.tenures[idx].until_s = Some(sealed_at_s);
         self.held.remove(act.auditor_id);
-        self.retired.insert(act.key_id.to_owned());
+        for string in [&self.tenures[idx].key_id, &self.tenures[idx].public_key] {
+            self.held_strings.remove(string);
+            self.retired.insert(string.clone());
+        }
         if for_cause {
             self.barred.insert(act.auditor_id.to_owned());
         }
@@ -147,6 +154,24 @@ impl Roster {
             return Err(Error::Roster(format!(
                 "WIST4-E07: key {} is retired",
                 act.key_id
+            )));
+        }
+        if self.retired.contains(act.public_key) {
+            return Err(Error::Roster(format!(
+                "WIST4-E07: public key {} is retired",
+                act.public_key
+            )));
+        }
+        if self.held_strings.contains(act.key_id) {
+            return Err(Error::Roster(format!(
+                "WIST4-E07: key {} is held by another admission",
+                act.key_id
+            )));
+        }
+        if self.held_strings.contains(act.public_key) {
+            return Err(Error::Roster(format!(
+                "WIST4-E07: public key {} is held by another admission",
+                act.public_key
             )));
         }
         if self.barred.contains(act.auditor_id) {
@@ -169,9 +194,12 @@ impl Roster {
         }
         self.held
             .insert(act.auditor_id.to_owned(), self.tenures.len());
+        self.held_strings.insert(act.key_id.to_owned());
+        self.held_strings.insert(act.public_key.to_owned());
         self.tenures.push(Tenure {
             auditor_id: act.auditor_id.to_owned(),
             key_id: act.key_id.to_owned(),
+            public_key: act.public_key.to_owned(),
             from_s: sealed_at_s,
             until_s: None,
         });
@@ -231,10 +259,32 @@ mod tests {
     const B: &str = "checker.sample.org";
 
     fn admit(auditor_id: &'static str, key_id: &'static str) -> RosterAct<'static> {
+        admit_key(auditor_id, key_id, public_key_of(key_id))
+    }
+
+    fn public_key_of(key_id: &'static str) -> &'static str {
+        match key_id {
+            "k1" => "pk-k1",
+            "k2" => "pk-k2",
+            "k3" => "pk-k3",
+            "k4" => "pk-k4",
+            "k9" => "pk-k9",
+            "ka" => "pk-ka",
+            "kb" => "pk-kb",
+            other => panic!("no test public key for {other}"),
+        }
+    }
+
+    fn admit_key(
+        auditor_id: &'static str,
+        key_id: &'static str,
+        public_key: &'static str,
+    ) -> RosterAct<'static> {
         RosterAct {
             action: RosterAction::Admit,
             auditor_id,
             key_id,
+            public_key,
         }
     }
 
@@ -247,6 +297,7 @@ mod tests {
             action: RosterAction::Remove { for_cause },
             auditor_id,
             key_id,
+            public_key: "",
         }
     }
 
@@ -304,6 +355,47 @@ mod tests {
         let rejected = roster.apply_block(20, &[admit(B, "k1")]).unwrap();
         assert_eq!(indices(&rejected), vec![0]);
         assert_eq!(roster.key_at(B, 20), None);
+    }
+
+    #[test]
+    fn a_removed_public_key_is_retired_under_any_label() {
+        let mut roster = Roster::new(LOG);
+        roster.apply_block(0, &[admit(A, "k1")]).unwrap();
+        roster.apply_block(10, &[remove(A, "k1", false)]).unwrap();
+        let rejected = roster
+            .apply_block(20, &[admit_key(A, "k2", "pk-k1")])
+            .unwrap();
+        assert_eq!(indices(&rejected), vec![0]);
+        let rejected = roster
+            .apply_block(30, &[admit_key(B, "k3", "pk-k1")])
+            .unwrap();
+        assert_eq!(indices(&rejected), vec![0]);
+        assert!(roster
+            .apply_block(40, &[admit(A, "k2")])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn no_two_live_admissions_share_a_key_id_or_a_public_key() {
+        let mut roster = Roster::new(LOG);
+        roster.apply_block(0, &[admit(A, "k1")]).unwrap();
+        let rejected = roster
+            .apply_block(
+                10,
+                &[
+                    admit_key(B, "k1", "pk-other"),
+                    admit_key("peer.example.net", "k2", "pk-k1"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(indices(&rejected), vec![0, 1]);
+        assert_eq!(roster.key_at(B, 10), None);
+        roster.apply_block(20, &[remove(A, "k1", false)]).unwrap();
+        assert!(roster
+            .apply_block(30, &[admit(B, "k2")])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
