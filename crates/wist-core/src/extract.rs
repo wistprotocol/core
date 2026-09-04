@@ -476,25 +476,6 @@ fn parse_port(p: Option<String>) -> PortResult {
     }
 }
 
-fn is_ldh_label(label: &str) -> bool {
-    let bytes = label.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    if !is_alnum(bytes[0]) || !is_alnum(*bytes.last().unwrap()) {
-        return false;
-    }
-    bytes.iter().all(|&b| is_alnum(b) || b == b'-')
-}
-
-fn is_ldh_host(host: &str) -> bool {
-    if host.is_empty() {
-        return false;
-    }
-    host.split('.').all(is_ldh_label)
-}
-
 fn renormalize_escapes(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -540,10 +521,7 @@ pub fn normalize_url(candidate: &str, base: &str) -> Option<String> {
         return None;
     }
     let (host_raw, port_part) = split_host_port(&authority);
-    let host = host_raw.to_lowercase();
-    if !is_ldh_host(&host) {
-        return None;
-    }
+    let host = crate::host::canonical_host(&host_raw).ok()?;
     let port = match parse_port(port_part) {
         PortResult::Invalid => return None,
         PortResult::Absent => None,
@@ -771,6 +749,18 @@ mod tests {
             ("https://user@example.com/x", None),
             ("https://[::1]/x", None),
             ("https://exa mple.com/x", None),
+            (
+                "https://B\u{DC}CHER.example/x",
+                Some("https://xn--bcher-kva.example/x"),
+            ),
+            (
+                "https://b\u{FC}cher.example/x",
+                Some("https://xn--bcher-kva.example/x"),
+            ),
+            (
+                "https://xn--bcher-kva.example/x",
+                Some("https://xn--bcher-kva.example/x"),
+            ),
             ("https://example.com/x#frag", Some("https://example.com/x")),
             ("https://example.com:443/x", Some("https://example.com/x")),
             ("https://example.com", Some("https://example.com/")),
