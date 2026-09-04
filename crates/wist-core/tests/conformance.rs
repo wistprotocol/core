@@ -799,21 +799,49 @@ fn wist4_coverage_vectors() {
             "{label}"
         );
     }
-    for case in v["discharge_cases"].as_array().unwrap() {
+    fn void_reason(name: &str) -> wist_core::coverage::VoidReason {
         use wist_core::coverage::VoidReason::*;
+        match name {
+            "removed after anchor block" => RemovedAfterAnchorBlock,
+            "coverage failure at sealing" => CoverageFailureAtSealing,
+            "malformed as evidence" => MalformedEvidence,
+            "never admitted at anchor block" => NeverAdmittedAtAnchorBlock,
+            "proof without standing" => ProofWithoutStanding,
+            "outside selection domain" => OutsideSelectionDomain,
+            "self audit" => SelfAudit,
+            other => panic!("unknown void reason {other}"),
+        }
+    }
+    for case in v["discharge_cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
-        let void: Vec<_> = match case["void"].as_str() {
-            None => vec![],
-            Some("removed after audited block") => vec![RemovedAfterAuditedBlock],
-            Some("coverage failure at sealing") => vec![CoverageFailureAtSealing],
-            Some("never admitted") => vec![NeverAdmitted],
-            Some("proof without standing") => vec![ProofWithoutStanding],
-            Some("outside selection domain") => vec![OutsideSelectionDomain],
-            Some("self audit") => vec![SelfAudit],
-            Some(other) => panic!("unknown void reason {other}"),
-        };
+        let void: Vec<_> = case["void"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| void_reason(r.as_str().unwrap()))
+            .collect();
         assert_eq!(
             wist_core::coverage::void_record_discharges(&void),
+            case["discharges"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+    for case in v["anchor_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let named_by = match case["named_by"].as_str().unwrap() {
+            "draw" => wist_core::coverage::NamedBy::Draw,
+            "extension" => wist_core::coverage::NamedBy::Extension,
+            other => panic!("unknown named_by {other}"),
+        };
+        let void = wist_core::coverage::removal_void(
+            named_by,
+            case["audited_sealed_at_s"].as_i64().unwrap(),
+            case["trigger_sealed_at_s"].as_i64().unwrap(),
+            case["removed_at_s"].as_i64().unwrap(),
+        );
+        assert_eq!(void, void_reason(case["void"].as_str().unwrap()), "{label}");
+        assert_eq!(
+            wist_core::coverage::void_record_discharges(&[void]),
             case["discharges"].as_bool().unwrap(),
             "{label}"
         );

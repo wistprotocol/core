@@ -17,21 +17,50 @@ pub enum Attestation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoidReason {
-    RemovedAfterAuditedBlock,
+    RemovedAfterAnchorBlock,
     CoverageFailureAtSealing,
-    NeverAdmitted,
+    MalformedEvidence,
+    NeverAdmittedAtAnchorBlock,
     ProofWithoutStanding,
     OutsideSelectionDomain,
     SelfAudit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedBy {
+    Draw,
+    Extension,
 }
 
 pub fn void_record_discharges(void: &[VoidReason]) -> bool {
     void.iter().all(|reason| {
         matches!(
             reason,
-            VoidReason::RemovedAfterAuditedBlock | VoidReason::CoverageFailureAtSealing
+            VoidReason::RemovedAfterAnchorBlock
+                | VoidReason::CoverageFailureAtSealing
+                | VoidReason::MalformedEvidence
         )
     })
+}
+
+pub fn duty_anchor_s(named_by: NamedBy, audited_sealed_at_s: i64, trigger_sealed_at_s: i64) -> i64 {
+    match named_by {
+        NamedBy::Draw => audited_sealed_at_s,
+        NamedBy::Extension => trigger_sealed_at_s,
+    }
+}
+
+pub fn removal_void(
+    named_by: NamedBy,
+    audited_sealed_at_s: i64,
+    trigger_sealed_at_s: i64,
+    removed_at_s: i64,
+) -> VoidReason {
+    if removed_at_s > duty_anchor_s(named_by, audited_sealed_at_s, trigger_sealed_at_s) {
+        VoidReason::RemovedAfterAnchorBlock
+    } else {
+        VoidReason::NeverAdmittedAtAnchorBlock
+    }
 }
 
 pub fn within_days_ending_at(t_s: i64, end_s: i64, days: u64) -> bool {
@@ -177,34 +206,65 @@ mod tests {
     }
 
     #[test]
-    fn a_standing_record_and_the_two_carve_outs_discharge() {
+    fn a_standing_record_the_two_carve_outs_and_malformed_evidence_discharge() {
         assert!(void_record_discharges(&[]));
         assert!(void_record_discharges(&[
-            VoidReason::RemovedAfterAuditedBlock
+            VoidReason::RemovedAfterAnchorBlock
         ]));
         assert!(void_record_discharges(&[
             VoidReason::CoverageFailureAtSealing
         ]));
+        assert!(void_record_discharges(&[VoidReason::MalformedEvidence]));
         assert!(void_record_discharges(&[
-            VoidReason::RemovedAfterAuditedBlock,
-            VoidReason::CoverageFailureAtSealing
+            VoidReason::RemovedAfterAnchorBlock,
+            VoidReason::CoverageFailureAtSealing,
+            VoidReason::MalformedEvidence
         ]));
     }
 
     #[test]
     fn a_record_with_no_duty_behind_it_discharges_nothing() {
         for void in [
-            VoidReason::NeverAdmitted,
+            VoidReason::NeverAdmittedAtAnchorBlock,
             VoidReason::ProofWithoutStanding,
             VoidReason::OutsideSelectionDomain,
             VoidReason::SelfAudit,
         ] {
             assert!(!void_record_discharges(&[void]), "{void:?}");
             assert!(
-                !void_record_discharges(&[VoidReason::RemovedAfterAuditedBlock, void]),
+                !void_record_discharges(&[VoidReason::RemovedAfterAnchorBlock, void]),
                 "{void:?} beside a carve-out"
             );
+            assert!(
+                !void_record_discharges(&[VoidReason::MalformedEvidence, void]),
+                "{void:?} beside malformed evidence"
+            );
         }
+    }
+
+    #[test]
+    fn a_removal_is_read_at_the_block_the_duty_is_anchored_to() {
+        let (audited, trigger) = (100 * DAY, 101 * DAY);
+        assert_eq!(
+            removal_void(NamedBy::Draw, audited, trigger, audited + 1),
+            VoidReason::RemovedAfterAnchorBlock
+        );
+        assert_eq!(
+            removal_void(NamedBy::Draw, audited, trigger, audited),
+            VoidReason::NeverAdmittedAtAnchorBlock
+        );
+        assert_eq!(
+            removal_void(NamedBy::Extension, audited, trigger, trigger + 1),
+            VoidReason::RemovedAfterAnchorBlock
+        );
+        assert_eq!(
+            removal_void(NamedBy::Extension, audited, trigger, trigger - 1),
+            VoidReason::NeverAdmittedAtAnchorBlock
+        );
+        assert_eq!(
+            removal_void(NamedBy::Extension, audited, trigger, trigger),
+            VoidReason::NeverAdmittedAtAnchorBlock
+        );
     }
 
     #[test]
