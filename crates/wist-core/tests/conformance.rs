@@ -1586,11 +1586,23 @@ fn wist4_extension_proof_vectors() {
     let trigger_alpha = alpha_of(&v["trigger_block"]);
     let audited_delta = v["audited_delta"].as_str().unwrap();
     let reputation_u = v["reputation_u"].as_u64().unwrap();
+    let key_of = |b64: &serde_json::Value| -> [u8; 32] {
+        wist_core::crypto::b64u_decode(b64.as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    };
+    let mut rotated_cases = 0;
     for case in v["cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
         let pi = proof80(case["vrf_proof_hex"].as_str().unwrap());
-        let over_audited = wist_core::vrf::verify(&pk, &audited_alpha, &pi).is_ok();
-        let over_trigger = wist_core::vrf::verify(&pk, &trigger_alpha, &pi).is_ok();
+        let pk_audited = key_of(&case["admitted_at"]["audited_block"]);
+        let pk_trigger = key_of(&case["admitted_at"]["trigger_block"]);
+        if pk_audited != pk_trigger {
+            rotated_cases += 1;
+        }
+        let over_audited = wist_core::vrf::verify(&pk_audited, &audited_alpha, &pi).is_ok();
+        let over_trigger = wist_core::vrf::verify(&pk_trigger, &trigger_alpha, &pi).is_ok();
         let expected_block = match case["proof_block"].as_str() {
             Some("audited") => (true, false),
             Some("trigger") => (false, true),
@@ -1601,14 +1613,14 @@ fn wist4_extension_proof_vectors() {
         let named = case["named_by_extension"].as_bool().unwrap();
         let claim = StandingClaim {
             audited_block: Some(ProofBlock {
-                admitted_key: &pk,
+                admitted_key: &pk_audited,
                 alpha: &audited_alpha,
             }),
             audited_delta,
             reputation_u,
             level1_sanction: false,
             trigger_block: named.then_some(ProofBlock {
-                admitted_key: &pk,
+                admitted_key: &pk_trigger,
                 alpha: &trigger_alpha,
             }),
             vrf_proof: &pi,
@@ -1621,6 +1633,10 @@ fn wist4_extension_proof_vectors() {
         };
         assert_eq!(standing(&claim), expected, "{label}");
     }
+    assert!(
+        rotated_cases > 0,
+        "no case rotates between the audited Block and B₁"
+    );
 
     let s = read_json("vectors/wist4/sampling.json");
     assert_eq!(s["auditor_public_key"], v["auditor_public_key"]);
