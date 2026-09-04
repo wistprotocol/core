@@ -46,18 +46,6 @@ enum Command {
     },
 }
 
-fn cpu_model() -> String {
-    std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("model name"))
-                .and_then(|l| l.split_once(':'))
-                .map(|(_, v)| v.trim().to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 fn main() {
     let cli = Cli::parse();
     let outcome = match cli.command {
