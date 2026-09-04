@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 pub const DECAY_TABLE_BYTES: &[u8] = include_bytes!("decay-table.json");
 pub const DECAY_TABLE_SHA256: &str =
-    "f0cd1eb48cbfb1647a083b4ba06e7f69e6c42d5b5f4bf8e4f42b97c6bfdf7dc1";
+    "1ef9e9be20c99e595c1c75c5ab63409e1cc4f9540b466b67ecebf4e2959986b9";
 pub const DECAY_MAX_DAYS: u64 = 1825;
 
 pub struct DecayTable(Vec<u32>);

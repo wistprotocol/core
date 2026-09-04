@@ -1,7 +1,6 @@
 {
   "scale": 1000000000,
   "max_days": 1825,
-  "note": "decay(t) = floor(exp(-t/180) * 1e9); decay(t) = 0 for t > 1825",
   "values": [
     1000000000,
     994459848,
