@@ -1,3 +1,4 @@
+use crate::confirmation::independent;
 use crate::crypto::hex_decode;
 use crate::error::Error;
 use sha2::{Digest, Sha256};
@@ -36,6 +37,46 @@ pub fn selected(d: u64, p_1e7: u64) -> bool {
     (d as u128) * 10_000_000 < (p_1e7 as u128) << 64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainDelta<'a> {
+    pub publisher: &'a str,
+    pub url_host: &'a str,
+}
+
+/// `host_seq0_height` is the height sealing the URL host's own seq-0
+/// Declaration Entry, when the Log holds one.
+pub fn in_selection_domain(
+    block_height: u64,
+    delta: DomainDelta<'_>,
+    host_seq0_height: Option<u64>,
+) -> bool {
+    delta.url_host == delta.publisher || host_seq0_height.is_none_or(|h| h > block_height)
+}
+
+pub fn selection_domain_excluded(
+    block_height: u64,
+    seq0_declarations: &[(&str, u64)],
+    deltas: &[DomainDelta<'_>],
+) -> Vec<usize> {
+    deltas
+        .iter()
+        .enumerate()
+        .filter(|(_, delta)| {
+            let seq0 = seq0_declarations
+                .iter()
+                .filter(|(host, _)| *host == delta.url_host)
+                .map(|(_, height)| *height)
+                .min();
+            !in_selection_domain(block_height, **delta, seq0)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+pub fn self_audit_barred(auditor_id: &str, publisher: &str) -> bool {
+    !independent(auditor_id, publisher)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +103,58 @@ mod tests {
     fn alpha_rejects_bad_prefix_and_length() {
         assert!(alpha_from_block_hash("f6a3").is_err());
         assert!(alpha_from_block_hash("sha256:f6a3").is_err());
+    }
+
+    const PARENT: DomainDelta<'static> = DomainDelta {
+        publisher: "example.com",
+        url_host: "blog.example.com",
+    };
+
+    #[test]
+    fn a_parent_delta_leaves_the_domain_from_the_declaration_height_on() {
+        assert!(in_selection_domain(4, PARENT, Some(5)));
+        assert!(!in_selection_domain(5, PARENT, Some(5)));
+        assert!(!in_selection_domain(u64::MAX, PARENT, Some(5)));
+        assert!(in_selection_domain(9, PARENT, None));
+    }
+
+    #[test]
+    fn a_hosts_own_delta_is_never_excluded() {
+        let own = DomainDelta {
+            publisher: "blog.example.com",
+            url_host: "blog.example.com",
+        };
+        assert!(in_selection_domain(9, own, Some(5)));
+        assert!(in_selection_domain(9, own, Some(0)));
+    }
+
+    #[test]
+    fn the_earliest_seq0_declaration_for_a_host_decides() {
+        let declarations = [("blog.example.com", 12), ("blog.example.com", 5)];
+        assert_eq!(
+            selection_domain_excluded(9, &declarations, &[PARENT]),
+            vec![0]
+        );
+        assert_eq!(
+            selection_domain_excluded(4, &declarations, &[PARENT]),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn exclusion_reads_the_delta_host_not_the_publisher() {
+        let declarations = [("example.com", 1)];
+        assert_eq!(
+            selection_domain_excluded(9, &declarations, &[PARENT]),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn self_audit_bar_is_the_independence_test() {
+        assert!(!self_audit_barred("audit.example.org", "shop.example.net"));
+        assert!(self_audit_barred("audit.example.net", "blog.example.net"));
+        assert!(self_audit_barred("audit.example.net", "audit.example.net"));
+        assert!(self_audit_barred("audit.example.net", "example.net"));
     }
 }

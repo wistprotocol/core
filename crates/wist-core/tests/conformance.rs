@@ -1470,3 +1470,57 @@ fn wist4_roster_vectors() {
         }
     }
 }
+
+#[test]
+fn wist4_selection_domain_vectors() {
+    let v = read_json("vectors/wist4/selection-domain.json");
+    for case in v["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let declarations: Vec<(&str, u64)> = case["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                (
+                    d["domain"].as_str().unwrap(),
+                    d["seq0_height"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        let deltas: Vec<wist_core::sampling::DomainDelta<'_>> = case["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| wist_core::sampling::DomainDelta {
+                publisher: e["publisher"].as_str().unwrap(),
+                url_host: e["url_host"].as_str().unwrap(),
+            })
+            .collect();
+        let expected: Vec<usize> = case["excluded_indices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i.as_u64().unwrap() as usize)
+            .collect();
+        assert_eq!(
+            wist_core::sampling::selection_domain_excluded(
+                case["block_height"].as_u64().unwrap(),
+                &declarations,
+                &deltas
+            ),
+            expected,
+            "{label}"
+        );
+    }
+    for case in v["self_audit_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        assert_eq!(
+            wist_core::sampling::self_audit_barred(
+                case["auditor_id"].as_str().unwrap(),
+                case["publisher"].as_str().unwrap()
+            ),
+            case["barred"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
