@@ -3,9 +3,8 @@ use serde_json::Value;
 
 const MAX_SAFE: i64 = 9_007_199_254_740_991;
 
-/// RFC 8785 JSON Canonicalization Scheme, restricted to the value shapes
-/// WIST objects use: no floats, no integers outside ±2^53-1 (all registry
-/// parameters are micro-units, so this restriction is deliberate).
+/// RFC 8785 JSON Canonicalization Scheme. A number outside the IEEE-754
+/// double range has no canonical form and is rejected (`WIST1-E05`).
 pub fn canonicalize(v: &Value) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     write_value(v, &mut out)?;
@@ -17,13 +16,7 @@ fn write_value(v: &Value, out: &mut Vec<u8>) -> Result<(), Error> {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
         Value::Bool(false) => out.extend_from_slice(b"false"),
-        Value::Number(n) => {
-            let i = n
-                .as_i64()
-                .filter(|i| (-MAX_SAFE..=MAX_SAFE).contains(i))
-                .ok_or_else(|| Error::Jcs(format!("unsupported number {n}")))?;
-            out.extend_from_slice(i.to_string().as_bytes());
-        }
+        Value::Number(n) => write_number(n, out)?,
         Value::String(s) => write_string(s, out),
         Value::Array(a) => {
             out.push(b'[');
@@ -57,6 +50,58 @@ fn write_value(v: &Value, out: &mut Vec<u8>) -> Result<(), Error> {
     Ok(())
 }
 
+/// RFC 8785 §3.2.2.3: a JSON number is an IEEE-754 double serialized by
+/// the ECMA-262 `Number::toString` algorithm. Integers inside the
+/// ±(2^53−1) safe range take the plain path, which that algorithm agrees
+/// with exactly.
+fn write_number(n: &serde_json::Number, out: &mut Vec<u8>) -> Result<(), Error> {
+    if let Some(i) = n.as_i64() {
+        if (-MAX_SAFE..=MAX_SAFE).contains(&i) {
+            out.extend_from_slice(i.to_string().as_bytes());
+            return Ok(());
+        }
+    }
+    let x = n
+        .as_f64()
+        .filter(|x| x.is_finite())
+        .ok_or_else(|| Error::Jcs(format!("number {n} is outside the IEEE-754 double range")))?;
+    out.extend_from_slice(number_to_string(x).as_bytes());
+    Ok(())
+}
+
+fn number_to_string(x: f64) -> String {
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    if x < 0.0 {
+        return format!("-{}", number_to_string(-x));
+    }
+    let shortest = format!("{x:e}");
+    let (mantissa, exponent) = shortest
+        .split_once('e')
+        .expect("LowerExp emits an exponent");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    let n = exponent.parse::<i32>().expect("LowerExp emits an integer") + 1;
+    if k <= n && n <= 21 {
+        let mut s = digits;
+        s.push_str(&"0".repeat((n - k) as usize));
+        s
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{}", "0".repeat(-n as usize), digits)
+    } else {
+        let sign = if n > 1 { '+' } else { '-' };
+        let magnitude = (n - 1).abs();
+        if k == 1 {
+            format!("{digits}e{sign}{magnitude}")
+        } else {
+            format!("{}.{}e{sign}{magnitude}", &digits[..1], &digits[1..])
+        }
+    }
+}
+
 fn write_string(s: &str, out: &mut Vec<u8>) {
     out.push(b'"');
     for ch in s.chars() {
@@ -83,7 +128,7 @@ fn write_string(s: &str, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::canonicalize;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn c(v: serde_json::Value) -> String {
         String::from_utf8(canonicalize(&v).unwrap()).unwrap()
@@ -113,20 +158,53 @@ mod tests {
     }
 
     #[test]
-    fn integers_only() {
+    fn integers_keep_their_plain_form() {
         assert_eq!(
             c(json!([0, -1, 9007199254740991i64])),
             "[0,-1,9007199254740991]"
         );
-        assert!(canonicalize(&json!(1.5)).is_err());
-        assert!(canonicalize(&json!(9007199254740992i64)).is_err());
-        assert!(canonicalize(&json!(-9007199254740992i64)).is_err());
+        assert_eq!(c(json!(9007199254740992i64)), "9007199254740992");
+        assert_eq!(c(json!(-9007199254740992i64)), "-9007199254740992");
     }
 
     #[test]
-    fn i64_min_is_rejected_not_panicking() {
-        let err = canonicalize(&json!(i64::MIN)).unwrap_err();
-        assert!(matches!(err, crate::Error::Jcs(_)));
+    #[allow(clippy::excessive_precision)]
+    fn non_integers_serialize_by_the_ecma262_number_to_string() {
+        let cases: &[(f64, &str)] = &[
+            (1.5, "1.5"),
+            (0.1, "0.1"),
+            (-0.0, "0"),
+            (1e21, "1e+21"),
+            (1e20, "100000000000000000000"),
+            (1e-6, "0.000001"),
+            (1e-7, "1e-7"),
+            (333333333.33333329, "333333333.3333333"),
+            (5e-324, "5e-324"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (-1.5, "-1.5"),
+            (1e30, "1e+30"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(c(json!(value)), *expected, "value {value}");
+        }
+    }
+
+    #[test]
+    fn an_integer_past_the_safe_range_is_serialized_as_the_double_it_is() {
+        assert_eq!(c(json!(i64::MIN)), "-9223372036854776000");
+    }
+
+    #[test]
+    fn parsing_a_canonical_number_recovers_the_double_it_came_from() {
+        let text = "5.3467826177869005e+177";
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed.as_f64().unwrap(), text.parse::<f64>().unwrap());
+    }
+
+    #[test]
+    fn a_number_outside_the_double_range_never_parses() {
+        let parsed = serde_json::from_str::<Value>("1e400");
+        assert!(parsed.is_err(), "{parsed:?}");
     }
 
     #[test]
@@ -147,6 +225,9 @@ mod props {
             Just(serde_json::Value::Null),
             any::<bool>().prop_map(serde_json::Value::from),
             (-9_007_199_254_740_991i64..=9_007_199_254_740_991).prop_map(serde_json::Value::from),
+            any::<f64>()
+                .prop_filter("JSON has no NaN or infinity", |x| x.is_finite())
+                .prop_map(serde_json::Value::from),
             ".*".prop_map(serde_json::Value::from),
         ];
         leaf.prop_recursive(4, 32, 8, |inner| {

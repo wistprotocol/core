@@ -8,7 +8,7 @@ repository = "https://github.com/wistprotocol/core"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 ed25519-dalek = "2"
 curve25519-dalek = "4"
 sha2 = "0.10"
