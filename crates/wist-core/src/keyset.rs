@@ -47,7 +47,7 @@ pub fn page_key_set_next(declarations: &[DeclarationAtInstant], generated_at_s: 
     declarations
         .iter()
         .filter(|d| d.sealed_at_s > generated_at_s)
-        .min_by_key(|d| (d.sealed_at_s, d.seq))
+        .min_by_key(|d| (d.sealed_at_s, std::cmp::Reverse(d.seq)))
         .map(|d| d.keys.as_slice())
         .unwrap_or(&[])
 }
@@ -132,14 +132,16 @@ mod tests {
     }
 
     #[test]
-    fn two_declarations_in_one_block_resolve_by_seq() {
+    fn a_block_sealing_two_declarations_resolves_to_its_key_set_either_way() {
         let decls = [
             at(0, 100, &["k1"]),
             at(1, 200, &["k2"]),
             at(2, 200, &["k3"]),
         ];
         assert_eq!(page_key_set_current(&decls, 200), ["k3"]);
-        assert_eq!(page_key_set_next(&decls, 150), ["k2"]);
+        assert_eq!(page_key_set_next(&decls, 150), ["k3"]);
+        assert_eq!(page_resolution(&decls, 150, "k2"), None);
+        assert_eq!(page_resolution(&decls, 200, "k2"), None);
     }
 
     #[test]
