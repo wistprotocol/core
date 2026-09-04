@@ -24,13 +24,35 @@ pub fn draw(beta: &[u8; 64], delta_id: &str) -> u64 {
     u64::from_be_bytes(digest[..8].try_into().unwrap())
 }
 
-pub fn p_1e7(reputation_u: u64, level1_sanction: bool) -> u64 {
+/// The §9 sampling constants in force at the audited Block's `sealed_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplingConstants {
+    pub floor_1e7: u64,
+    pub ceiling_1e7: u64,
+    pub slope_per_micro: u64,
+}
+
+pub const DEFAULT_SAMPLING: SamplingConstants = SamplingConstants {
+    floor_1e7: SAMPLING_FLOOR_1E7,
+    ceiling_1e7: SAMPLING_CEILING_1E7,
+    slope_per_micro: SAMPLING_SLOPE_PER_MICRO,
+};
+
+impl Default for SamplingConstants {
+    fn default() -> Self {
+        DEFAULT_SAMPLING
+    }
+}
+
+pub fn p_1e7(reputation_u: u64, level1_sanction: bool, c: &SamplingConstants) -> u64 {
     if level1_sanction {
-        return SAMPLING_CEILING_1E7;
+        return c.ceiling_1e7;
     }
     let rep = reputation_u.min(1_000_000);
-    (SAMPLING_FLOOR_1E7 + SAMPLING_SLOPE_PER_MICRO * (1_000_000 - rep))
-        .clamp(SAMPLING_FLOOR_1E7, SAMPLING_CEILING_1E7)
+    let rate =
+        u128::from(c.floor_1e7) + u128::from(c.slope_per_micro) * u128::from(1_000_000 - rep);
+    rate.max(u128::from(c.floor_1e7))
+        .min(u128::from(c.ceiling_1e7)) as u64
 }
 
 pub fn selected(d: u64, p_1e7: u64) -> bool {
@@ -83,11 +105,34 @@ mod tests {
 
     #[test]
     fn p_1e7_endpoints_and_sanction() {
-        assert_eq!(p_1e7(1_000_000, false), 200_000);
-        assert_eq!(p_1e7(100_000, false), 2_900_000);
-        assert_eq!(p_1e7(0, false), 3_200_000);
-        assert_eq!(p_1e7(500_000, true), 5_000_000);
-        assert_eq!(p_1e7(u64::MAX, false), 200_000);
+        assert_eq!(p_1e7(1_000_000, false, &DEFAULT_SAMPLING), 200_000);
+        assert_eq!(p_1e7(100_000, false, &DEFAULT_SAMPLING), 2_900_000);
+        assert_eq!(p_1e7(0, false, &DEFAULT_SAMPLING), 3_200_000);
+        assert_eq!(p_1e7(500_000, true, &DEFAULT_SAMPLING), 5_000_000);
+        assert_eq!(p_1e7(u64::MAX, false, &DEFAULT_SAMPLING), 200_000);
+    }
+
+    #[test]
+    fn amended_constants_replace_the_compiled_defaults() {
+        let amended = SamplingConstants {
+            floor_1e7: 400_000,
+            ceiling_1e7: 6_000_000,
+            slope_per_micro: 5,
+        };
+        assert_eq!(p_1e7(1_000_000, false, &amended), 400_000);
+        assert_eq!(p_1e7(0, false, &amended), 5_400_000);
+        assert_eq!(p_1e7(900_000, false, &amended), 900_000);
+        assert_eq!(p_1e7(500_000, true, &amended), 6_000_000);
+    }
+
+    #[test]
+    fn an_unbounded_slope_saturates_at_the_ceiling_instead_of_overflowing() {
+        let amended = SamplingConstants {
+            floor_1e7: 200_000,
+            ceiling_1e7: 5_000_000,
+            slope_per_micro: u64::MAX,
+        };
+        assert_eq!(p_1e7(999_999, false, &amended), 5_000_000);
     }
 
     #[test]

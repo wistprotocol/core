@@ -1,7 +1,7 @@
 use crate::confirmation::{independent, validate_log_order, CandidateRecord};
 use crate::coverage::within_days_ending_at;
 use crate::error::Error;
-use crate::sampling::{draw, p_1e7, selected};
+use crate::sampling::{draw, p_1e7, selected, SamplingConstants};
 use crate::vrf::{self, PROOF_LEN};
 
 pub const EXTENSION_TRIGGERS_MAX: u64 = 3;
@@ -32,6 +32,7 @@ pub struct StandingClaim<'a> {
     pub audited_delta: &'a str,
     pub reputation_u: u64,
     pub level1_sanction: bool,
+    pub sampling: SamplingConstants,
     pub trigger_block: Option<ProofBlock<'a>>,
     pub vrf_proof: &'a [u8; PROOF_LEN],
 }
@@ -40,7 +41,10 @@ pub fn standing(claim: &StandingClaim<'_>) -> Standing {
     if let Some(block) = claim.audited_block {
         if let Ok(beta) = vrf::verify(block.admitted_key, block.alpha, claim.vrf_proof) {
             let d = draw(&beta, claim.audited_delta);
-            if selected(d, p_1e7(claim.reputation_u, claim.level1_sanction)) {
+            if selected(
+                d,
+                p_1e7(claim.reputation_u, claim.level1_sanction, &claim.sampling),
+            ) {
                 return Standing::Selected;
             }
         }
@@ -140,6 +144,7 @@ pub fn in_divergence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sampling::DEFAULT_SAMPLING;
 
     const HOUR: i64 = 3_600;
     const DAY: i64 = 86_400;
@@ -328,11 +333,47 @@ mod tests {
     }
 
     #[test]
+    fn standing_reads_the_sampling_constants_in_force_at_the_audited_block() {
+        let (sk, pk) = keypair(7);
+        let pi = vrf::prove(&sk, &AUDITED_ALPHA).unwrap();
+        let beta = vrf::verify(&pk, &AUDITED_ALPHA, &pi).unwrap();
+        let narrowed = SamplingConstants {
+            floor_1e7: 1,
+            ceiling_1e7: 5_000_000,
+            slope_per_micro: 3,
+        };
+        let marginal = delta_where(&beta, |d| {
+            selected(d, p_1e7(1_000_000, false, &DEFAULT_SAMPLING))
+                && !selected(d, p_1e7(1_000_000, false, &narrowed))
+        });
+        let claim = StandingClaim {
+            audited_block: Some(ProofBlock {
+                admitted_key: &pk,
+                alpha: &AUDITED_ALPHA,
+            }),
+            audited_delta: &marginal,
+            reputation_u: 1_000_000,
+            level1_sanction: false,
+            sampling: DEFAULT_SAMPLING,
+            trigger_block: None,
+            vrf_proof: &pi,
+        };
+        assert_eq!(standing(&claim), Standing::Selected);
+        let amended = StandingClaim {
+            sampling: narrowed,
+            ..claim
+        };
+        assert_eq!(standing(&amended), Standing::Void);
+    }
+
+    #[test]
     fn a_selecting_proof_over_the_audited_block_stands_selected_even_when_summoned() {
         let (sk, pk) = keypair(7);
         let pi = vrf::prove(&sk, &AUDITED_ALPHA).unwrap();
         let beta = vrf::verify(&pk, &AUDITED_ALPHA, &pi).unwrap();
-        let chosen = delta_where(&beta, |d| selected(d, p_1e7(1_000_000, false)));
+        let chosen = delta_where(&beta, |d| {
+            selected(d, p_1e7(1_000_000, false, &DEFAULT_SAMPLING))
+        });
         let claim = StandingClaim {
             audited_block: Some(ProofBlock {
                 admitted_key: &pk,
@@ -341,6 +382,7 @@ mod tests {
             audited_delta: &chosen,
             reputation_u: 1_000_000,
             level1_sanction: false,
+            sampling: DEFAULT_SAMPLING,
             trigger_block: Some(ProofBlock {
                 admitted_key: &pk,
                 alpha: &TRIGGER_ALPHA,
@@ -356,7 +398,8 @@ mod tests {
         let pi = vrf::prove(&sk, &AUDITED_ALPHA).unwrap();
         let beta = vrf::verify(&pk, &AUDITED_ALPHA, &pi).unwrap();
         let marginal = delta_where(&beta, |d| {
-            !selected(d, p_1e7(1_000_000, false)) && selected(d, p_1e7(1_000_000, true))
+            !selected(d, p_1e7(1_000_000, false, &DEFAULT_SAMPLING))
+                && selected(d, p_1e7(1_000_000, true, &DEFAULT_SAMPLING))
         });
         let claim = StandingClaim {
             audited_block: Some(ProofBlock {
@@ -366,12 +409,14 @@ mod tests {
             audited_delta: &marginal,
             reputation_u: 1_000_000,
             level1_sanction: false,
+            sampling: DEFAULT_SAMPLING,
             trigger_block: None,
             vrf_proof: &pi,
         };
         assert_eq!(standing(&claim), Standing::Void);
         let sanctioned = StandingClaim {
             level1_sanction: true,
+            sampling: DEFAULT_SAMPLING,
             ..claim
         };
         assert_eq!(standing(&sanctioned), Standing::Selected);
@@ -386,6 +431,7 @@ mod tests {
             audited_delta: "sha256:00",
             reputation_u: 0,
             level1_sanction: true,
+            sampling: DEFAULT_SAMPLING,
             trigger_block: Some(ProofBlock {
                 admitted_key: &pk,
                 alpha: &TRIGGER_ALPHA,
@@ -413,6 +459,7 @@ mod tests {
             audited_delta: "sha256:00",
             reputation_u: 0,
             level1_sanction: true,
+            sampling: DEFAULT_SAMPLING,
             trigger_block: Some(ProofBlock {
                 admitted_key: &new_pk,
                 alpha: &TRIGGER_ALPHA,

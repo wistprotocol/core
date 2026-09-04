@@ -60,7 +60,11 @@ pub fn band_rep_u(b: Band) -> u64 {
 }
 
 pub fn band_p_1e7(b: Band) -> u64 {
-    sampling::p_1e7(band_rep_u(b), b == Band::Sanctioned)
+    sampling::p_1e7(
+        band_rep_u(b),
+        b == Band::Sanctioned,
+        &sampling::DEFAULT_SAMPLING,
+    )
 }
 
 impl Scenario {

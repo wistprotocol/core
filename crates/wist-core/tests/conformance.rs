@@ -505,7 +505,7 @@ fn wist4_reputation_vectors() {
             "{label} Q"
         );
         assert_eq!(
-            wist_core::sampling::p_1e7(rep, false),
+            wist_core::sampling::p_1e7(rep, false, &wist_core::sampling::DEFAULT_SAMPLING),
             case["p_1e7"].as_u64().unwrap(),
             "{label} p_1e7"
         );
@@ -571,7 +571,11 @@ fn wist4_sampling_vector() {
             "{label}"
         );
         assert_eq!(d, row["D"].as_u64().unwrap(), "{label}");
-        let p = wist_core::sampling::p_1e7(row["reputation_u"].as_u64().unwrap(), false);
+        let p = wist_core::sampling::p_1e7(
+            row["reputation_u"].as_u64().unwrap(),
+            false,
+            &wist_core::sampling::DEFAULT_SAMPLING,
+        );
         assert_eq!(p, row["p_1e7"].as_u64().unwrap(), "{label}");
         let lhs = d as u128 * 10_000_000;
         let rhs = (p as u128) << 64;
@@ -1619,6 +1623,7 @@ fn wist4_extension_proof_vectors() {
             audited_delta,
             reputation_u,
             level1_sanction: false,
+            sampling: wist_core::sampling::DEFAULT_SAMPLING,
             trigger_block: named.then_some(ProofBlock {
                 admitted_key: &pk_trigger,
                 alpha: &trigger_alpha,
@@ -1653,6 +1658,7 @@ fn wist4_extension_proof_vectors() {
             audited_delta: row["delta_id"].as_str().unwrap(),
             reputation_u: row["reputation_u"].as_u64().unwrap(),
             level1_sanction: false,
+            sampling: wist_core::sampling::DEFAULT_SAMPLING,
             trigger_block: None,
             vrf_proof: &pi,
         };
