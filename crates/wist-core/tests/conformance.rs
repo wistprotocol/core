@@ -1205,3 +1205,64 @@ fn wist4_example_record_carries_reference_delta() {
     let env: wist_core::objects::AuditRecordEnvelope = serde_json::from_value(v).unwrap();
     assert_eq!(env.record.reference_delta, env.record.audited_delta);
 }
+
+fn string_list(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn wist1_keyset_at_height_vectors() {
+    use wist_core::keyset::{key_set_at, verifies_at, SealedDeclaration};
+
+    let vector = read_json("vectors/wist1/keyset-at-height.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let declarations: Vec<SealedDeclaration> = case["declarations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| SealedDeclaration {
+                seq: d["seq"].as_u64().unwrap(),
+                height: d["height"].as_u64().unwrap(),
+                keys: string_list(&d["keys"]),
+            })
+            .collect();
+        let expected = &case["expected"];
+
+        for row in expected["key_set_at"].as_array().unwrap() {
+            let height = row["height"].as_u64().unwrap();
+            assert_eq!(
+                key_set_at(&declarations, height),
+                string_list(&row["keys"]),
+                "{name}: key set at height {height}"
+            );
+        }
+
+        let mut verifies = Vec::new();
+        let mut rejected = Vec::new();
+        for delta in case["deltas"].as_array().unwrap() {
+            let delta_id = delta["delta_id"].as_str().unwrap().to_string();
+            let height = delta["height"].as_u64().unwrap();
+            let signer = delta["signer"].as_str().unwrap();
+            if verifies_at(&declarations, height, signer) {
+                verifies.push(delta_id);
+            } else {
+                rejected.push(delta_id);
+            }
+        }
+        assert_eq!(
+            verifies,
+            string_list(&expected["verifies"]),
+            "{name}: verifies"
+        );
+        assert_eq!(
+            rejected,
+            string_list(&expected["rejected"]),
+            "{name}: rejected"
+        );
+    }
+}

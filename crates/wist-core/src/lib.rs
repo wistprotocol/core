@@ -23,6 +23,7 @@ pub mod extension;
 pub mod extract;
 pub mod host;
 pub mod jcs;
+pub mod keyset;
 pub mod merkle;
 pub mod objects;
 pub mod recovery;
