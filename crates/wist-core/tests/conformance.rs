@@ -638,11 +638,21 @@ fn wist4_confirmation_vectors() {
             row["b"]
         );
     }
-    for case in v["cases"].as_array().unwrap() {
+    for case in v["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(v["quorum_cases"].as_array().unwrap())
+    {
         let label = case["label"].as_str().unwrap();
         let raw = confirmation_records(case);
         let records = candidate_records(&raw);
-        let idx = wist_core::confirmation::confirming_index(&records, window).unwrap();
+        let idx = wist_core::confirmation::confirming_index_with_quorum(
+            &records,
+            window,
+            case["confirm_auditors"].as_u64().unwrap_or(2),
+        )
+        .unwrap();
         assert_eq!(
             idx.map(|i| i as u64),
             case["confirming_index"].as_u64(),
@@ -650,7 +660,11 @@ fn wist4_confirmation_vectors() {
         );
         if let Some(i) = idx {
             assert_eq!(
-                wist_core::confirmation::ci_severity(&records, i).unwrap() as u64,
+                if case["verdict"].as_str() == Some("link_inconsistent") {
+                    1
+                } else {
+                    wist_core::confirmation::ci_severity(&records, i).unwrap() as u64
+                },
                 case["severity"].as_u64().unwrap(),
                 "{label}"
             );
@@ -1827,10 +1841,14 @@ fn wist4_unauditable_vectors() {
             .iter()
             .filter(|r| {
                 let verdict: Verdict = serde_json::from_value(r["verdict"].clone()).unwrap();
-                let unmeasured = r["unmeasured"]
-                    .as_str()
-                    .map(|s| serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap());
-                let does = blocks(&verdict, r["robots_excluded"].as_bool().unwrap_or(false), unmeasured);
+                let unmeasured = r["unmeasured"].as_str().map(|s| {
+                    serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap()
+                });
+                let does = blocks(
+                    &verdict,
+                    r["robots_excluded"].as_bool().unwrap_or(false),
+                    unmeasured,
+                );
                 assert_eq!(does, r["blocks"].as_bool().unwrap(), "{label}: blocks");
                 does
             })

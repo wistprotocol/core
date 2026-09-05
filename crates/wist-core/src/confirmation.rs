@@ -44,14 +44,32 @@ pub fn confirming_index(
     records: &[CandidateRecord],
     window_hours: u64,
 ) -> Result<Option<usize>, Error> {
+    confirming_index_with_quorum(records, window_hours, 2)
+}
+
+pub fn confirming_index_with_quorum(
+    records: &[CandidateRecord],
+    window_hours: u64,
+    quorum: u64,
+) -> Result<Option<usize>, Error> {
     validate_log_order(records)?;
-    let window_s = (window_hours as i64) * 3_600;
+    if quorum < 2 {
+        return Err(Error::Confirmation("quorum must be at least two".into()));
+    }
+    let window_s = i128::from(window_hours) * 3_600;
     for (i, record) in records.iter().enumerate() {
-        let confirms = records[..i].iter().any(|earlier| {
-            independent(earlier.auditor_id, record.auditor_id)
-                && record.block_sealed_at_s - earlier.block_sealed_at_s <= window_s
-        });
-        if confirms {
+        let mut members: Vec<&str> = Vec::new();
+        for earlier in &records[..=i] {
+            if i128::from(record.block_sealed_at_s) - i128::from(earlier.block_sealed_at_s)
+                <= window_s
+                && members
+                    .iter()
+                    .all(|member| independent(member, earlier.auditor_id))
+            {
+                members.push(earlier.auditor_id);
+            }
+        }
+        if members.len() as u64 >= quorum {
             return Ok(Some(i));
         }
     }
