@@ -25,6 +25,15 @@ impl ChainTips {
         true
     }
 
+    /// Sets a tip without the `prev` check — for restoring state a
+    /// Snapshot or a local store already carries.
+    pub fn adopt(&mut self, publisher: &str, url: &str, id: &str) {
+        self.tips
+            .entry(publisher.to_string())
+            .or_default()
+            .insert(url.to_string(), id.to_string());
+    }
+
     pub fn tips(&self) -> impl Iterator<Item = (&str, &str, &str)> + '_ {
         self.tips.iter().flat_map(|(publisher, urls)| {
             urls.iter()
