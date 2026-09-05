@@ -31,6 +31,7 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
         .collect())
 }
 
+#[derive(Clone)]
 pub struct PublicKey(VerifyingKey);
 
 /// WIST-1 §4: the encoded `y` must be below `p = 2^255 - 19`. Decoders that
@@ -73,6 +74,10 @@ impl PublicKey {
             ));
         }
         Ok(PublicKey(key))
+    }
+
+    pub fn to_b64u(&self) -> String {
+        b64u_encode(self.0.as_bytes())
     }
 }
 
