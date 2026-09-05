@@ -101,14 +101,15 @@ pub fn establishing_height(
     attestation_height: Option<u64>,
     record_seal_blocks: u64,
 ) -> Option<u64> {
-    if let Some(height) = attestation_height {
-        return Some(height);
-    }
-    blocks
+    let unattested = blocks
         .iter()
         .filter(|b| b.sealed_at_s > deadline_s)
         .nth(record_seal_blocks as usize - 1)
-        .map(|b| b.height)
+        .map(|b| b.height);
+    match (attestation_height, unattested) {
+        (Some(a), Some(u)) => Some(a.min(u)),
+        (a, u) => a.or(u),
+    }
 }
 
 pub fn failure_counts_at(
@@ -259,9 +260,14 @@ mod tests {
             "the deadline has not been passed by record_seal_blocks Blocks"
         );
         assert_eq!(
-            establishing_height(&blocks, 619_200, Some(180), 4),
-            Some(180),
+            establishing_height(&blocks, 619_200, Some(174), 4),
+            Some(174),
             "an attestation establishes at its own Block"
+        );
+        assert_eq!(
+            establishing_height(&blocks, 619_200, Some(180), 4),
+            Some(176),
+            "an attestation sealed after the unattested rule's Block moves nothing"
         );
     }
 
