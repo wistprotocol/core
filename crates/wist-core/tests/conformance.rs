@@ -1769,7 +1769,7 @@ fn wist4_extension_proof_vectors() {
 fn wist4_unauditable_vectors() {
     use wist_core::objects::audit::Verdict;
     use wist_core::unauditable::{
-        clears, unauditable_at, SealedBy, VerdictRecord, UNAUDITABLE_HORIZON_DAYS,
+        blocks, clears, unauditable_at, SealedBy, VerdictRecord, UNAUDITABLE_HORIZON_DAYS,
     };
     let v = read_json("vectors/wist4/unauditable.json");
     let horizon = v["unauditable_horizon_days"].as_u64().unwrap();
@@ -1809,6 +1809,15 @@ fn wist4_unauditable_vectors() {
             .as_array()
             .unwrap()
             .iter()
+            .filter(|r| {
+                let verdict: Verdict = serde_json::from_value(r["verdict"].clone()).unwrap();
+                let unmeasured = r["unmeasured"]
+                    .as_str()
+                    .map(|s| serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap());
+                let does = blocks(&verdict, r["robots_excluded"].as_bool().unwrap_or(false), unmeasured);
+                assert_eq!(does, r["blocks"].as_bool().unwrap(), "{label}: blocks");
+                does
+            })
             .map(|r| SealedBy {
                 auditor_id: r["auditor"].as_str().unwrap(),
                 sealed_at_s: r["sealed_at_s"].as_i64().unwrap(),

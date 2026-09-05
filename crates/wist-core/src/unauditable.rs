@@ -1,6 +1,6 @@
 use crate::confirmation::independent;
 use crate::coverage::within_days_ending_at;
-use crate::objects::audit::Verdict;
+use crate::objects::audit::{Unmeasured, Verdict};
 
 pub const UNAUDITABLE_HORIZON_DAYS: u64 = 30;
 
@@ -14,6 +14,14 @@ pub struct SealedBy<'a> {
 pub struct VerdictRecord<'a> {
     pub sealed_by: SealedBy<'a>,
     pub verdict: Verdict,
+}
+
+pub fn blocks(verdict: &Verdict, robots_excluded: bool, unmeasured: Option<Unmeasured>) -> bool {
+    match verdict {
+        Verdict::Unreachable => robots_excluded,
+        Verdict::NotAuditable => unmeasured == Some(Unmeasured::Observed),
+        _ => false,
+    }
 }
 
 pub fn clears(verdict: &Verdict) -> bool {

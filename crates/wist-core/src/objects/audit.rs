@@ -14,6 +14,13 @@ pub enum Verdict {
     LinkInconsistent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unmeasured {
+    Observed,
+    Reference,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditRecord {
@@ -35,6 +42,8 @@ pub struct AuditRecord {
     pub link_agreement: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub robots_excluded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unmeasured: Option<Unmeasured>,
     pub vrf_proof: String,
     #[serde(deserialize_with = "crate::objects::required_nullable")]
     pub prev_record: Option<String>,
