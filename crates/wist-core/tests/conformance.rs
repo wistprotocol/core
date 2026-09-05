@@ -1033,6 +1033,32 @@ fn wist4_sanctions_vectors() {
             "{label}"
         );
     }
+    for case in v["ladder_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let met: Vec<Vec<i64>> = case["met_times_s"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(i64_list)
+            .collect();
+        let clear: Vec<Vec<i64>> = case["clear_times_s"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(i64_list)
+            .collect();
+        let levels: [(&[i64], &[i64]); 4] = [
+            (&met[0], &clear[0]),
+            (&met[1], &clear[1]),
+            (&met[2], &clear[2]),
+            (&met[3], &clear[3]),
+        ];
+        assert_eq!(
+            wist_core::sanctions::ladder_level(&levels, case["n_s"].as_i64().unwrap()),
+            case["level"].as_u64().unwrap() as u8,
+            "{label}"
+        );
+    }
 }
 
 #[test]
