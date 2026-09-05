@@ -104,7 +104,7 @@ pub fn in_force(met_times_s: &[i64], clear_times_s: &[i64], n_s: i64) -> bool {
     let last_met = met_times_s.iter().filter(|&&m| m <= n_s).max();
     let last_clear = clear_times_s.iter().filter(|&&c| c <= n_s).max();
     match (last_met, last_clear) {
-        (Some(m), Some(c)) => c < m,
+        (Some(m), Some(c)) => c <= m,
         (Some(_), None) => true,
         (None, _) => false,
     }
@@ -293,7 +293,7 @@ mod tests {
         assert!(!in_force(&[50], &[60], 100));
         assert!(in_force(&[50, 70], &[60], 100));
         assert!(!in_force(&[150], &[], 100));
-        assert!(!in_force(&[50], &[50], 100));
+        assert!(in_force(&[50], &[50], 100));
     }
 
     #[test]
