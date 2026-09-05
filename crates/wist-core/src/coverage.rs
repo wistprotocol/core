@@ -63,6 +63,20 @@ pub fn removal_void(
     }
 }
 
+pub fn signature_void(
+    signed_under: &str,
+    record_block_key: Option<&str>,
+    duty_block_key: &str,
+) -> Option<VoidReason> {
+    if record_block_key == Some(signed_under) {
+        None
+    } else if signed_under == duty_block_key {
+        Some(VoidReason::RemovedAfterAnchorBlock)
+    } else {
+        Some(VoidReason::NeverAdmittedAtAnchorBlock)
+    }
+}
+
 pub fn within_days_ending_at(t_s: i64, end_s: i64, days: u64) -> bool {
     t_s <= end_s && end_s - t_s < (days as i64) * 86_400
 }

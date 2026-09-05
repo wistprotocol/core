@@ -916,6 +916,22 @@ fn wist4_coverage_vectors() {
             "{label}"
         );
     }
+    for case in v["signature_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let void = wist_core::coverage::signature_void(
+            case["signed_under"].as_str().unwrap(),
+            case["record_block_key"].as_str(),
+            case["duty_block_key"].as_str().unwrap(),
+        );
+        assert_eq!(void, case["void"].as_str().map(void_reason), "{label}");
+        assert_eq!(void.is_none(), case["counts"].as_bool().unwrap(), "{label}");
+        let voids: Vec<_> = void.into_iter().collect();
+        assert_eq!(
+            wist_core::coverage::void_record_discharges(&voids),
+            case["discharges"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
 }
 
 #[test]
