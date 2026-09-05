@@ -96,10 +96,10 @@ pub fn pair_status(selected: &[&str], recorded: &[&str], attested: bool) -> Pair
     }
 }
 
-pub fn pair_counts(attestation: Attestation, chain_proof_in_window: bool) -> bool {
+pub fn pair_counts(attestation: Attestation, _chain_gap_in_window: bool) -> bool {
     match attestation {
         Attestation::Unmet { chain_contradicts } => !chain_contradicts,
-        Attestation::Missing => !chain_proof_in_window,
+        Attestation::Missing => true,
     }
 }
 
@@ -229,12 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn chain_proof_excludes_every_unattested_pair_in_the_window() {
-        assert!(!pair_counts(Attestation::Missing, true));
+    fn bare_chain_gap_does_not_exclude_an_unattested_pair() {
+        assert!(pair_counts(Attestation::Missing, true));
     }
 
     #[test]
-    fn chain_proof_does_not_shield_an_attested_unmet_duty() {
+    fn bare_chain_gap_does_not_shield_an_attested_unmet_duty() {
         assert!(pair_counts(
             Attestation::Unmet {
                 chain_contradicts: false

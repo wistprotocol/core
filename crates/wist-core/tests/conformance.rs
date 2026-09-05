@@ -800,7 +800,7 @@ fn wist4_coverage_vectors() {
         assert_eq!(
             wist_core::coverage::pair_counts(
                 attestation,
-                case["chain_proof_in_window"].as_bool().unwrap()
+                case["chain_gap_in_window"].as_bool().unwrap()
             ),
             case["counts"].as_bool().unwrap(),
             "{label}"
