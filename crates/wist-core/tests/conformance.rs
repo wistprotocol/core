@@ -355,7 +355,7 @@ fn wist2_text_extraction_vector() {
             case["reference"].as_str().unwrap(),
             case["observed"].as_str().unwrap(),
             guard,
-            wist_core::extract::SHINGLE_SIZE,
+            case["shingle_size"].as_u64().unwrap() as usize,
         );
         let expected = case["similarity"].as_u64();
         assert_eq!(got, expected, "{}", case["label"]);
