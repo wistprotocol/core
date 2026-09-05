@@ -831,6 +831,71 @@ fn wist4_coverage_vectors() {
             "{label}"
         );
     }
+    for case in v["establishing_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let blocks: Vec<wist_core::coverage::Block> = case["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| wist_core::coverage::Block {
+                height: b["height"].as_u64().unwrap(),
+                sealed_at_s: b["sealed_at_s"].as_i64().unwrap(),
+            })
+            .collect();
+        let establishing = wist_core::coverage::establishing_height(
+            &blocks,
+            case["coverage_deadline_s"].as_i64().unwrap(),
+            case["attestation_height"].as_u64(),
+            case["record_seal_blocks"].as_u64().unwrap(),
+        );
+        assert_eq!(
+            establishing,
+            case["establishing_height"].as_u64(),
+            "{label}"
+        );
+        let audited_sealed_at_s = case["audited_block"]["sealed_at_s"].as_i64().unwrap();
+        for probe in case["counts_at"].as_array().unwrap() {
+            assert_eq!(
+                wist_core::coverage::failure_counts_at(
+                    establishing,
+                    audited_sealed_at_s,
+                    probe["height"].as_u64().unwrap(),
+                    probe["sealed_at_s"].as_i64().unwrap()
+                ),
+                probe["counts"].as_bool().unwrap(),
+                "{label} at height {}",
+                probe["height"]
+            );
+        }
+    }
+    for case in v["chain_scope_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        for log in case["logs"].as_array().unwrap() {
+            for (field, prev_map) in [
+                ("chain_gap", &case["prev_record"]),
+                (
+                    "chain_gap_under_global_publication_order",
+                    &case["prev_record_under_global_publication_order"],
+                ),
+            ] {
+                let sealed: Vec<(&str, Option<&str>)> = log["sealed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|id| {
+                        let id = id.as_str().unwrap();
+                        (id, prev_map[id].as_str())
+                    })
+                    .collect();
+                assert_eq!(
+                    wist_core::coverage::chain_gap(&sealed),
+                    log[field].as_bool().unwrap(),
+                    "{label} {} {field}",
+                    log["log"]
+                );
+            }
+        }
+    }
     for case in v["anchor_cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
         let named_by = match case["named_by"].as_str().unwrap() {

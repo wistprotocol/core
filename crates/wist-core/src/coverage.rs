@@ -89,6 +89,45 @@ pub fn pair_counts(attestation: Attestation, chain_proof_in_window: bool) -> boo
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Block {
+    pub height: u64,
+    pub sealed_at_s: i64,
+}
+
+pub fn establishing_height(
+    blocks: &[Block],
+    deadline_s: i64,
+    attestation_height: Option<u64>,
+    record_seal_blocks: u64,
+) -> Option<u64> {
+    if let Some(height) = attestation_height {
+        return Some(height);
+    }
+    blocks
+        .iter()
+        .filter(|b| b.sealed_at_s > deadline_s)
+        .nth(record_seal_blocks as usize - 1)
+        .map(|b| b.height)
+}
+
+pub fn failure_counts_at(
+    establishing_height: Option<u64>,
+    audited_sealed_at_s: i64,
+    n_height: u64,
+    n_sealed_at_s: i64,
+) -> bool {
+    establishing_height.is_some_and(|h| h <= n_height)
+        && within_days_ending_at(audited_sealed_at_s, n_sealed_at_s, WINDOW_DAYS)
+}
+
+pub fn chain_gap(sealed: &[(&str, Option<&str>)]) -> bool {
+    let ids: Vec<&str> = sealed.iter().map(|(id, _)| *id).collect();
+    sealed
+        .iter()
+        .any(|(_, prev)| prev.is_some_and(|p| !ids.contains(&p)))
+}
+
 pub fn in_coverage_failure(
     counting_failure_block_times_s: &[i64],
     n_sealed_at_s: i64,
@@ -203,6 +242,59 @@ mod tests {
             .map(|i| 90 * DAY + i)
             .collect();
         assert!(in_coverage_failure(&past, 100 * DAY, COVERAGE_FAILURES_MAX));
+    }
+
+    #[test]
+    fn an_unattested_pair_establishes_at_the_nth_block_past_the_deadline() {
+        let blocks: Vec<Block> = (170..185)
+            .map(|h| Block {
+                height: h,
+                sealed_at_s: h as i64 * 3600,
+            })
+            .collect();
+        assert_eq!(establishing_height(&blocks, 619_200, None, 4), Some(176));
+        assert_eq!(
+            establishing_height(&blocks[..3], 619_200, None, 4),
+            None,
+            "the deadline has not been passed by record_seal_blocks Blocks"
+        );
+        assert_eq!(
+            establishing_height(&blocks, 619_200, Some(180), 4),
+            Some(180),
+            "an attestation establishes at its own Block"
+        );
+    }
+
+    #[test]
+    fn a_failure_counts_from_its_establishing_height_and_only_inside_the_window() {
+        assert!(!failure_counts_at(Some(180), 360_000, 179, 644_400));
+        assert!(failure_counts_at(Some(180), 360_000, 180, 648_000));
+        assert!(!failure_counts_at(None, 360_000, 1_000, 3_600_000));
+        assert!(
+            !failure_counts_at(Some(820), 360_000, 820, 2_952_000),
+            "evidence past the audited Block's 30-day window counts at no height"
+        );
+    }
+
+    #[test]
+    fn the_chain_gap_reads_one_logs_items() {
+        let log_a = [
+            ("sha256:p1", None),
+            ("sha256:p3", Some("sha256:p1")),
+            ("sha256:p5", Some("sha256:p3")),
+        ];
+        assert!(!chain_gap(&log_a));
+        let suppressed = [("sha256:p1", None), ("sha256:p5", Some("sha256:p3"))];
+        assert!(chain_gap(&suppressed));
+        let global_order = [
+            ("sha256:p1", None),
+            ("sha256:p3", Some("sha256:p2")),
+            ("sha256:p5", Some("sha256:p4")),
+        ];
+        assert!(
+            chain_gap(&global_order),
+            "a chain spanning two Logs shows a gap in each"
+        );
     }
 
     #[test]
