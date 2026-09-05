@@ -39,7 +39,16 @@ impl DecayTable {
     }
 
     pub fn decay(&self, t_days: u64) -> u64 {
-        if t_days > DECAY_MAX_DAYS {
+        self.decay_within(t_days, DECAY_MAX_DAYS)
+    }
+
+    /// WIST-4 §6.1 with §9: `decay_horizon_days` is amendable within
+    /// [1, 1825], and a penalty older than the horizon in force has
+    /// expired. The table itself is normative as bytes and is never
+    /// recomputed for a shorter horizon.
+    pub fn decay_within(&self, t_days: u64, horizon_days: u64) -> u64 {
+        let horizon = horizon_days.min(DECAY_MAX_DAYS);
+        if t_days > horizon {
             0
         } else {
             self.0[t_days as usize] as u64
@@ -75,9 +84,15 @@ pub fn base_u(a_days: u64) -> u64 {
 }
 
 pub fn penalty_n(confirmed: &[(u8, u64)], table: &DecayTable) -> u128 {
+    penalty_n_within(confirmed, table, DECAY_MAX_DAYS)
+}
+
+pub fn penalty_n_within(confirmed: &[(u8, u64)], table: &DecayTable, horizon_days: u64) -> u128 {
     confirmed
         .iter()
-        .map(|&(severity, t_days)| (severity as u128) * (table.decay(t_days) as u128))
+        .map(|&(severity, t_days)| {
+            (severity as u128) * (table.decay_within(t_days, horizon_days) as u128)
+        })
         .sum()
 }
 
@@ -117,6 +132,15 @@ mod tests {
     #[test]
     fn from_bytes_rejects_wrong_hash() {
         assert!(DecayTable::from_bytes(b"not json").is_err());
+    }
+
+    #[test]
+    fn an_amended_horizon_zeroes_decay_above_itself() {
+        let t = DecayTable::builtin();
+        assert_eq!(t.decay_within(30, 90), t.decay(30));
+        assert_eq!(t.decay_within(90, 90), t.decay(90));
+        assert_eq!(t.decay_within(91, 90), 0);
+        assert_eq!(t.decay_within(1825, DECAY_MAX_DAYS), t.decay(1825));
     }
 
     #[test]
