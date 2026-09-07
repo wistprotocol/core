@@ -253,3 +253,76 @@ fn live_evidence_retention() {
         }
     }
 }
+
+#[test]
+fn block_size_schedules() {
+    let v = vector();
+    for case in v["block_size_cases"].as_array().unwrap() {
+        let mut schedule = Schedule::new(0);
+        let mut largest = 0;
+        let mut previous = None;
+        for (height, block) in case["blocks"].as_array().unwrap().iter().enumerate() {
+            let expected = &case["expected"][height];
+            let transport = previous.map_or(v["block_cap_default"].as_u64().unwrap(), |at| {
+                schedule.block_size_bounds(at).1
+            });
+            assert_eq!(
+                transport,
+                expected["transport_bound_before"].as_u64().unwrap(),
+                "{}",
+                case["label"]
+            );
+            let at = block["sealed_at_s"].as_i64().unwrap();
+            let proposed_max = largest.max(block["jcs_bytes"].as_u64().unwrap());
+            let mut tentative = schedule.clone();
+            let mut rejected = Vec::new();
+            for (index, change) in block["amendments"].as_array().unwrap().iter().enumerate() {
+                let amendment = Amendment {
+                    parameter: "block_decompressed_cap_bytes".into(),
+                    value: change["value"].as_i64().unwrap(),
+                    block_number: height as u64,
+                    entry_index: index as u64,
+                    sealed_at_s: at,
+                    effective_at_s: change["effective_at_s"].as_i64().unwrap(),
+                };
+                if tentative
+                    .try_accept_with_block_size(amendment, proposed_max)
+                    .is_err()
+                {
+                    rejected.push(index);
+                }
+            }
+            assert_eq!(
+                serde_json::json!(rejected),
+                expected["rejected_indices"],
+                "{}",
+                case["label"]
+            );
+            let cap = tentative.block_size_bounds(at).0;
+            assert_eq!(
+                cap,
+                expected["sealing_cap"].as_u64().unwrap(),
+                "{}",
+                case["label"]
+            );
+            let valid = proposed_max <= cap;
+            assert_eq!(
+                valid,
+                expected["block_valid"].as_bool().unwrap(),
+                "{}",
+                case["label"]
+            );
+            if valid {
+                schedule = tentative;
+                largest = proposed_max;
+                previous = Some(at);
+            }
+            assert_eq!(
+                largest,
+                expected["largest_bytes"].as_u64().unwrap(),
+                "{}",
+                case["label"]
+            );
+        }
+    }
+}

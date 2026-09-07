@@ -69,7 +69,32 @@ impl Schedule {
         )
     }
 
+    pub fn block_size_bounds(&self, at_s: i64) -> (u64, u64) {
+        let mut bounds = (u64::MAX, 0);
+        for instant in std::iter::once(at_s).chain(
+            self.accepted
+                .iter()
+                .map(|a| a.effective_at_s)
+                .filter(|&t| t >= at_s),
+        ) {
+            let cap = self
+                .value_at("block_decompressed_cap_bytes", instant)
+                .unwrap() as u64;
+            bounds.0 = bounds.0.min(cap);
+            bounds.1 = bounds.1.max(cap);
+        }
+        bounds
+    }
+
     pub fn try_accept(&mut self, amendment: Amendment) -> Result<(), Error> {
+        self.try_accept_with_block_size(amendment, 0)
+    }
+
+    pub fn try_accept_with_block_size(
+        &mut self,
+        amendment: Amendment,
+        largest_block_bytes: u64,
+    ) -> Result<(), Error> {
         let position = (amendment.block_number, amendment.entry_index);
         if self.last_position.is_some_and(|last| position <= last) {
             return Err(Error::Parameter(
@@ -90,7 +115,15 @@ impl Schedule {
         }
         let sealed_at_s = amendment.sealed_at_s;
         self.accepted.push(amendment);
-        let result = self.validate_from(sealed_at_s);
+        let result = self.validate_from(sealed_at_s).and_then(|()| {
+            if self.block_size_bounds(sealed_at_s).0 < largest_block_bytes {
+                Err(Error::Parameter(
+                    "Block cap is below a sealed Block's size".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
         if result.is_err() {
             self.accepted.pop();
         }

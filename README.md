@@ -90,10 +90,17 @@ fields alone do not establish equal maps.
 
 Supply the Log's first Block timestamp and otherwise-validated amendments:
 authenticated Registry Updates with parsed integer values and timestamps,
-unique Entry positions, and verified Block chronology. Callers still
-enforce state-dependent guarantees such as the Block size cap against
-the Blocks actually sealed. Arithmetic and schedule acceptance do not
-replace those checks or the separate evidence-serving duty below.
+unique Entry positions, and verified Block chronology. `try_accept_with_block_size` additionally checks each prospective cap
+against the supplied largest complete JCS Block through the candidate's
+own height. Callers preserve that running maximum during replay and
+restoration; a later maximum must not reconsider earlier acceptance.
+`block_size_bounds` returns the minimum sealing cap and maximum transport
+cap across the current and accepted future maps at the supplied instant.
+After all candidates, callers reject a Block whose running size maximum
+exceeds the minimum. The maximum bounds decompression from a verified
+prefix; it does not authorize a Block before an increase takes effect.
+These checks do not replace authentication or the evidence-serving duty
+below.
 
 ## Sanction replay
 
