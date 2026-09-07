@@ -52,6 +52,27 @@ pub fn confirming_index_with_quorum(
     window_hours: u64,
     quorum: u64,
 ) -> Result<Option<usize>, Error> {
+    quorum_index(records, window_hours, quorum, None)
+}
+
+pub fn confirming_index_including(
+    records: &[CandidateRecord],
+    window_hours: u64,
+    quorum: u64,
+    required_index: usize,
+) -> Result<Option<usize>, Error> {
+    if required_index >= records.len() {
+        return Err(Error::Confirmation("required Record is absent".into()));
+    }
+    quorum_index(records, window_hours, quorum, Some(required_index))
+}
+
+fn quorum_index(
+    records: &[CandidateRecord],
+    window_hours: u64,
+    quorum: u64,
+    required_index: Option<usize>,
+) -> Result<Option<usize>, Error> {
     validate_log_order(records)?;
     if quorum < 2 {
         return Err(Error::Confirmation("quorum must be at least two".into()));
@@ -59,6 +80,16 @@ pub fn confirming_index_with_quorum(
     let window_s = i128::from(window_hours) * 3_600;
     for (i, record) in records.iter().enumerate() {
         let mut members: Vec<&str> = Vec::new();
+        if let Some(required) = required_index {
+            if i < required
+                || i128::from(record.block_sealed_at_s)
+                    - i128::from(records[required].block_sealed_at_s)
+                    > window_s
+            {
+                continue;
+            }
+            members.push(records[required].auditor_id);
+        }
         for earlier in &records[..=i] {
             if i128::from(record.block_sealed_at_s) - i128::from(earlier.block_sealed_at_s)
                 <= window_s
@@ -240,6 +271,25 @@ mod tests {
             confirming_index(&records, CONFIRM_WINDOW_HOURS).unwrap(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn a_quorum_before_the_required_record_cannot_confirm_it() {
+        let records = seq(&[
+            (0, "audit.example.net"),
+            (1, "checker.example.org"),
+            (2, "watch.sample.net"),
+            (100, "eye.third.org"),
+        ]);
+        assert_eq!(
+            confirming_index_with_quorum(&records, 72, 3).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            confirming_index_including(&records, 72, 3, 3).unwrap(),
+            None
+        );
+        assert!(confirming_index_including(&records, 72, 3, 4).is_err());
     }
 
     #[test]

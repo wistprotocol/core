@@ -21,6 +21,23 @@ Conformance tests read the spec repo's schemas/vectors from `../spec`
 WIST_SPEC_DIR=/path/to/spec cargo test
 ```
 
+## Extension replay
+
+`extension::evaluate` takes the valid Records for one Delta in Log order,
+the complete sealed Block history through the height being read, and an
+`ExtensionClaim` identifying the trigger, whether it summoned peers, and
+the confirmation quorum and window in force at its Block. It derives the
+first closing Block and, when contradicted, the establishing Block.
+Records after the fixed window cannot change that outcome.
+
+Associate each establishing Block with the signing Publisher's domain in
+an `extension::Escalation`. `extension::escalated_sampling` evaluates the
+domain's 30-day state at a supplied Block. Selection callers pass the
+sanction and escalation states at height B − 1 to `sampling::p_1e7` or
+`extension::StandingClaim`, with sampling constants in force at B. For
+Block 0, both states come from the empty Log. Escalation changes sampling
+only; it creates no sanction or removal state.
+
 ## Verification
 
 ```bash

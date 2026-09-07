@@ -506,7 +506,7 @@ fn wist4_reputation_vectors() {
             "{label} Q"
         );
         assert_eq!(
-            wist_core::sampling::p_1e7(rep, false, &wist_core::sampling::DEFAULT_SAMPLING),
+            wist_core::sampling::p_1e7(rep, false, false, &wist_core::sampling::DEFAULT_SAMPLING),
             case["p_1e7"].as_u64().unwrap(),
             "{label} p_1e7"
         );
@@ -574,6 +574,7 @@ fn wist4_sampling_vector() {
         assert_eq!(d, row["D"].as_u64().unwrap(), "{label}");
         let p = wist_core::sampling::p_1e7(
             row["reputation_u"].as_u64().unwrap(),
+            false,
             false,
             &wist_core::sampling::DEFAULT_SAMPLING,
         );
@@ -948,22 +949,162 @@ fn wist4_coverage_vectors() {
     }
 }
 
+fn hourly_blocks(end_height: u64) -> Vec<wist_core::coverage::Block> {
+    (0..=end_height)
+        .map(|height| wist_core::coverage::Block {
+            height,
+            sealed_at_s: height as i64 * 3_600,
+        })
+        .collect()
+}
+
+fn extension_records(case: &serde_json::Value) -> Vec<wist_core::extension::ExtensionRecord<'_>> {
+    std::iter::once(&case["trigger"])
+        .chain(case["records"].as_array().unwrap())
+        .enumerate()
+        .map(|(i, record)| {
+            let sealed_at_s = record["sealed_at_s"].as_i64().unwrap();
+            wist_core::extension::ExtensionRecord {
+                position: wist_core::confirmation::CandidateRecord {
+                    block_height: record["height"]
+                        .as_u64()
+                        .unwrap_or((sealed_at_s / 3_600) as u64),
+                    entry_index: i as u64,
+                    block_sealed_at_s: sealed_at_s,
+                    auditor_id: record["auditor"].as_str().unwrap(),
+                    effective_similarity: 0,
+                },
+                verdict: serde_json::from_value(record["verdict"].clone()).unwrap(),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn wist4_contradiction_quorum_vectors() {
+    use wist_core::extension::{evaluate, ExtensionClaim};
+    let v = read_json("vectors/wist4/confirmation.json");
+    for case in v["quorum_contradiction_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let records = extension_records(case);
+        let closing_s = case["closing_sealed_at_s"].as_i64().unwrap();
+        let result = evaluate(
+            &ExtensionClaim {
+                trigger_index: 0,
+                summoned: true,
+                confirm_window_hours: v["confirm_window_hours"].as_u64().unwrap(),
+                confirm_auditors: case["confirm_auditors"].as_u64().unwrap(),
+            },
+            &records,
+            &hourly_blocks((closing_s / 3_600) as u64),
+        )
+        .unwrap();
+        assert_eq!(
+            result.closing_block.unwrap().sealed_at_s,
+            closing_s,
+            "{label}"
+        );
+        assert_eq!(
+            result.confirmed,
+            case["confirmed"].as_bool().unwrap(),
+            "{label}"
+        );
+        assert_eq!(
+            result.establishing_block.is_some(),
+            case["contradicted"].as_bool().unwrap(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn wist4_extension_order_vectors() {
+    use wist_core::extension::{rationed_summons, summoned, trigger_indices};
+    let v = read_json("vectors/wist4/extension.json");
+    for case in v["order_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let raw = case["records"].as_array().unwrap();
+        let positions: Vec<_> = raw
+            .iter()
+            .map(|record| wist_core::confirmation::CandidateRecord {
+                block_height: record["block_height"].as_u64().unwrap(),
+                entry_index: record["entry_index"].as_u64().unwrap(),
+                block_sealed_at_s: record["sealed_at_s"].as_i64().unwrap(),
+                auditor_id: record["auditor"].as_str().unwrap(),
+                effective_similarity: 0,
+            })
+            .collect();
+        let roster: Vec<_> = case["roster"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        let mut triggers: Vec<_> = case["prior_triggers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| (row[0].as_str().unwrap(), row[1].as_i64().unwrap()))
+            .collect();
+        for (i, record) in raw.iter().enumerate() {
+            let same_delta: Vec<_> = raw[..=i]
+                .iter()
+                .zip(&positions)
+                .filter(|(earlier, _)| earlier["delta"] == record["delta"])
+                .map(|(_, position)| position.clone())
+                .collect();
+            let eligible =
+                trigger_indices(&same_delta, v["confirm_window_hours"].as_u64().unwrap())
+                    .unwrap()
+                    .contains(&(same_delta.len() - 1));
+            assert_eq!(eligible, case["eligible"][i].as_bool().unwrap(), "{label}");
+            let summons = if eligible {
+                triggers.push((positions[i].auditor_id, positions[i].block_sealed_at_s));
+                *rationed_summons(
+                    &triggers,
+                    v["ration_window_days"].as_u64().unwrap(),
+                    v["extension_triggers_max"].as_u64().unwrap(),
+                )
+                .last()
+                .unwrap()
+            } else {
+                false
+            };
+            assert_eq!(summons, case["summons"][i].as_bool().unwrap(), "{label}");
+            let filers: Vec<_> = same_delta.iter().map(|record| record.auditor_id).collect();
+            let peers: Vec<_> = if summons {
+                summoned(&roster, &filers, case["publisher_domain"].as_str().unwrap())
+                    .into_iter()
+                    .map(|index| roster[index])
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let expected: Vec<_> = case["summoned_auditors"][i]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(peers, expected, "{label}");
+        }
+    }
+}
+
 #[test]
 fn wist4_extension_vectors() {
     let v = read_json("vectors/wist4/extension.json");
     let window = v["confirm_window_hours"].as_u64().unwrap();
     let triggers_max = v["extension_triggers_max"].as_u64().unwrap();
-    let contradictions_max = v["contradictions_max"].as_u64().unwrap();
     let ration_days = v["ration_window_days"].as_u64().unwrap();
     assert_eq!(triggers_max, wist_core::extension::EXTENSION_TRIGGERS_MAX);
-    assert_eq!(contradictions_max, wist_core::extension::CONTRADICTIONS_MAX);
     for case in v["deadline_cases"].as_array().unwrap() {
         assert_eq!(
             wist_core::extension::extension_deadline_s(
                 case["b1_sealed_at_s"].as_i64().unwrap(),
                 case["confirm_window_hours"].as_u64().unwrap()
             ),
-            case["deadline_s"].as_i64().unwrap()
+            i128::from(case["deadline_s"].as_i64().unwrap())
         );
     }
     for case in v["trigger_cases"].as_array().unwrap() {
@@ -1035,17 +1176,84 @@ fn wist4_extension_vectors() {
             "{label}"
         );
     }
-    for case in v["divergence_cases"].as_array().unwrap() {
+    assert_eq!(
+        v["escalation_window_days"].as_u64().unwrap(),
+        wist_core::extension::ESCALATION_WINDOW_DAYS
+    );
+    for case in v["contradiction_cases"].as_array().unwrap() {
+        use wist_core::extension::{escalated_sampling, evaluate, Escalation, ExtensionClaim};
         let label = case["label"].as_str().unwrap();
+        let records = extension_records(case);
+        let end_height = case["escalation_at"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["height"].as_u64().unwrap())
+            .max()
+            .unwrap();
+        let blocks = hourly_blocks(end_height);
+        let result = evaluate(
+            &ExtensionClaim {
+                trigger_index: 0,
+                summoned: case["summoned"].as_bool().unwrap(),
+                confirm_window_hours: window,
+                confirm_auditors: 2,
+            },
+            &records,
+            &blocks,
+        )
+        .unwrap();
         assert_eq!(
-            wist_core::extension::in_divergence(
-                &i64_list(&case["contradiction_times_s"]),
-                case["n_sealed_at_s"].as_i64().unwrap(),
-                contradictions_max
-            ),
-            case["in_divergence"].as_bool().unwrap(),
+            result.closing_block.map(|block| block.height),
+            case["closes_at_height"].as_u64(),
             "{label}"
         );
+        assert_eq!(
+            result.confirmed,
+            case["confirmed"].as_bool().unwrap(),
+            "{label}"
+        );
+        assert_eq!(
+            result.consistent_quorum,
+            case["independent_consistent_pair"].as_bool().unwrap(),
+            "{label}"
+        );
+        assert_eq!(
+            result.establishing_block.is_some(),
+            case["contradicted"].as_bool().unwrap(),
+            "{label}"
+        );
+        assert_eq!(
+            result.establishing_block.map(|block| block.height),
+            case["establishing_height"].as_u64(),
+            "{label}"
+        );
+        let escalations: Vec<_> = result
+            .establishing_block
+            .into_iter()
+            .map(|block| Escalation {
+                publisher_domain: "page.example.com",
+                establishing_block: block,
+            })
+            .collect();
+        for point in case["escalation_at"].as_array().unwrap() {
+            let at = wist_core::coverage::Block {
+                height: point["height"].as_u64().unwrap(),
+                sealed_at_s: point["sealed_at_s"].as_i64().unwrap(),
+            };
+            let active = escalated_sampling(&escalations, "page.example.com", at);
+            assert_eq!(active, point["in_force"].as_bool().unwrap(), "{label}");
+            assert_eq!(
+                wist_core::sampling::p_1e7(
+                    1_000_000,
+                    false,
+                    active,
+                    &wist_core::sampling::DEFAULT_SAMPLING,
+                ),
+                if active { 5_000_000 } else { 200_000 },
+                "{label}"
+            );
+        }
     }
 }
 
@@ -1745,6 +1953,7 @@ fn wist4_extension_proof_vectors() {
             audited_delta,
             reputation_u,
             level1_sanction: false,
+            escalated_sampling: false,
             sampling: wist_core::sampling::DEFAULT_SAMPLING,
             trigger_block: named.then_some(ProofBlock {
                 admitted_key: &pk_trigger,
@@ -1780,6 +1989,7 @@ fn wist4_extension_proof_vectors() {
             audited_delta: row["delta_id"].as_str().unwrap(),
             reputation_u: row["reputation_u"].as_u64().unwrap(),
             level1_sanction: false,
+            escalated_sampling: false,
             sampling: wist_core::sampling::DEFAULT_SAMPLING,
             trigger_block: None,
             vrf_proof: &pi,

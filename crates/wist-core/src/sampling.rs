@@ -44,8 +44,13 @@ impl Default for SamplingConstants {
     }
 }
 
-pub fn p_1e7(reputation_u: u64, level1_sanction: bool, c: &SamplingConstants) -> u64 {
-    if level1_sanction {
+pub fn p_1e7(
+    reputation_u: u64,
+    level1_sanction: bool,
+    escalated_sampling: bool,
+    c: &SamplingConstants,
+) -> u64 {
+    if level1_sanction || escalated_sampling {
         return c.ceiling_1e7;
     }
     let rep = reputation_u.min(1_000_000);
@@ -105,11 +110,11 @@ mod tests {
 
     #[test]
     fn p_1e7_endpoints_and_sanction() {
-        assert_eq!(p_1e7(1_000_000, false, &DEFAULT_SAMPLING), 200_000);
-        assert_eq!(p_1e7(100_000, false, &DEFAULT_SAMPLING), 2_900_000);
-        assert_eq!(p_1e7(0, false, &DEFAULT_SAMPLING), 3_200_000);
-        assert_eq!(p_1e7(500_000, true, &DEFAULT_SAMPLING), 5_000_000);
-        assert_eq!(p_1e7(u64::MAX, false, &DEFAULT_SAMPLING), 200_000);
+        assert_eq!(p_1e7(1_000_000, false, false, &DEFAULT_SAMPLING), 200_000);
+        assert_eq!(p_1e7(100_000, false, false, &DEFAULT_SAMPLING), 2_900_000);
+        assert_eq!(p_1e7(0, false, false, &DEFAULT_SAMPLING), 3_200_000);
+        assert_eq!(p_1e7(500_000, true, false, &DEFAULT_SAMPLING), 5_000_000);
+        assert_eq!(p_1e7(u64::MAX, false, false, &DEFAULT_SAMPLING), 200_000);
     }
 
     #[test]
@@ -119,10 +124,12 @@ mod tests {
             ceiling_1e7: 6_000_000,
             slope_per_micro: 5,
         };
-        assert_eq!(p_1e7(1_000_000, false, &amended), 400_000);
-        assert_eq!(p_1e7(0, false, &amended), 5_400_000);
-        assert_eq!(p_1e7(900_000, false, &amended), 900_000);
-        assert_eq!(p_1e7(500_000, true, &amended), 6_000_000);
+        assert_eq!(p_1e7(1_000_000, false, false, &amended), 400_000);
+        assert_eq!(p_1e7(0, false, false, &amended), 5_400_000);
+        assert_eq!(p_1e7(900_000, false, false, &amended), 900_000);
+        assert_eq!(p_1e7(500_000, true, false, &amended), 6_000_000);
+        assert_eq!(p_1e7(1_000_000, false, true, &amended), 6_000_000);
+        assert_eq!(p_1e7(1_000_000, true, true, &amended), 6_000_000);
     }
 
     #[test]
@@ -132,7 +139,7 @@ mod tests {
             ceiling_1e7: 5_000_000,
             slope_per_micro: u64::MAX,
         };
-        assert_eq!(p_1e7(999_999, false, &amended), 5_000_000);
+        assert_eq!(p_1e7(999_999, false, false, &amended), 5_000_000);
     }
 
     #[test]
