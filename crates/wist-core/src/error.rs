@@ -30,4 +30,6 @@ pub enum Error {
     Parameter(String),
     #[error("roster: {0}")]
     Roster(String),
+    #[error("sanction: {0}")]
+    Sanction(String),
 }

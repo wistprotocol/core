@@ -1,5 +1,8 @@
 use crate::coverage::within_days_ending_at;
 
+mod replay;
+pub use replay::*;
+
 pub const ESCALATION_L2_COUNT: u64 = 3;
 pub const ESCALATION_L2_DAYS: u64 = 90;
 pub const ESCALATION_L3_COUNT: u64 = 10;
@@ -155,6 +158,7 @@ pub struct ProcessState {
     pub merits_index: Option<usize>,
     pub unappealed_index: Option<usize>,
     pub void_at_s: Option<i128>,
+    pub retention_end_at_s: Option<i128>,
     pub rejected: Vec<usize>,
 }
 
@@ -266,6 +270,16 @@ pub fn process_at(
         let timely_appeal = state
             .appeal_index
             .filter(|&i| i128::from(acts[i].sealed_at_s) <= seal_due);
+        state.retention_end_at_s = Some(match timely_appeal {
+            Some(a) => state.merits_index.map_or_else(
+                || {
+                    i128::from(acts[a].sealed_at_s)
+                        + i128::from(acts[a].ruling_deadline_days) * i128::from(DAY_S)
+                },
+                |r| i128::from(acts[r].sealed_at_s),
+            ),
+            None => seal_due,
+        });
         state.void_at_s = match timely_appeal {
             Some(a) => match state.merits_index {
                 Some(r) if acts[r].kind == ProcessKind::Ruling(Outcome::Overturned) => {
@@ -284,6 +298,19 @@ pub fn process_at(
     }
     state.rejected.sort_unstable();
     state
+}
+
+pub fn must_retain_evidence(
+    first_served_s: i64,
+    mirror_retention_days: i64,
+    processes: &[ProcessState],
+    at_s: i64,
+) -> bool {
+    let at = i128::from(at_s);
+    at < i128::from(first_served_s) + i128::from(mirror_retention_days) * i128::from(DAY_S)
+        || processes
+            .iter()
+            .any(|p| p.retention_end_at_s.is_some_and(|end| at <= end))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

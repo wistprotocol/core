@@ -1,3 +1,8 @@
+mod schedule;
+pub use schedule::{
+    validate_cadence_transitions, Amendment, CadenceProfile, Schedule, ScheduleReplay,
+};
+
 pub struct ParamSpec {
     pub name: &'static str,
     pub default: Option<i64>,

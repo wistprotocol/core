@@ -1,5 +1,14 @@
 use std::path::PathBuf;
 
+#[path = "conformance/canary.rs"]
+mod canary;
+#[path = "conformance/observer.rs"]
+mod observer;
+#[path = "conformance/parameters.rs"]
+mod parameters;
+#[path = "conformance/sanctions.rs"]
+mod sanctions;
+
 pub fn spec_dir() -> PathBuf {
     std::env::var_os("WIST_SPEC_DIR")
         .map(PathBuf::from)

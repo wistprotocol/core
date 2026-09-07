@@ -74,11 +74,26 @@ combination rules involving its identifier, using an otherwise-valid map.
 `validate_combinations` checks all arithmetic combinations in a supplied
 map. Intermediate calculations use 128-bit integers.
 
-These functions provide map validation. Sealing and replay callers must
-also enforce grace, validate every prospective effective-time map, check
-cadence transitions, and preserve live evidence-retention obligations
-(WIST-4 §9). Bounds and arithmetic alone do not establish compliance with
-the section's broader guarantee-preservation requirements.
+`parameters::Schedule::replay` processes amendments in canonical Log order,
+enforces the grace period in force when each candidate seals, and checks
+every prospective effective-time map. `try_accept` provides incremental
+admission in the same order and rejects repeated or out-of-order positions.
+Rejected candidates leave accepted values unchanged and are never retried.
+`ScheduleReplay::error_at` identifies rejected amendments as WIST4-E03.
+`value_at` reads the schedule's accepted prefix at the supplied instant.
+
+Cadence validation preserves extension windows from every historical
+constant-map interval, including changes that are still pending. The
+standalone `validate_cadence_transitions` helper takes chronologically
+ordered, maximal intervals of the complete parameter map; equal cadence
+fields alone do not establish equal maps.
+
+Supply the Log's first Block timestamp and otherwise-validated amendments:
+authenticated Registry Updates with parsed integer values and timestamps,
+unique Entry positions, and verified Block chronology. Callers still
+enforce state-dependent guarantees such as the Block size cap against
+the Blocks actually sealed. Arithmetic and schedule acceptance do not
+replace those checks or the separate evidence-serving duty below.
 
 ## Sanction replay
 
@@ -99,11 +114,96 @@ come from the notice Block; ruling clocks come from the accepted appeal
 Block. The result supplies the void instant for the caller to apply to
 the notice's activation at the first Block reaching it.
 
-Callers verify signatures and evidence, establish the notice's activation,
-and enforce the single-notice rule for each subject, level and activation
-before supplying it. The timestamp-only helpers accept prevalidated facts;
-use `Ladder` for same-Block transitions and `process_at` for process
-eligibility and multiplicity.
+`sanctions::Replay::apply_block` integrates notice admission, accepted
+processes and rung derivation for one domain. It applies existing processes'
+reversals at the first supplied Block reaching their deadlines, before new
+findings; then validates notices against the resulting activations and
+resolves same-Block appeals. Only one eligible notice per activation opens
+a process. Invalid candidates cannot veto eligible ones; distinct eligible
+candidates in one Block all fail, and repeated Update IDs retain their
+first sealing. Recovery notices open no sanction process.
+
+`ConfirmedFinding::new` checks the first confirmation using each candidate
+Record's anchored quorum and window, and derives severity from the full
+closed set. Notice evidence must establish the activating finding and an
+original arming branch with complete quorums. Count windows remain anchored
+to the activation, including pre-lift findings of the same identity. The
+level-4 further-finding branch additionally requires evidence for the actual
+prior level-3 activation. Optional citations must resolve to available
+Audit Records. `BlockAdmission` reports accepted notice indices and
+WIST4-E04/E05 rejections; `notices()` exposes accepted processes and their
+current retention endpoints.
+
+Supply authenticated Blocks in increasing order, including every Block
+through the queried height, schema-validated Registry Updates and their
+actual IDs, and parameter values from the accepted schedule. Target and
+evidence fields receive additional WIST4-E04 checks during notice admission.
+Appeals must already verify under the notice-era Key Set. Findings must
+supply the complete applicable verdict history through first confirmation,
+with valid signatures, standing, Delta/kind grouping and current-identity
+scope; `ConfirmedFinding` checks confirmation and severity, not those
+prerequisites. `available_records` supplies additional authenticated Record
+IDs available by this Block; finding Records are registered automatically.
+Identity resets and lifts must already be validated. Timestamp-only helpers,
+`Ladder`, and `process_at` remain available for callers with prevalidated
+facts; `Replay` performs the notice and transition integration above.
+
+## Canary scoring and Observer checkpoints
+
+`delta::make_credit_commitment` binds the raw response body and Auditor ID
+under the Reference Payload's salt. Canary leaves use `merkle::leaf_hash`
+and `merkle::verify_inclusion`, including exact proof-path consumption.
+`canary::scoreboard` verifies supplied bytes against each revealed leaf,
+recomputes credit and hard hits, and counts each Record ID once per tier.
+It pins all four extraction and similarity-band parameters to the audited
+Delta's Block and applies the delete mirror. Reveals contribute only while
+their reveal-anchored scoring windows remain open.
+
+`canary::numeric_timing` calculates the commitment-anchored lead and
+lifetime and the newest-Delta-anchored minimum and budget rotation.
+Admission also requires `canary::sealing_opportunities`: actual Blocks
+must leave the ordinary Record allowance and the required Observer
+checkpoint opportunities before the reveal. Supply every bound Delta's
+anchored coverage deadline and seal allowance, the registered identities
+at the newest Delta and reveal, and consecutive budgeting epochs.
+Block timestamp slices start at height zero and contain the reveal Block.
+
+`observer::epoch_of_block` reads each epoch's length at its first Block.
+`epoch_budget` groups canonical registered identities by two-label suffix,
+walks the fixed suffix hash order and selects one identity per budgeted
+suffix. Equal digests use UTF-8 name order; `budget_with_sort_keys` exposes
+that ordering boundary for collision-domain conformance tests.
+`covered_before` follows authenticated `prev_record` links from accepted
+checkpoints sealed strictly below the reveal.
+
+These functions consume validated protocol facts. For a complete scoreboard,
+callers provide all accepted live reveals and eligible Records, with
+Log-wide unique leaf bindings, authenticated Reference Payloads and Record
+chains, and an accepted parameter schedule. Each Record's `fixed_height`
+is its earliest valid sealing or covering checkpoint height. Leaf tiers
+come from the domain state at the leaf Delta's Block minus one, using the
+sampling threshold rules. Timing and epoch inputs retain their WIST-4 §9
+anchors. Signature, standing, registration, commitment ration and reveal
+batch validation remain admission responsibilities; successful scoring or
+numeric timing alone does not establish a valid canary act.
+
+## Evidence retention
+
+`sanctions::process_at` also derives `retention_end_at_s` from the accepted
+process at the supplied prefix. Without a timely accepted appeal it remains
+the notice's appeal-seal deadline, even after an `unappealed` statement.
+An accepted appeal supplies its anchored ruling deadline; an accepted merits
+ruling closes the process at its Block. Future and rejected acts move no
+deadline, and clearing a rung does not close its notice process.
+
+`sanctions::must_retain_evidence` combines those process endpoints with a
+Block's ordinary retention floor. Supply all accepted notice processes
+citing that Block, recomputed at the queried prefix, and the
+`mirror_retention_days` value at the Block's first service. The process
+endpoint is inclusive; the ordinary floor expires at its endpoint.
+Mirrors must acquire every cited Record Block before serving the notice
+Block and persist these obligations across restarts. The helper determines
+retention duration; callers perform and verify the required storage.
 
 ## Verification
 

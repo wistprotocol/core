@@ -55,6 +55,20 @@ pub fn make_commitment_bytes(salt_b64u: &str, octets: &[u8]) -> Result<String, E
     ))
 }
 
+pub fn make_credit_commitment(
+    salt_b64u: &str,
+    body: &[u8],
+    auditor_id: &str,
+) -> Result<String, Error> {
+    let mut mac = commitment_mac(salt_b64u)?;
+    mac.update(body);
+    mac.update(auditor_id.as_bytes());
+    Ok(format!(
+        "hmac-sha256:{}",
+        hex_encode(&mac.finalize().into_bytes())
+    ))
+}
+
 pub fn verify_commitment_bytes(
     salt_b64u: &str,
     octets: &[u8],
