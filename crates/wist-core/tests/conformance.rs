@@ -2542,3 +2542,358 @@ fn wist4_registry_details_types_preserve_signed_objects() {
     admission.update.details.as_mut().unwrap()["track_record"] = serde_json::Value::Null;
     assert!(admission.update.typed_details().is_err());
 }
+
+fn parameter_default(name: &str) -> i64 {
+    wist_core::parameters::spec(name).unwrap().default.unwrap()
+}
+
+#[test]
+fn wist4_parameter_catalog() {
+    use wist_core::parameters::{spec, validate_value, PARAMS, WIRE_INTEGER_MAX};
+    let schema = read_json("schemas/registry-update.schema.json");
+    let clause = schema["allOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| {
+            c["if"]["properties"]["update"]["properties"]["action"]["const"] == "parameter_change"
+        })
+        .unwrap();
+    let details = &clause["then"]["properties"]["update"]["properties"]["details"];
+    let identifiers = details["properties"]["parameter"]["enum"]
+        .as_array()
+        .unwrap();
+    assert_eq!(PARAMS.len(), identifiers.len());
+    for ident in identifiers {
+        assert!(spec(ident.as_str().unwrap()).is_some(), "{ident}");
+    }
+    for clause in details["allOf"].as_array().unwrap() {
+        let name = clause["if"]["properties"]["parameter"]["const"]
+            .as_str()
+            .unwrap();
+        let bounds = &clause["then"]["properties"]["value"];
+        let p = spec(name).unwrap();
+        assert_eq!(p.min, bounds["minimum"].as_i64(), "{name}");
+        assert_eq!(p.max, bounds["maximum"].as_i64(), "{name}");
+    }
+    for p in PARAMS {
+        validate_value(p.name, p.default.unwrap()).unwrap();
+        validate_value(p.name, p.min.unwrap_or(-WIRE_INTEGER_MAX)).unwrap();
+        validate_value(p.name, p.max.unwrap_or(WIRE_INTEGER_MAX)).unwrap();
+        assert!(validate_value(p.name, p.min.unwrap_or(-WIRE_INTEGER_MAX) - 1).is_err());
+        assert!(validate_value(p.name, p.max.unwrap_or(WIRE_INTEGER_MAX) + 1).is_err());
+    }
+    for name in [
+        "contradictions_max",
+        "escalation_l2",
+        "escalation_l3",
+        "escalation_l4",
+        "unknown",
+    ] {
+        assert!(validate_value(name, 1).is_err());
+    }
+    wist_core::parameters::validate_combinations(parameter_default).unwrap();
+}
+
+#[test]
+fn wist4_extension_parameter_combinations() {
+    use wist_core::parameters::validate;
+    let vectors = read_json("vectors/wist4/parameter-combinations.json");
+    for case in vectors["extension_window_cases"].as_array().unwrap() {
+        let lookup = |name: &str| {
+            case[name]
+                .as_i64()
+                .unwrap_or_else(|| parameter_default(name))
+        };
+        let changed = case["changed"].as_str().unwrap();
+        assert_eq!(
+            validate(changed, lookup(changed), lookup).is_ok(),
+            case["rule_holds"].as_bool().unwrap(),
+            "{}",
+            case["label"]
+        );
+    }
+}
+
+#[test]
+fn wist4_sanction_reversals() {
+    use wist_core::sanctions::*;
+    let v = read_json("vectors/wist4/sanctions.json");
+    for case in v["reversal_cases"].as_array().unwrap() {
+        let findings: Vec<Finding> = case["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| Finding {
+                sealed_at_s: f["sealed_at_s"].as_i64().unwrap(),
+                severity: f["severity"].as_u64().unwrap() as u8,
+            })
+            .collect();
+        let lifts = i64_list(&case["lift_times_s"]);
+        let l3 = criterion_times(&findings, 1, None, 3);
+        let count = criterion_times(
+            &findings,
+            ESCALATION_L4_SEV3_COUNT,
+            Some(ESCALATION_L4_DAYS),
+            3,
+        );
+        let accrual = l4_accrual_times(&findings, &l3, &lifts);
+        assert_eq!(count, i64_list(&case["l4_count_branch_times_s"]));
+        assert_eq!(accrual, i64_list(&case["l4_accrual_branch_times_s"]));
+        let mut l4 = count;
+        l4.extend(accrual);
+        l4.sort_unstable();
+        l4.dedup();
+        let met = [
+            criterion_times(&findings, 1, None, 0),
+            criterion_times(&findings, ESCALATION_L2_COUNT, Some(ESCALATION_L2_DAYS), 0),
+            l3,
+            l4,
+        ];
+        for (actual, expected) in met.iter().zip(case["met_times_s"].as_array().unwrap()) {
+            assert_eq!(*actual, i64_list(expected));
+        }
+        for probe in case["probes"].as_array().unwrap() {
+            let n = probe["n_s"].as_i64().unwrap();
+            let mut times: Vec<_> = findings
+                .iter()
+                .map(|f| f.sealed_at_s)
+                .chain(lifts.iter().copied())
+                .filter(|&t| t <= n)
+                .collect();
+            times.sort_unstable();
+            times.dedup();
+            let mut ladder = Ladder::default();
+            for (height, at) in times.into_iter().enumerate() {
+                let fs: Vec<_> = findings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| f.sealed_at_s == at)
+                    .map(|(i, f)| OrderedFinding {
+                        record_id: [i as u8; 32],
+                        entry_index: i as u64,
+                        severity: f.severity,
+                    })
+                    .collect();
+                ladder.apply_block(SanctionBlock {
+                    height: height as u64,
+                    sealed_at_s: at,
+                    reset: false,
+                    lift: lifts.contains(&at),
+                    voids: &[],
+                    findings: &fs,
+                });
+            }
+            assert_eq!(
+                u64::from(ladder.level()),
+                probe["level"].as_u64().unwrap(),
+                "{}",
+                case["label"]
+            );
+        }
+    }
+}
+
+#[test]
+fn wist4_sanction_transitions() {
+    use wist_core::sanctions::*;
+    let v = read_json("vectors/wist4/sanctions.json");
+    for case in v["transition_cases"].as_array().unwrap() {
+        for reversed in [false, true] {
+            let mut ladder = Ladder::default();
+            for (i, b) in case["blocks"].as_array().unwrap().iter().enumerate() {
+                let voids: Vec<_> = b["void_levels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|l| {
+                        let level = l.as_u64().unwrap() as u8;
+                        NoticeVoid {
+                            level,
+                            activation: ladder.active()[usize::from(level - 1)].unwrap().record_id,
+                        }
+                    })
+                    .collect();
+                let mut findings: Vec<_> = b["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| OrderedFinding {
+                        record_id: [i as u8 * 8 + f["entry_index"].as_u64().unwrap() as u8; 32],
+                        entry_index: f["entry_index"].as_u64().unwrap(),
+                        severity: f["severity"].as_u64().unwrap() as u8,
+                    })
+                    .collect();
+                if reversed {
+                    findings.reverse();
+                }
+                ladder.apply_block(SanctionBlock {
+                    height: b["height"].as_u64().unwrap(),
+                    sealed_at_s: b["sealed_at_s"].as_i64().unwrap(),
+                    reset: false,
+                    lift: b["lift"].as_bool().unwrap(),
+                    voids: &voids,
+                    findings: &findings,
+                });
+                let active: Vec<_> = ladder
+                    .active()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| a.is_some())
+                    .map(|(i, _)| i as i64 + 1)
+                    .collect();
+                assert_eq!(
+                    active,
+                    i64_list(&case["active_rungs"][i]),
+                    "{}",
+                    case["label"]
+                );
+                assert_eq!(
+                    u64::from(ladder.level()),
+                    case["levels"][i].as_u64().unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn wist4_sanction_process() {
+    use wist_core::sanctions::*;
+    let v = read_json("vectors/wist4/sanctions.json");
+    let p = &v["process"];
+    let key = wist_core::crypto::PublicKey::from_b64u(p["public_key"].as_str().unwrap()).unwrap();
+    for case in p["cases"].as_array().unwrap() {
+        let notice_doc = case.get("notice").unwrap_or(&p["notice"]);
+        wist_core::envelope::verify_envelope(notice_doc, "update", &key).unwrap();
+        let notice_id = wist_core::delta::delta_id(&notice_doc["update"]).unwrap();
+        let docs = case["acts"].as_array().unwrap();
+        let ids: Vec<_> = docs
+            .iter()
+            .map(|a| {
+                wist_core::envelope::verify_envelope(&a["envelope"], "update", &key).unwrap();
+                wist_core::delta::delta_id(&a["envelope"]["update"]).unwrap()
+            })
+            .collect();
+        let mut times: Vec<_> = docs
+            .iter()
+            .map(|a| a["sealed_at_s"].as_i64().unwrap())
+            .chain(
+                case["probes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a["n_s"].as_i64().unwrap()),
+            )
+            .chain([0])
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        let height_at = |t: i64| times.binary_search(&t).unwrap() as u64 + 1;
+        let acts: Vec<_> = docs
+            .iter()
+            .zip(&ids)
+            .map(|(a, id)| {
+                let update = &a["envelope"]["update"];
+                let details = &update["details"];
+                let kind = match update["action"].as_str().unwrap() {
+                    "appeal" => ProcessKind::Appeal,
+                    "appeal_ruling" => {
+                        ProcessKind::Ruling(match details["outcome"].as_str().unwrap() {
+                            "upheld" => Outcome::Upheld,
+                            "overturned" => Outcome::Overturned,
+                            "unappealed" => Outcome::Unappealed,
+                            other => panic!("{other}"),
+                        })
+                    }
+                    other => panic!("{other}"),
+                };
+                let at = a["sealed_at_s"].as_i64().unwrap();
+                ProcessAct {
+                    id,
+                    notice: details["notice"].as_str().unwrap(),
+                    subject: update["subject"].as_str().unwrap(),
+                    height: height_at(at),
+                    sealed_at_s: at,
+                    kind,
+                    ruling_deadline_days: 30,
+                }
+            })
+            .collect();
+        let notice = Notice {
+            id: &notice_id,
+            subject: notice_doc["update"]["subject"].as_str().unwrap(),
+            sanction: notice_doc["update"]["details"]["kind"] == "sanction",
+            height: height_at(0),
+            sealed_at_s: 0,
+            activation_height: case["activation_sealed_at_s"].as_i64().map_or(0, height_at),
+            appeal_window_days: 14,
+            appeal_seal_days: 7,
+        };
+        for (i, probe) in case["probes"].as_array().unwrap().iter().enumerate() {
+            let at = probe["n_s"].as_i64().unwrap();
+            let state = process_at(notice, &acts, height_at(at), at);
+            let expected = &probe["expected"];
+            assert_eq!(
+                state.appeal_index.map(|i| i as u64),
+                expected["appeal_index"].as_u64(),
+                "{}",
+                case["label"]
+            );
+            assert_eq!(
+                state.merits_index.map(|i| i as u64),
+                expected["merits_index"].as_u64(),
+                "{}",
+                case["label"]
+            );
+            assert_eq!(
+                state.unappealed_index.map(|i| i as u64),
+                expected["unappealed_index"].as_u64(),
+                "{}",
+                case["label"]
+            );
+            assert_eq!(
+                state.void_at_s,
+                expected["void_at_s"].as_i64().map(i128::from),
+                "{}",
+                case["label"]
+            );
+            if let Some(severity) = case["activation_severity"].as_u64() {
+                let mut ladder = Ladder::default();
+                let finding = OrderedFinding {
+                    record_id: [1; 32],
+                    entry_index: 0,
+                    severity: severity as u8,
+                };
+                ladder.apply_block(SanctionBlock {
+                    height: height_at(0),
+                    sealed_at_s: 0,
+                    reset: false,
+                    lift: false,
+                    voids: &[],
+                    findings: &[finding],
+                });
+                if state.void_at_s.is_some() {
+                    ladder.apply_block(SanctionBlock {
+                        height: height_at(at),
+                        sealed_at_s: at,
+                        reset: false,
+                        lift: false,
+                        voids: &[NoticeVoid {
+                            level: 3,
+                            activation: [1; 32],
+                        }],
+                        findings: &[],
+                    });
+                }
+                assert_eq!(
+                    u64::from(ladder.level()),
+                    case["levels"][i].as_u64().unwrap(),
+                    "{}",
+                    case["label"]
+                );
+                assert_eq!(state.error_at(1), case["same_block_ruling_error"].as_str());
+            }
+        }
+    }
+}

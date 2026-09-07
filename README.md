@@ -65,6 +65,46 @@ Audit Record deserialization requires all five measured fields, including
 verdicts. `not_auditable` additionally requires `unmeasured`. Snapshot state
 supports escalation, Observer tenure and live canary commitment tuples.
 
+## Parameter validation
+
+`parameters::PARAMS` lists the amendable identifiers, defaults and fixed
+bounds. `validate_value` enforces those bounds and the signed wire-integer
+range; failures are WIST4-E03. `validate` checks a candidate against the
+combination rules involving its identifier, using an otherwise-valid map.
+`validate_combinations` checks all arithmetic combinations in a supplied
+map. Intermediate calculations use 128-bit integers.
+
+These functions provide map validation. Sealing and replay callers must
+also enforce grace, validate every prospective effective-time map, check
+cadence transitions, and preserve live evidence-retention obligations
+(WIST-4 §9). Bounds and arithmetic alone do not establish compliance with
+the section's broader guarantee-preservation requirements.
+
+## Sanction replay
+
+`sanctions::Ladder::apply_block` consumes one domain's validated findings
+in increasing Block order. It applies identity resets, lifts and
+notice-scoped voids before findings, then orders findings by confirming
+Record Entry index. Each rung retains the Record ID, height and Entry
+index that armed it. Voiding an old activation leaves a later rearming
+intact; lifts preserve findings, while identity resets clear them.
+Callers supply findings applicable to the current identity under §6.3.
+
+`sanctions::process_at` replays signed, otherwise-valid appeal and ruling
+acts against a supplied notice through a specified Block. It resolves
+appeals before rulings, deduplicates Update IDs, rejects competing acts,
+and requires merits rulings to seal above the target activation Block.
+`ProcessState::error_at` reports WIST4-E05 for rejected acts. Notice clocks
+come from the notice Block; ruling clocks come from the accepted appeal
+Block. The result supplies the void instant for the caller to apply to
+the notice's activation at the first Block reaching it.
+
+Callers verify signatures and evidence, establish the notice's activation,
+and enforce the single-notice rule for each subject, level and activation
+before supplying it. The timestamp-only helpers accept prevalidated facts;
+use `Ladder` for same-Block transitions and `process_at` for process
+eligibility and multiplicity.
+
 ## Verification
 
 ```bash

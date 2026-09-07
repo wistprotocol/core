@@ -120,9 +120,384 @@ pub fn ladder_level(levels: &[(&[i64], &[i64]); 4], n_s: i64) -> u8 {
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Notice<'a> {
+    pub id: &'a str,
+    pub subject: &'a str,
+    pub sanction: bool,
+    pub height: u64,
+    pub sealed_at_s: i64,
+    pub activation_height: u64,
+    pub appeal_window_days: u64,
+    pub appeal_seal_days: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessKind {
+    Appeal,
+    Ruling(Outcome),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessAct<'a> {
+    pub id: &'a str,
+    pub notice: &'a str,
+    pub subject: &'a str,
+    pub height: u64,
+    pub sealed_at_s: i64,
+    pub kind: ProcessKind,
+    pub ruling_deadline_days: u64,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ProcessState {
+    pub appeal_index: Option<usize>,
+    pub merits_index: Option<usize>,
+    pub unappealed_index: Option<usize>,
+    pub void_at_s: Option<i128>,
+    pub rejected: Vec<usize>,
+}
+
+impl ProcessState {
+    pub fn error_at(&self, index: usize) -> Option<&'static str> {
+        self.rejected.contains(&index).then_some("WIST4-E05")
+    }
+}
+
+pub fn process_at(
+    notice: Notice<'_>,
+    acts: &[ProcessAct<'_>],
+    height: u64,
+    sealed_at_s: i64,
+) -> ProcessState {
+    use std::collections::{BTreeMap, HashSet};
+
+    let mut state = ProcessState::default();
+    let mut blocks = BTreeMap::<u64, Vec<usize>>::new();
+    for (i, act) in acts
+        .iter()
+        .enumerate()
+        .filter(|(_, act)| act.height <= height)
+    {
+        blocks.entry(act.height).or_default().push(i);
+    }
+    let window_close =
+        i128::from(notice.sealed_at_s) + i128::from(notice.appeal_window_days) * i128::from(DAY_S);
+    let seal_due = window_close + i128::from(notice.appeal_seal_days) * i128::from(DAY_S);
+    let mut seen = HashSet::new();
+    for indices in blocks.values() {
+        let mut eligible = Vec::new();
+        for &i in indices {
+            let act = &acts[i];
+            if !seen.insert(act.id) {
+                continue;
+            }
+            if !notice.sanction
+                || act.notice != notice.id
+                || act.subject != notice.subject
+                || act.height < notice.height
+            {
+                state.rejected.push(i);
+            } else {
+                eligible.push(i);
+            }
+        }
+        let appeals: Vec<usize> = eligible
+            .iter()
+            .copied()
+            .filter(|&i| acts[i].kind == ProcessKind::Appeal)
+            .collect();
+        if state.appeal_index.is_none() && appeals.len() == 1 {
+            state.appeal_index = Some(appeals[0]);
+        } else {
+            state.rejected.extend(appeals);
+        }
+        let timely_appeal = state
+            .appeal_index
+            .filter(|&i| i128::from(acts[i].sealed_at_s) <= seal_due);
+        let mut merits = Vec::new();
+        let mut unappealed = Vec::new();
+        for i in eligible {
+            let act = &acts[i];
+            let ProcessKind::Ruling(outcome) = act.kind else {
+                continue;
+            };
+            let at = i128::from(act.sealed_at_s);
+            let valid = match outcome {
+                Outcome::Unappealed => {
+                    let valid = timely_appeal.is_none()
+                        && state.unappealed_index.is_none()
+                        && window_close <= at
+                        && at <= seal_due;
+                    if valid {
+                        unappealed.push(i);
+                    }
+                    valid
+                }
+                Outcome::Upheld | Outcome::Overturned => {
+                    let valid = state.merits_index.is_none()
+                        && act.height > notice.activation_height
+                        && timely_appeal.is_some_and(|a| {
+                            at <= i128::from(acts[a].sealed_at_s)
+                                + i128::from(acts[a].ruling_deadline_days) * i128::from(DAY_S)
+                        });
+                    if valid {
+                        merits.push(i);
+                    }
+                    valid
+                }
+            };
+            if !valid {
+                state.rejected.push(i);
+            }
+        }
+        if merits.len() == 1 {
+            state.merits_index = Some(merits[0]);
+        } else {
+            state.rejected.extend(merits);
+        }
+        if unappealed.len() == 1 {
+            state.unappealed_index = Some(unappealed[0]);
+        } else {
+            state.rejected.extend(unappealed);
+        }
+    }
+    if notice.sanction && notice.height <= height {
+        let timely_appeal = state
+            .appeal_index
+            .filter(|&i| i128::from(acts[i].sealed_at_s) <= seal_due);
+        state.void_at_s = match timely_appeal {
+            Some(a) => match state.merits_index {
+                Some(r) if acts[r].kind == ProcessKind::Ruling(Outcome::Overturned) => {
+                    Some(i128::from(acts[r].sealed_at_s))
+                }
+                Some(_) => None,
+                None => Some(
+                    i128::from(acts[a].sealed_at_s)
+                        + i128::from(acts[a].ruling_deadline_days) * i128::from(DAY_S),
+                ),
+            },
+            None if state.unappealed_index.is_none() => Some(seal_due),
+            None => None,
+        }
+        .filter(|&at| at <= i128::from(sealed_at_s));
+    }
+    state.rejected.sort_unstable();
+    state
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Activation {
+    pub record_id: [u8; 32],
+    pub height: u64,
+    pub entry_index: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OrderedFinding {
+    pub record_id: [u8; 32],
+    pub entry_index: u64,
+    pub severity: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NoticeVoid {
+    pub level: u8,
+    pub activation: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SanctionBlock<'a> {
+    pub height: u64,
+    pub sealed_at_s: i64,
+    pub reset: bool,
+    pub lift: bool,
+    pub voids: &'a [NoticeVoid],
+    pub findings: &'a [OrderedFinding],
+}
+
+#[derive(Debug, Default)]
+pub struct Ladder {
+    active: [Option<Activation>; 4],
+    findings: Vec<Finding>,
+}
+
+impl Ladder {
+    pub fn active(&self) -> &[Option<Activation>; 4] {
+        &self.active
+    }
+
+    pub fn level(&self) -> u8 {
+        self.active
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(0, |i| i as u8 + 1)
+    }
+
+    pub fn apply_block(&mut self, block: SanctionBlock<'_>) {
+        let SanctionBlock {
+            height,
+            sealed_at_s,
+            reset,
+            lift,
+            voids,
+            findings,
+        } = block;
+        if reset {
+            self.findings.clear();
+        }
+        if reset || lift {
+            self.active.fill(None);
+        }
+        for void in voids {
+            if let 3..=4 = void.level {
+                let rung = &mut self.active[usize::from(void.level - 1)];
+                if rung.is_some_and(|a| a.record_id == void.activation) {
+                    *rung = None;
+                }
+            }
+        }
+        let mut ordered: Vec<_> = findings.iter().collect();
+        ordered.sort_unstable_by_key(|f| f.entry_index);
+        for finding in ordered {
+            let further = self.active[2].is_some();
+            self.findings.push(Finding {
+                sealed_at_s,
+                severity: finding.severity,
+            });
+            let count = |days, severity| {
+                self.findings
+                    .iter()
+                    .filter(|f| {
+                        f.severity >= severity
+                            && within_days_ending_at(f.sealed_at_s, sealed_at_s, days)
+                    })
+                    .count() as u64
+            };
+            let all_90 = count(ESCALATION_L2_DAYS, 0);
+            let severity_three = finding.severity == 3;
+            let met = [
+                true,
+                all_90 >= ESCALATION_L2_COUNT,
+                all_90 >= ESCALATION_L3_COUNT || severity_three,
+                further
+                    || (severity_three && count(ESCALATION_L4_DAYS, 3) >= ESCALATION_L4_SEV3_COUNT),
+            ];
+            for (rung, met) in self.active.iter_mut().zip(met) {
+                if met && rung.is_none() {
+                    *rung = Some(Activation {
+                        record_id: finding.record_id,
+                        height,
+                        entry_index: finding.entry_index,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_rungs_keep_their_activation_and_ignore_stale_voids() {
+        let mut ladder = Ladder::default();
+        let apply = |ladder: &mut Ladder,
+                     height: u64,
+                     severity: Option<u8>,
+                     lift,
+                     reset,
+                     voids: &[NoticeVoid]| {
+            let findings = severity.map(|severity| OrderedFinding {
+                record_id: [height as u8; 32],
+                entry_index: 0,
+                severity,
+            });
+            ladder.apply_block(SanctionBlock {
+                height,
+                sealed_at_s: height as i64 * DAY_S,
+                lift,
+                reset,
+                voids,
+                findings: findings.as_slice(),
+            });
+        };
+        apply(&mut ladder, 0, Some(3), false, false, &[]);
+        apply(&mut ladder, 1, Some(3), false, false, &[]);
+        assert_eq!(ladder.active()[2].unwrap().record_id, [0; 32]);
+        assert_eq!(ladder.active()[3].unwrap().record_id, [1; 32]);
+        apply(&mut ladder, 2, Some(3), true, false, &[]);
+        assert_eq!(ladder.active()[2].unwrap().record_id, [2; 32]);
+        assert_eq!(ladder.level(), 4);
+        apply(
+            &mut ladder,
+            3,
+            None,
+            false,
+            false,
+            &[NoticeVoid {
+                level: 3,
+                activation: [0; 32],
+            }],
+        );
+        assert_eq!(ladder.active()[2].unwrap().record_id, [2; 32]);
+        apply(
+            &mut ladder,
+            4,
+            None,
+            false,
+            false,
+            &[NoticeVoid {
+                level: 4,
+                activation: [2; 32],
+            }],
+        );
+        assert_eq!(ladder.level(), 3);
+        apply(&mut ladder, 5, Some(1), false, true, &[]);
+        assert_eq!(ladder.level(), 1);
+    }
+
+    #[test]
+    fn process_clocks_keep_their_anchors_and_exact_wire_arithmetic() {
+        let notice = Notice {
+            id: "n",
+            subject: "s",
+            sanction: true,
+            height: 0,
+            sealed_at_s: 0,
+            activation_height: 0,
+            appeal_window_days: 1,
+            appeal_seal_days: 1,
+        };
+        let appeal = ProcessAct {
+            id: "a",
+            notice: "n",
+            subject: "s",
+            height: 1,
+            sealed_at_s: DAY_S,
+            kind: ProcessKind::Appeal,
+            ruling_deadline_days: 2,
+        };
+        assert_eq!(
+            process_at(notice, &[appeal], 2, 3 * DAY_S - 1).void_at_s,
+            None
+        );
+        assert_eq!(
+            process_at(notice, &[appeal], 2, 3 * DAY_S).void_at_s,
+            Some(i128::from(3 * DAY_S))
+        );
+        let huge = ProcessAct {
+            ruling_deadline_days: crate::parameters::WIRE_INTEGER_MAX as u64,
+            ..appeal
+        };
+        assert_eq!(process_at(notice, &[huge], 2, i64::MAX).void_at_s, None);
+        let huge_notice = Notice {
+            appeal_window_days: crate::parameters::WIRE_INTEGER_MAX as u64,
+            ..notice
+        };
+        assert_eq!(process_at(huge_notice, &[], 2, i64::MAX).void_at_s, None);
+    }
 
     fn f(day: i64, severity: u8) -> Finding {
         Finding {
