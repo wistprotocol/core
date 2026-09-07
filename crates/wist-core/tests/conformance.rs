@@ -1795,7 +1795,7 @@ fn wist4_roster_vectors() {
                         let evidence: Option<Vec<String>> = e
                             .get("evidence")
                             .map(|ids| serde_json::from_value(ids.clone()).unwrap());
-                        RosterAction::remove_with(evidence.as_deref())
+                        RosterAction::try_remove_with(evidence.as_deref()).unwrap()
                     }
                     other => panic!("unknown action {other}"),
                 };
@@ -2090,4 +2090,455 @@ fn wist4_unauditable_vectors() {
             "{label}"
         );
     }
+}
+
+#[test]
+fn wist4_roster_batch_vectors() {
+    use wist_core::roster::{Roster, RosterAct, RosterAction};
+    fn permutations(indices: &mut [usize], start: usize, out: &mut Vec<Vec<usize>>) {
+        if start == indices.len() {
+            out.push(indices.to_vec());
+            return;
+        }
+        for i in start..indices.len() {
+            indices.swap(start, i);
+            permutations(indices, start + 1, out);
+            indices.swap(start, i);
+        }
+    }
+    let v = read_json("vectors/wist4/roster.json");
+    for case in v["batch_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let initial = &case["initial_after_removals"];
+        for field in ["barred", "retired_key_ids", "retired_public_keys"] {
+            assert!(
+                initial[field].as_array().unwrap().is_empty(),
+                "{label}: {field} needs replay history"
+            );
+        }
+        let seed: Vec<_> = [
+            ("auditors", RosterAction::Admit),
+            ("observers", RosterAction::Register),
+        ]
+        .into_iter()
+        .flat_map(|(kind, action)| {
+            initial[kind]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(move |(subject, key)| RosterAct {
+                    action,
+                    auditor_id: subject,
+                    key_id: key["key_id"].as_str().unwrap(),
+                    public_key: key["public_key"].as_str().unwrap(),
+                })
+        })
+        .collect();
+        let acts: Vec<_> = case["acts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|act| RosterAct {
+                action: match act["action"].as_str().unwrap() {
+                    "auditor_admit" => RosterAction::Admit,
+                    "observer_register" => RosterAction::Register,
+                    other => panic!("unknown roster action {other}"),
+                },
+                auditor_id: act["subject"].as_str().unwrap(),
+                key_id: act["key_id"].as_str().unwrap(),
+                public_key: act["public_key"].as_str().unwrap(),
+            })
+            .collect();
+        let expected_rejections: Vec<usize> =
+            serde_json::from_value(case["expected"]["rejected_indices"].clone()).unwrap();
+        let mut orders = Vec::new();
+        permutations(&mut (0..acts.len()).collect::<Vec<_>>(), 0, &mut orders);
+        for order in orders {
+            let mut roster = Roster::new("log.example.org");
+            assert!(roster.apply_block(0, &seed).unwrap().is_empty(), "{label}");
+            let reordered: Vec<_> = order.iter().map(|&i| acts[i]).collect();
+            let rejected = roster.apply_block(1, &reordered).unwrap();
+            let mut actual: Vec<_> = rejected
+                .iter()
+                .map(|(i, error)| {
+                    assert!(error.to_string().contains("WIST4-E07"), "{label}: {error}");
+                    order[*i]
+                })
+                .collect();
+            actual.sort_unstable();
+            assert_eq!(actual, expected_rejections, "{label}: {order:?}");
+            for (kind, active) in [
+                ("auditors", roster.admitted_at(1)),
+                ("observers", roster.registered_at(1)),
+            ] {
+                let actual: serde_json::Map<String, serde_json::Value> = active
+                    .into_iter()
+                    .map(|(subject, key)| {
+                        let public_key = if kind == "auditors" {
+                            roster.public_key_at(subject, 1)
+                        } else {
+                            roster.observer_public_key_at(subject, 1)
+                        }
+                        .unwrap();
+                        (
+                            subject.to_owned(),
+                            serde_json::json!({"key_id": key, "public_key": public_key}),
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    serde_json::Value::Object(actual),
+                    case["expected"][kind],
+                    "{label}: {kind}, {order:?}"
+                );
+            }
+            for act in &seed {
+                let key = match act.action {
+                    RosterAction::Admit => roster.key_at(act.auditor_id, 0),
+                    RosterAction::Register => roster.observer_key_at(act.auditor_id, 0),
+                    _ => unreachable!(),
+                };
+                assert_eq!(key, Some(act.key_id), "{label}: historical tenure");
+            }
+        }
+    }
+}
+
+#[test]
+fn wist4_signed_admission_evidence_vectors() {
+    use wist_core::objects::audit::{RegistryDetails, RegistryUpdateEnvelope};
+    use wist_core::roster::{
+        validate_admission_evidence, ObserverCheckpoint, ObserverRegistration, Roster, RosterAct,
+        RosterAction,
+    };
+    let v = read_json("vectors/wist4/roster.json");
+    let admission = &v["admission"];
+    let keys: std::collections::BTreeMap<&str, wist_core::crypto::PublicKey> = admission["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["key_id"].as_str().unwrap(),
+                wist_core::crypto::PublicKey::from_b64u(k["public_key"].as_str().unwrap()).unwrap(),
+            )
+        })
+        .collect();
+    let record_doc = &admission["record_envelope"];
+    let record: wist_core::objects::AuditRecordEnvelope =
+        serde_json::from_value(record_doc.clone()).unwrap();
+    wist_core::envelope::verify_envelope(record_doc, "record", &keys[record.sig.key_id.as_str()])
+        .unwrap();
+    let head = wist_core::delta::delta_id(&record_doc["record"]).unwrap();
+    for case in admission["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let mut roster = Roster::new("log.example.org");
+        let mut registrations = Vec::new();
+        let mut checkpoints = Vec::new();
+        let history: Vec<(u64, RegistryUpdateEnvelope, String)> = case["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                let doc = &entry["envelope"];
+                let envelope: RegistryUpdateEnvelope = serde_json::from_value(doc.clone()).unwrap();
+                wist_core::envelope::verify_envelope(
+                    doc,
+                    "update",
+                    &keys[envelope.sig.key_id.as_str()],
+                )
+                .unwrap();
+                (
+                    entry["height"].as_u64().unwrap(),
+                    envelope,
+                    wist_core::delta::delta_id(&doc["update"]).unwrap(),
+                )
+            })
+            .collect();
+        for (height, envelope, id) in &history {
+            let update = &envelope.update;
+            match update.typed_details().unwrap() {
+                RegistryDetails::Registration(details) => {
+                    assert_eq!(envelope.sig.key_id, details.key_id, "{label}");
+                    assert!(
+                        roster
+                            .apply_block(
+                                *height as i64,
+                                &[RosterAct {
+                                    action: RosterAction::Register,
+                                    auditor_id: &update.subject,
+                                    key_id: &details.key_id,
+                                    public_key: &details.public_key,
+                                }]
+                            )
+                            .unwrap()
+                            .is_empty(),
+                        "{label}"
+                    );
+                    registrations.push(ObserverRegistration {
+                        observer_id: &update.subject,
+                        height: *height,
+                    });
+                }
+                RegistryDetails::ObserverCheckpoint(details) => {
+                    assert_eq!(details.head, head, "{label}");
+                    assert_eq!(update.subject, record.record.auditor_id, "{label}");
+                    assert_eq!(
+                        roster.observer_key_at(&update.subject, *height as i64),
+                        Some(envelope.sig.key_id.as_str()),
+                        "{label}"
+                    );
+                    checkpoints.push(ObserverCheckpoint {
+                        observer_id: &update.subject,
+                        height: *height,
+                        update_id: id,
+                    });
+                }
+                other => panic!("unexpected history details {other:?}"),
+            }
+        }
+        let doc = &case["envelope"];
+        let envelope: RegistryUpdateEnvelope = serde_json::from_value(doc.clone()).unwrap();
+        wist_core::envelope::verify_envelope(doc, "update", &keys[envelope.sig.key_id.as_str()])
+            .unwrap();
+        let RegistryDetails::Admission(details) = envelope.update.typed_details().unwrap() else {
+            panic!("{label}")
+        };
+        let height = case["admission_height"].as_u64().unwrap();
+        let subject = &envelope.update.subject;
+        let rejected = roster
+            .apply_block_checked(
+                height as i64,
+                &[RosterAct {
+                    action: RosterAction::Admit,
+                    auditor_id: subject,
+                    key_id: &details.key_id,
+                    public_key: &details.public_key,
+                }],
+                |_| {
+                    validate_admission_evidence(
+                        subject,
+                        height,
+                        &registrations,
+                        &checkpoints,
+                        details.track_record.as_ref(),
+                    )
+                },
+            )
+            .unwrap();
+        match case["error"].as_str() {
+            None => assert!(rejected.is_empty(), "{label}: {rejected:?}"),
+            Some(code) => {
+                assert_eq!(rejected.len(), 1, "{label}");
+                assert!(
+                    rejected[0].1.to_string().contains(code),
+                    "{label}: {rejected:?}"
+                );
+            }
+        }
+        assert_eq!(
+            roster.key_at(subject, height as i64),
+            case["admitted_key"].as_str(),
+            "{label}"
+        );
+        if rejected.is_empty() {
+            assert_eq!(
+                roster.observer_key_at(subject, height as i64),
+                None,
+                "{label}"
+            );
+        }
+    }
+}
+
+#[test]
+fn measured_audit_fields_follow_the_verdict() {
+    use wist_core::objects::AuditRecordEnvelope;
+    let original = read_json("examples/audit-record.json");
+    let fields = [
+        "response_commitment",
+        "credit_commitment",
+        "ref_extract_commitment",
+        "evidence_commitment",
+        "similarity",
+    ];
+    for verdict in [
+        "consistent",
+        "inconsistent",
+        "dynamic_variance",
+        "link_variance",
+        "link_inconsistent",
+    ] {
+        let mut measured = original.clone();
+        measured["record"]["verdict"] = verdict.into();
+        assert!(
+            serde_json::from_value::<AuditRecordEnvelope>(measured.clone()).is_ok(),
+            "{verdict}"
+        );
+        for field in fields {
+            let mut missing = measured.clone();
+            missing["record"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AuditRecordEnvelope>(missing.clone()).is_err(),
+                "{verdict}: missing {field}"
+            );
+            missing["record"][field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<AuditRecordEnvelope>(missing).is_err(),
+                "{verdict}: null {field}"
+            );
+        }
+        measured["record"]["unmeasured"] = "reference".into();
+        assert!(
+            serde_json::from_value::<AuditRecordEnvelope>(measured).is_err(),
+            "{verdict}: unmeasured"
+        );
+    }
+    for verdict in ["unreachable", "not_auditable"] {
+        let mut unmeasured = original.clone();
+        unmeasured["record"]["verdict"] = verdict.into();
+        for field in fields.into_iter().chain(["link_agreement"]) {
+            unmeasured["record"].as_object_mut().unwrap().remove(field);
+        }
+        if verdict == "not_auditable" {
+            assert!(serde_json::from_value::<AuditRecordEnvelope>(unmeasured.clone()).is_err());
+            unmeasured["record"]["unmeasured"] = "reference".into();
+        }
+        let parsed: AuditRecordEnvelope = serde_json::from_value(unmeasured.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), unmeasured);
+        for field in fields {
+            let mut extra = unmeasured.clone();
+            extra["record"][field] = original["record"][field].clone();
+            assert!(
+                serde_json::from_value::<AuditRecordEnvelope>(extra.clone()).is_err(),
+                "{verdict}: {field}"
+            );
+            extra["record"][field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<AuditRecordEnvelope>(extra).is_err(),
+                "{verdict}: null {field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wist4_registry_details_types_preserve_signed_objects() {
+    use wist_core::objects::audit::{RegistryDetails, RegistryUpdateEnvelope};
+    let roster = read_json("vectors/wist4/roster.json");
+    let canary = read_json("vectors/wist4/canary.json");
+    let mut docs = vec![
+        canary["membership"]["commitment_envelope"].clone(),
+        canary["membership"]["cases"][0]["envelope"].clone(),
+    ];
+    for case in roster["admission"]["cases"].as_array().unwrap() {
+        docs.push(case["envelope"].clone());
+        docs.extend(
+            case["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["envelope"].clone()),
+        );
+    }
+    for doc in docs {
+        let envelope: RegistryUpdateEnvelope = serde_json::from_value(doc.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&envelope).unwrap(), doc);
+        let details = envelope.update.typed_details().unwrap();
+        let actual = match details {
+            RegistryDetails::Admission(d) => serde_json::to_value(d),
+            RegistryDetails::Registration(d) => serde_json::to_value(d),
+            RegistryDetails::ObserverCheckpoint(d) => serde_json::to_value(d),
+            RegistryDetails::CanaryCommitment(d) => serde_json::to_value(d),
+            RegistryDetails::CanaryReveal(d) => serde_json::to_value(d),
+            other => panic!("unexpected details {other:?}"),
+        }
+        .unwrap();
+        assert_eq!(actual, doc["update"]["details"]);
+        for field in doc["update"]["details"].as_object().unwrap().keys() {
+            if field == "track_record" {
+                continue;
+            }
+            let mut missing = envelope.update.clone();
+            missing
+                .details
+                .as_mut()
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(missing.typed_details().is_err(), "missing {field}: {doc}");
+        }
+        let mut extended = envelope.update.clone();
+        extended.details.as_mut().unwrap()["extension"] = serde_json::json!({"number": 1.5});
+        assert!(extended.typed_details().is_ok());
+    }
+    let pk = wist_core::crypto::PublicKey::from_b64u(
+        canary["membership"]["public_key"].as_str().unwrap(),
+    )
+    .unwrap();
+    wist_core::envelope::verify_envelope(
+        &canary["membership"]["commitment_envelope"],
+        "update",
+        &pk,
+    )
+    .unwrap();
+    wist_core::envelope::verify_envelope(
+        &canary["membership"]["cases"][0]["envelope"],
+        "update",
+        &pk,
+    )
+    .unwrap();
+    let commitment: RegistryUpdateEnvelope =
+        serde_json::from_value(canary["membership"]["commitment_envelope"].clone()).unwrap();
+    let reveal: RegistryUpdateEnvelope =
+        serde_json::from_value(canary["membership"]["cases"][0]["envelope"].clone()).unwrap();
+    for (envelope, pointer, bad_value, code) in [
+        (
+            &commitment,
+            "/root",
+            serde_json::json!("sha256:ABC"),
+            "WIST4-E04",
+        ),
+        (&commitment, "/leaves", serde_json::json!(0), "WIST4-E08"),
+        (&reveal, "/leaves", serde_json::json!([]), "WIST4-E04"),
+        (
+            &reveal,
+            "/leaves/0/path/0",
+            serde_json::json!("0".repeat(64)),
+            "WIST4-E04",
+        ),
+        (
+            &reveal,
+            "/leaves/0/index",
+            serde_json::json!(-1),
+            "WIST4-E04",
+        ),
+    ] {
+        let mut update = envelope.update.clone();
+        *update
+            .details
+            .as_mut()
+            .unwrap()
+            .pointer_mut(pointer)
+            .unwrap() = bad_value;
+        assert!(
+            update
+                .typed_details()
+                .unwrap_err()
+                .to_string()
+                .contains(code),
+            "{pointer}"
+        );
+    }
+    let mut extra_leaf_field = reveal.update.clone();
+    extra_leaf_field.details.as_mut().unwrap()["leaves"][0]["extension"] = true.into();
+    assert!(extra_leaf_field.typed_details().is_err());
+    let mut admission: RegistryUpdateEnvelope =
+        serde_json::from_value(roster["admission"]["cases"][3]["envelope"].clone()).unwrap();
+    admission.update.details.as_mut().unwrap()["track_record"]["scoreboard"]["mature"] =
+        serde_json::json!([0, 0]);
+    assert!(admission.update.typed_details().is_err());
+    admission.update.details.as_mut().unwrap()["track_record"] = serde_json::Value::Null;
+    assert!(admission.update.typed_details().is_err());
 }

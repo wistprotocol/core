@@ -38,6 +38,33 @@ sanction and escalation states at height B − 1 to `sampling::p_1e7` or
 Block 0, both states come from the empty Log. Escalation changes sampling
 only; it creates no sanction or removal state.
 
+## Roster replay
+
+`roster::Roster::apply_block` derives admitted and Observer key tenures from
+roster acts whose signatures and details have already been validated.
+Blocks arrive in increasing `sealed_at` order. Removals read the pre-Block
+roster; admissions and registrations resolve as a simultaneous batch.
+`apply_block_checked` also accepts an evidence validator: it checks removals
+before they take effect and candidates after duplicate and incumbent checks,
+so invalid evidence cannot retire a key or veto a competing claim.
+
+Parse revised registry details with `RegistryUpdate::typed_details` and wire
+removal evidence with `RosterAction::try_remove_with`. The older
+`remove_with` constructor accepts already-validated, normalized evidence.
+`validate_admission_evidence` takes only accepted Observer registrations and
+otherwise-valid checkpoints for this Log, including the admission Block.
+Callers validate checkpoint signatures under the registered key and resolve
+the named chain head before supplying that history. The function enforces
+track-record presence and the highest-height, greatest-ID citation; it does
+not reject a claimed scoreboard merely for disagreeing with a recomputation
+(WIST-4 §3.1). Canary membership, timing and scoring require separate replay
+checks beyond the typed details contract.
+
+Audit Record deserialization requires all five measured fields, including
+`credit_commitment`, on measured verdicts and omits them on unmeasured
+verdicts. `not_auditable` additionally requires `unmeasured`. Snapshot state
+supports escalation, Observer tenure and live canary commitment tuples.
+
 ## Verification
 
 ```bash

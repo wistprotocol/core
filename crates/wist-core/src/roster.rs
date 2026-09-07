@@ -5,12 +5,22 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RosterAction {
     Admit,
+    Register,
     Remove { for_cause: bool },
 }
 
 impl RosterAction {
     /// WIST-4 §4: a removal is for cause exactly when its `evidence`
     /// names at least one ID.
+    pub fn try_remove_with(evidence: Option<&[String]>) -> Result<Self, Error> {
+        if evidence.is_some_and(|ids| ids.is_empty()) {
+            return Err(Error::Roster(
+                "WIST4-E04: removal evidence must be absent or nonempty".into(),
+            ));
+        }
+        Ok(Self::remove_with(evidence))
+    }
+
     pub fn remove_with(evidence: Option<&[String]>) -> Self {
         RosterAction::Remove {
             for_cause: evidence.is_some_and(|ids| !ids.is_empty()),
@@ -46,8 +56,10 @@ pub struct Roster {
     log_id: String,
     tenures: Vec<Tenure>,
     held: BTreeMap<String, usize>,
-    held_strings: BTreeSet<String>,
-    retired: BTreeSet<String>,
+    observer_tenures: Vec<Tenure>,
+    observers: BTreeMap<String, usize>,
+    retired_key_ids: BTreeSet<String>,
+    retired_public_keys: BTreeSet<String>,
     barred: BTreeSet<String>,
     last_sealed_at_s: Option<i64>,
 }
@@ -58,8 +70,10 @@ impl Roster {
             log_id: log_id.to_owned(),
             tenures: Vec::new(),
             held: BTreeMap::new(),
-            held_strings: BTreeSet::new(),
-            retired: BTreeSet::new(),
+            observer_tenures: Vec::new(),
+            observers: BTreeMap::new(),
+            retired_key_ids: BTreeSet::new(),
+            retired_public_keys: BTreeSet::new(),
             barred: BTreeSet::new(),
             last_sealed_at_s: None,
         }
@@ -69,12 +83,19 @@ impl Roster {
         &self.log_id
     }
 
-    /// Removes are read before admits within the Block; rejected acts leave
-    /// the roster unchanged and later acts see the accepted earlier ones.
     pub fn apply_block(
         &mut self,
         sealed_at_s: i64,
         acts: &[RosterAct<'_>],
+    ) -> Result<Vec<(usize, Error)>, Error> {
+        self.apply_block_checked(sealed_at_s, acts, |_| Ok(()))
+    }
+
+    pub fn apply_block_checked(
+        &mut self,
+        sealed_at_s: i64,
+        acts: &[RosterAct<'_>],
+        mut validate_evidence: impl FnMut(usize) -> Result<(), Error>,
     ) -> Result<Vec<(usize, Error)>, Error> {
         if self
             .last_sealed_at_s
@@ -85,125 +106,179 @@ impl Roster {
             ));
         }
         self.last_sealed_at_s = Some(sealed_at_s);
-        let mut rejected = Vec::new();
+        let mut rejected = BTreeMap::new();
+        let mut removals = Vec::new();
         for (i, act) in acts.iter().enumerate() {
             if let RosterAction::Remove { for_cause } = act.action {
-                if let Err(e) = self.remove(sealed_at_s, act, for_cause) {
-                    rejected.push((i, e));
+                if let Err(error) = validate_evidence(i) {
+                    rejected.insert(i, error);
+                    continue;
+                }
+                match self.held.get(act.auditor_id).copied() {
+                    Some(idx) if self.tenures[idx].key_id == act.key_id => {
+                        removals.push((idx, for_cause));
+                    }
+                    _ => {
+                        rejected.insert(
+                            i,
+                            roster_error("removal does not name the subject's pre-Block key"),
+                        );
+                    }
                 }
             }
         }
-        let admits: Vec<&RosterAct<'_>> = acts
+        for (idx, for_cause) in removals {
+            let tenure = &mut self.tenures[idx];
+            tenure.until_s = Some(sealed_at_s);
+            self.held.remove(&tenure.auditor_id);
+            self.retired_key_ids.insert(tenure.key_id.clone());
+            self.retired_public_keys.insert(tenure.public_key.clone());
+            if for_cause {
+                self.barred.insert(tenure.auditor_id.clone());
+            }
+        }
+        let candidates: Vec<usize> = acts
             .iter()
-            .filter(|act| act.action == RosterAction::Admit)
+            .enumerate()
+            .filter(|(_, act)| matches!(act.action, RosterAction::Admit | RosterAction::Register))
+            .map(|(i, _)| i)
             .collect();
-        for (i, act) in acts.iter().enumerate() {
-            if act.action != RosterAction::Admit {
+        for &i in &candidates {
+            let act = &acts[i];
+            if candidates
+                .iter()
+                .filter(|&&j| acts[j].action == act.action && acts[j].auditor_id == act.auditor_id)
+                .count()
+                > 1
+            {
+                rejected.insert(i, roster_error("multiple same-subject claims of one kind"));
+            }
+        }
+        for &i in &candidates {
+            if rejected.contains_key(&i) {
                 continue;
             }
-            let twice = admits
-                .iter()
-                .filter(|a| a.auditor_id == act.auditor_id)
-                .count()
-                > 1;
-            let result = if twice {
-                Err(Error::Roster(format!(
-                    "WIST4-E07: {} is named by two admits in one Block",
-                    act.auditor_id
-                )))
-            } else {
-                self.admit(sealed_at_s, act)
+            if let Err(error) = self
+                .check_incumbents(&acts[i])
+                .and_then(|()| validate_evidence(i))
+            {
+                rejected.insert(i, error);
+            }
+        }
+        for &i in &candidates {
+            let act = &acts[i];
+            if act.action == RosterAction::Register
+                && !rejected.contains_key(&i)
+                && candidates.iter().any(|&j| {
+                    !rejected.contains_key(&j)
+                        && acts[j].action == RosterAction::Admit
+                        && acts[j].auditor_id == act.auditor_id
+                })
+            {
+                rejected.insert(
+                    i,
+                    roster_error("same-subject admission supersedes registration"),
+                );
+            }
+        }
+        let remaining: Vec<usize> = candidates
+            .iter()
+            .copied()
+            .filter(|i| !rejected.contains_key(i))
+            .collect();
+        let conflicts: Vec<usize> = remaining
+            .iter()
+            .copied()
+            .filter(|&i| {
+                remaining.iter().any(|&j| {
+                    acts[i].auditor_id != acts[j].auditor_id
+                        && (acts[i].key_id == acts[j].key_id
+                            || acts[i].public_key == acts[j].public_key)
+                })
+            })
+            .collect();
+        for i in conflicts {
+            rejected.insert(
+                i,
+                roster_error("simultaneous claims share a key across subjects"),
+            );
+        }
+        for i in candidates {
+            if rejected.contains_key(&i) {
+                continue;
+            }
+            let act = &acts[i];
+            if let Some(idx) = self.observers.remove(act.auditor_id) {
+                self.observer_tenures[idx].until_s = Some(sealed_at_s);
+            }
+            let tenure = Tenure {
+                auditor_id: act.auditor_id.to_owned(),
+                key_id: act.key_id.to_owned(),
+                public_key: act.public_key.to_owned(),
+                from_s: sealed_at_s,
+                until_s: None,
             };
-            if let Err(e) = result {
-                rejected.push((i, e));
+            match act.action {
+                RosterAction::Admit => {
+                    self.held
+                        .insert(act.auditor_id.to_owned(), self.tenures.len());
+                    self.tenures.push(tenure);
+                }
+                RosterAction::Register => {
+                    self.observers
+                        .insert(act.auditor_id.to_owned(), self.observer_tenures.len());
+                    self.observer_tenures.push(tenure);
+                }
+                RosterAction::Remove { .. } => unreachable!(),
             }
         }
-        rejected.sort_by_key(|(i, _)| *i);
-        Ok(rejected)
+        Ok(rejected.into_iter().collect())
     }
 
-    fn remove(
-        &mut self,
-        sealed_at_s: i64,
-        act: &RosterAct<'_>,
-        for_cause: bool,
-    ) -> Result<(), Error> {
-        let idx = match self.held.get(act.auditor_id) {
-            Some(&idx) if self.tenures[idx].key_id == act.key_id => idx,
-            _ => {
-                return Err(Error::Roster(format!(
-                    "WIST4-E07: {} does not hold key {}",
-                    act.auditor_id, act.key_id
-                )))
-            }
-        };
-        self.tenures[idx].until_s = Some(sealed_at_s);
-        self.held.remove(act.auditor_id);
-        for string in [&self.tenures[idx].key_id, &self.tenures[idx].public_key] {
-            self.held_strings.remove(string);
-            self.retired.insert(string.clone());
-        }
-        if for_cause {
-            self.barred.insert(act.auditor_id.to_owned());
-        }
-        Ok(())
-    }
-
-    fn admit(&mut self, sealed_at_s: i64, act: &RosterAct<'_>) -> Result<(), Error> {
-        if self.retired.contains(act.key_id) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: key {} is retired",
-                act.key_id
-            )));
-        }
-        if self.retired.contains(act.public_key) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: public key {} is retired",
-                act.public_key
-            )));
-        }
-        if self.held_strings.contains(act.key_id) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: key {} is held by another admission",
-                act.key_id
-            )));
-        }
-        if self.held_strings.contains(act.public_key) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: public key {} is held by another admission",
-                act.public_key
-            )));
-        }
-        if self.barred.contains(act.auditor_id) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: {} is barred by a removal for cause",
-                act.auditor_id
-            )));
-        }
-        if let Some(&idx) = self.held.get(act.auditor_id) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: {} holds key {} not removed at or before this Block",
-                act.auditor_id, self.tenures[idx].key_id
-            )));
-        }
+    fn check_incumbents(&self, act: &RosterAct<'_>) -> Result<(), Error> {
         if !independent(act.auditor_id, &self.log_id) {
-            return Err(Error::Roster(format!(
-                "WIST4-E07: {} is not independent of log_id {}",
-                act.auditor_id, self.log_id
-            )));
+            return Err(roster_error("subject is not independent of log_id"));
         }
-        self.held
-            .insert(act.auditor_id.to_owned(), self.tenures.len());
-        self.held_strings.insert(act.key_id.to_owned());
-        self.held_strings.insert(act.public_key.to_owned());
-        self.tenures.push(Tenure {
-            auditor_id: act.auditor_id.to_owned(),
-            key_id: act.key_id.to_owned(),
-            public_key: act.public_key.to_owned(),
-            from_s: sealed_at_s,
-            until_s: None,
-        });
+        if self.retired_key_ids.contains(act.key_id)
+            || self.retired_public_keys.contains(act.public_key)
+        {
+            return Err(roster_error("key is retired"));
+        }
+        if self.held.contains_key(act.auditor_id) {
+            return Err(roster_error("subject already holds an admitted key"));
+        }
+        if act.action == RosterAction::Admit && self.barred.contains(act.auditor_id) {
+            return Err(roster_error("subject is barred by a removal for cause"));
+        }
+        if self.held.values().any(|&idx| {
+            let t = &self.tenures[idx];
+            t.key_id == act.key_id || t.public_key == act.public_key
+        }) || self.observers.values().any(|&idx| {
+            let t = &self.observer_tenures[idx];
+            t.auditor_id != act.auditor_id
+                && (t.key_id == act.key_id || t.public_key == act.public_key)
+        }) {
+            return Err(roster_error("key is held by an incumbent"));
+        }
         Ok(())
+    }
+
+    pub fn observer_key_at(&self, observer_id: &str, t_s: i64) -> Option<&str> {
+        self.observer_tenures
+            .iter()
+            .find(|t| t.auditor_id == observer_id && t.holds_at(t_s))
+            .map(|t| t.key_id.as_str())
+    }
+
+    pub fn registered_at(&self, t_s: i64) -> Vec<(&str, &str)> {
+        let mut registered: Vec<_> = self
+            .observer_tenures
+            .iter()
+            .filter(|t| t.holds_at(t_s))
+            .map(|t| (t.auditor_id.as_str(), t.key_id.as_str()))
+            .collect();
+        registered.sort_unstable();
+        registered
     }
 
     pub fn key_at(&self, auditor_id: &str, t_s: i64) -> Option<&str> {
@@ -211,6 +286,20 @@ impl Roster {
             .iter()
             .find(|t| t.auditor_id == auditor_id && t.holds_at(t_s))
             .map(|t| t.key_id.as_str())
+    }
+
+    pub fn public_key_at(&self, auditor_id: &str, t_s: i64) -> Option<&str> {
+        self.tenures
+            .iter()
+            .find(|t| t.auditor_id == auditor_id && t.holds_at(t_s))
+            .map(|t| t.public_key.as_str())
+    }
+
+    pub fn observer_public_key_at(&self, observer_id: &str, t_s: i64) -> Option<&str> {
+        self.observer_tenures
+            .iter()
+            .find(|t| t.auditor_id == observer_id && t.holds_at(t_s))
+            .map(|t| t.public_key.as_str())
     }
 
     pub fn admitted_at(&self, t_s: i64) -> Vec<(&str, &str)> {
@@ -222,6 +311,54 @@ impl Roster {
             .collect();
         admitted.sort_unstable();
         admitted
+    }
+}
+
+fn roster_error(reason: &str) -> Error {
+    Error::Roster(format!("WIST4-E07: {reason}"))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObserverRegistration<'a> {
+    pub observer_id: &'a str,
+    pub height: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObserverCheckpoint<'a> {
+    pub observer_id: &'a str,
+    pub height: u64,
+    pub update_id: &'a str,
+}
+
+pub fn validate_admission_evidence(
+    subject: &str,
+    height: u64,
+    registrations: &[ObserverRegistration<'_>],
+    checkpoints: &[ObserverCheckpoint<'_>],
+    track_record: Option<&crate::objects::audit::TrackRecord>,
+) -> Result<(), Error> {
+    let was_observer = registrations
+        .iter()
+        .any(|r| r.observer_id == subject && r.height <= height);
+    match (was_observer, track_record) {
+        (false, None) => Ok(()),
+        (true, Some(record)) => {
+            let newest = checkpoints
+                .iter()
+                .filter(|c| c.observer_id == subject && c.height <= height)
+                .max_by_key(|c| (c.height, c.update_id.as_bytes()));
+            if newest.is_some_and(|c| c.update_id == record.checkpoint) {
+                Ok(())
+            } else {
+                Err(Error::Roster(
+                    "WIST4-E04: track_record must cite the newest valid Observer checkpoint".into(),
+                ))
+            }
+        }
+        _ => Err(Error::Roster(
+            "WIST4-E04: track_record must accompany exactly an Observer history".into(),
+        )),
     }
 }
 
@@ -492,5 +629,116 @@ mod tests {
         assert!(rejected
             .iter()
             .all(|(_, e)| e.to_string().starts_with("roster: WIST4-E07: ")));
+    }
+    #[test]
+    fn invalid_removal_evidence_neither_retires_nor_bars() {
+        assert!(RosterAction::try_remove_with(Some(&[])).is_err());
+        assert_eq!(
+            RosterAction::try_remove_with(None).unwrap(),
+            RosterAction::Remove { for_cause: false }
+        );
+        let mut roster = Roster::new(LOG);
+        roster.apply_block(0, &[admit(A, "k1")]).unwrap();
+        let rejected = roster
+            .apply_block_checked(1, &[remove(A, "k1", true)], |_| {
+                Err(Error::Roster("WIST4-E04: malformed evidence".into()))
+            })
+            .unwrap();
+        assert_eq!(indices(&rejected), vec![0]);
+        assert_eq!(roster.key_at(A, 1), Some("k1"));
+        assert!(roster
+            .apply_block(2, &[remove(A, "k1", false), admit(A, "k2")])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn invalid_admission_evidence_does_not_veto_a_registration() {
+        let mut roster = Roster::new(LOG);
+        let mut registration = admit(B, "k1");
+        registration.action = RosterAction::Register;
+        let rejected = roster
+            .apply_block_checked(0, &[admit(A, "k1"), registration], |i| {
+                if i == 0 {
+                    Err(Error::Roster("WIST4-E04: missing checkpoint".into()))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(indices(&rejected), vec![0]);
+        assert_eq!(roster.observer_key_at(B, 0), Some("k1"));
+    }
+
+    #[test]
+    fn observer_rotation_releases_keys_only_for_later_blocks() {
+        let mut roster = Roster::new(LOG);
+        let mut registration = admit(A, "k1");
+        registration.action = RosterAction::Register;
+        roster.apply_block(0, &[registration]).unwrap();
+        registration.key_id = "k2";
+        registration.public_key = "pk-k2";
+        assert_eq!(
+            indices(
+                &roster
+                    .apply_block(1, &[registration, admit(B, "k1")])
+                    .unwrap()
+            ),
+            vec![1]
+        );
+        assert!(roster.apply_block(2, &[admit(B, "k1")]).unwrap().is_empty());
+        assert_eq!(roster.observer_key_at(A, 0), Some("k1"));
+        assert_eq!(roster.observer_key_at(A, 1), Some("k2"));
+        assert_eq!(roster.key_at(B, 2), Some("k1"));
+    }
+
+    #[test]
+    fn checkpoint_citation_reads_only_the_subjects_history_through_admission() {
+        use crate::objects::audit::{Scoreboard, TrackRecord};
+        let registrations = [ObserverRegistration {
+            observer_id: A,
+            height: 2,
+        }];
+        let checkpoints = [
+            ObserverCheckpoint {
+                observer_id: A,
+                height: 2,
+                update_id: "sha256:a",
+            },
+            ObserverCheckpoint {
+                observer_id: A,
+                height: 3,
+                update_id: "sha256:0",
+            },
+            ObserverCheckpoint {
+                observer_id: A,
+                height: 4,
+                update_id: "sha256:z",
+            },
+            ObserverCheckpoint {
+                observer_id: B,
+                height: 3,
+                update_id: "sha256:z",
+            },
+        ];
+        let record = TrackRecord {
+            checkpoint: "sha256:0".into(),
+            scoreboard: Scoreboard {
+                provisional: [0; 3],
+                standing: [0; 3],
+                mature: [0; 3],
+            },
+        };
+        assert!(validate_admission_evidence(A, 1, &registrations, &checkpoints, None).is_ok());
+        assert!(
+            validate_admission_evidence(A, 1, &registrations, &checkpoints, Some(&record)).is_err()
+        );
+        assert!(validate_admission_evidence(A, 2, &registrations, &checkpoints, None).is_err());
+        assert!(
+            validate_admission_evidence(A, 3, &registrations, &checkpoints, Some(&record)).is_ok()
+        );
+        assert!(
+            validate_admission_evidence(A, 4, &registrations, &checkpoints, Some(&record)).is_err()
+        );
     }
 }

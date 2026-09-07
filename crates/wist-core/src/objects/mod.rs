@@ -21,11 +21,12 @@ pub use log_anchor::{Anchor, GenesisKey, LogAnchorEnvelope, Predecessor};
 pub use payload::{Payload, PayloadContent, PayloadLinks, PayloadSummary};
 pub use publisher::{Publisher, PublisherEnvelope, PublisherKey};
 pub use snapshot::{
-    AggregatorKeyEntry, AuditorEntry, CoverageFailureEntry, DeclarationEntry, ExclusionEntry,
-    ParameterEntry, RecordEntry, RecoveryWindowEntry, ReputationInputsEntry, SanctionDeadlineLabel,
-    SanctionStateEntry, SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope,
-    SnapshotManifest, SnapshotManifestEnvelope, SnapshotShards, SnapshotState,
-    SnapshotStateEnvelope, SnapshotStateFile, StateEntry,
+    AggregatorKeyEntry, AuditorEntry, CanaryCommitmentEntry, CoverageFailureEntry,
+    DeclarationEntry, EscalationEntry, ExclusionEntry, ObserverEntry, ParameterEntry, RecordEntry,
+    RecoveryWindowEntry, ReputationInputsEntry, SanctionDeadlineLabel, SanctionStateEntry,
+    SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope, SnapshotManifest,
+    SnapshotManifestEnvelope, SnapshotShards, SnapshotState, SnapshotStateEnvelope,
+    SnapshotStateFile, StateEntry,
 };
 pub use status::{PublisherState, Status, StatusRejection};
 

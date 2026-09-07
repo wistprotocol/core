@@ -161,7 +161,34 @@ pub struct RecordEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct EscalationEntry {
+    pub domain: String,
+    pub establishing_sealed_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObserverEntry {
+    pub observer_id: String,
+    pub key_id: String,
+    pub public_key: String,
+    pub registered_height: u64,
+    pub ended_height: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanaryCommitmentEntry {
+    pub update_id: String,
+    pub planter: String,
+    pub root: String,
+    pub leaves: u64,
+    pub sealing_height: u64,
+}
+
+#[derive(Debug, Clone)]
 pub enum StateEntry {
+    CanaryCommitment(CanaryCommitmentEntry),
+    Observer(ObserverEntry),
+    Escalation(EscalationEntry),
     AggregatorKey(AggregatorKeyEntry),
     Auditor(AuditorEntry),
     Declaration(DeclarationEntry),
@@ -202,6 +229,36 @@ impl<'de> Deserialize<'de> for StateEntry {
             .to_string();
         let tail = &items[1..];
         match kind.as_str() {
+            "canary_commitment" => {
+                check_arity::<D::Error>(&kind, tail, 5)?;
+                Ok(StateEntry::CanaryCommitment(CanaryCommitmentEntry {
+                    update_id: field(tail, 0)?,
+                    planter: field(tail, 1)?,
+                    root: field(tail, 2)?,
+                    leaves: field(tail, 3)?,
+                    sealing_height: field(tail, 4)?,
+                }))
+            }
+
+            "observer" => {
+                check_arity::<D::Error>(&kind, tail, 5)?;
+                Ok(StateEntry::Observer(ObserverEntry {
+                    observer_id: field(tail, 0)?,
+                    key_id: field(tail, 1)?,
+                    public_key: field(tail, 2)?,
+                    registered_height: field(tail, 3)?,
+                    ended_height: field(tail, 4)?,
+                }))
+            }
+
+            "escalation" => {
+                check_arity::<D::Error>(&kind, tail, 2)?;
+                Ok(StateEntry::Escalation(EscalationEntry {
+                    domain: field(tail, 0)?,
+                    establishing_sealed_at: field(tail, 1)?,
+                }))
+            }
+
             "aggregator_key" => {
                 check_arity::<D::Error>(&kind, tail, 4)?;
                 Ok(StateEntry::AggregatorKey(AggregatorKeyEntry {
@@ -298,6 +355,28 @@ impl<'de> Deserialize<'de> for StateEntry {
 impl Serialize for StateEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let value = match self {
+            StateEntry::CanaryCommitment(e) => serde_json::json!([
+                "canary_commitment",
+                e.update_id,
+                e.planter,
+                e.root,
+                e.leaves,
+                e.sealing_height
+            ]),
+
+            StateEntry::Observer(e) => serde_json::json!([
+                "observer",
+                e.observer_id,
+                e.key_id,
+                e.public_key,
+                e.registered_height,
+                e.ended_height
+            ]),
+
+            StateEntry::Escalation(e) => {
+                serde_json::json!(["escalation", e.domain, e.establishing_sealed_at])
+            }
+
             StateEntry::AggregatorKey(e) => serde_json::json!([
                 "aggregator_key",
                 e.key_id,
@@ -377,6 +456,16 @@ mod tests {
         let url_digest = "b".repeat(32);
         let delta_id = format!("sha256:{}", "c".repeat(64));
         let cases = [
+            serde_json::json!(["escalation", "example.com", "2026-08-02T12:00:00Z"]),
+            serde_json::json!(["observer", "watch.example.net", "key-3", pk, 5, Value::Null]),
+            serde_json::json!([
+                "canary_commitment",
+                delta_id,
+                "plant.example.org",
+                evidence_digest,
+                3,
+                8
+            ]),
             serde_json::json!(["aggregator_key", "key-1", pk, 10, Value::Null]),
             serde_json::json!(["auditor", "auditor.example.com", "key-2", pk, 5, 20]),
             serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42]),
@@ -407,7 +496,7 @@ mod tests {
                 delta_id
             ]),
         ];
-        assert_eq!(cases.len(), 10);
+        assert_eq!(cases.len(), 13);
         for tuple in cases {
             let entry: StateEntry =
                 serde_json::from_value(tuple.clone()).unwrap_or_else(|e| panic!("{tuple}: {e}"));
