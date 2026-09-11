@@ -1393,6 +1393,46 @@ fn wist1_host_canonicalization() {
 }
 
 #[test]
+fn wist1_declaration_host_spelling() {
+    let vector = read_json("vectors/wist1/declaration-hosts.json");
+    for case in vector["hosts"].as_array().unwrap() {
+        let input = case["input"].as_str().unwrap();
+        let canonical = wist_core::host::canonical_host(input);
+        assert_eq!(
+            canonical.as_deref().ok(),
+            case["canonical"].as_str(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            canonical.as_deref().ok() == Some(input),
+            case["expected"] == "well_formed",
+            "{}",
+            case["name"]
+        );
+    }
+    let author =
+        wist_core::crypto::PublicKey::from_b64u(vector["author_key"].as_str().unwrap()).unwrap();
+    for case in vector["cases"].as_array().unwrap() {
+        let envelope = &case["envelope"];
+        let publisher = &envelope["publisher"];
+        let bytes = wist_core::jcs::canonicalize(publisher).unwrap();
+        wist_core::crypto::verify(&author, &bytes, envelope["sig"]["value"].as_str().unwrap())
+            .unwrap();
+        let valid = std::iter::once(publisher["domain"].as_str().unwrap())
+            .chain(
+                publisher["subdomain_scope"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap()),
+            )
+            .all(|host| wist_core::host::canonical_host(host).as_deref().ok() == Some(host));
+        assert_eq!(valid, case["expected"] == "initial", "{}", case["name"]);
+    }
+}
+
+#[test]
 fn wist1_ed25519_verification_profile() {
     let v = read_json("vectors/wist1/ed25519-strictness.json");
     let msg = wist_core::crypto::hex_decode(v["message_hex"].as_str().unwrap()).unwrap();
