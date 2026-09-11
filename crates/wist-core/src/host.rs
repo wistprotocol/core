@@ -24,6 +24,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unicode_16_mapping_excludes_later_assignments() {
+        assert_eq!(
+            canonical_host("\u{1c89}.example").unwrap(),
+            "xn--d4f.example"
+        );
+        assert_eq!(
+            canonical_host("xn--d4f.example").unwrap(),
+            "xn--d4f.example"
+        );
+        assert!(canonical_host("\u{1e6c0}.example").is_err());
+        assert!(canonical_host("xn--uv5h.example").is_err());
+    }
+
+    #[test]
     fn folds_case_and_strips_trailing_dot() {
         assert_eq!(canonical_host("EXAMPLE.org.").unwrap(), "example.org");
         assert_eq!(canonical_host("example.org").unwrap(), "example.org");

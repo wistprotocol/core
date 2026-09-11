@@ -21,6 +21,12 @@ Conformance tests read the spec repo's schemas/vectors from `../spec`
 WIST_SPEC_DIR=/path/to/spec cargo test
 ```
 
+Canonical Host processing uses Unicode 16.0 UTS #46 data. Exact IDNA adapter
+and ICU normalizer/property dependency constraints keep a dependency update
+from admitting names assigned only in a later Unicode version. The `zerovec`
+allocation feature supports these ICU data providers. Signed host vectors
+exercise both Unicode 16 additions and Unicode 17 exclusions.
+
 ## Extension replay
 
 `extension::evaluate` takes the valid Records for one Delta in Log order,
