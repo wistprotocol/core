@@ -212,6 +212,28 @@ Mirrors must acquire every cited Record Block before serving the notice
 Block and persist these obligations across restarts. The helper determines
 retention duration; callers perform and verify the required storage.
 
+## Recovery settlement
+
+`recovery::settle` consumes accepted Declarations in application order.
+Each `WindowDeclaration.label` is its inner-object hash, `predecessor` is its
+named predecessor hash, and `signer` is the authenticated public key, not its
+identifier. Callers establish sequence, predecessor eligibility, signatures,
+recovery-key protection and window ownership before constructing these inputs.
+The helper follows only replacements naming the current recovery-chain head
+and signed by a public key in that head's signing or recovery set.
+
+Queue admission and settlement receive a verification callback over the full
+signed Delta Envelope and complete `PublisherKey` entries. The callback must
+check the named binding, canonical signature and parsed `observed_at` against
+`valid_from`; key-identifier membership alone is insufficient. Admission tries
+the frozen pre-recovery and opening sets independently. Settlement returns
+signature-eligible survivors in acceptance order and rejected queued copies;
+it establishes no Payload availability, quota eligibility or Block inclusion.
+A rejected Delta ID is not permanently barred. History restoration, due-process
+admission and durable queue/status effects remain service responsibilities.
+The settlement conformance fixtures restrict timestamp comparisons to
+whole-second literal-Z values; their callback is not a general RFC 3339 parser.
+
 ## Verification
 
 ```bash
