@@ -2881,3 +2881,39 @@ fn wist4_sanction_process() {
         }
     }
 }
+
+#[test]
+fn signed_delta_publisher_fields_and_ids() {
+    let vector = read_json("vectors/wist1/delta-attribution.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let original = case.clone();
+        for (index, envelope) in case["envelopes"].as_array().unwrap().iter().enumerate() {
+            let valid_field = case["expected"][index] != "WIST1-E14";
+            assert_eq!(
+                wist_core::delta::publisher(&envelope["delta"]).is_ok(),
+                valid_field,
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                serde_json::from_value::<wist_core::objects::DeltaEnvelope>(envelope.clone())
+                    .is_ok(),
+                valid_field,
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                wist_core::delta::delta_id(&envelope["delta"]).unwrap(),
+                case["delta_ids"][index]
+            );
+        }
+        assert_eq!(*case, original);
+    }
+    for case in vector["cases"].as_array().unwrap().iter().take(2) {
+        assert_ne!(case["delta_ids"][0], case["delta_ids"][1]);
+        assert_ne!(
+            case["envelopes"][0]["sig"]["value"],
+            case["envelopes"][1]["sig"]["value"]
+        );
+    }
+}

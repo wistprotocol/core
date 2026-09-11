@@ -5,6 +5,26 @@ use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub fn validate_publisher(domain: &str) -> Result<(), Error> {
+    if !crate::host::canonical_host(domain).is_ok_and(|canonical| canonical == domain) {
+        return Err(Error::Envelope(
+            "WIST1-E14: noncanonical Delta publisher".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn publisher(delta: &Value) -> Result<&str, Error> {
+    let domain = delta
+        .get("publisher")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::Envelope("WIST1-E14: missing or non-string Delta publisher".into())
+        })?;
+    validate_publisher(domain)?;
+    Ok(domain)
+}
+
 pub fn delta_id(delta: &Value) -> Result<String, Error> {
     let canonical = jcs::canonicalize(delta)?;
     Ok(format!(

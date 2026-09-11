@@ -1,5 +1,9 @@
 # wist-core
 
+The signed Delta format targets [WIST specification revision `b96e21fe97b591075c369db17346df81292a8158`](https://github.com/wistprotocol/spec/tree/b96e21fe97b591075c369db17346df81292a8158). Object version `1.0.0` alone does not identify a compatible draft.
+
+Delta Envelopes require a canonical `publisher` inside the signed and hashed object. The typed object and `delta::publisher` reject missing or noncanonical identities without rewriting signed bytes. Signature/key-history and `(publisher, url)` chain validation remain caller obligations.
+
 Rust implementation of the WIST Protocol's WIST-1..3 primitives: JCS canonicalization, Ed25519
 envelopes, delta identity, Merkle trees/proofs, block/checkpoint verification,
 snapshot digests, and WIST-2 link/text extraction, and WIST-4 audit math
