@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 pub const SAMPLING_FLOOR_1E7: u64 = 200_000;
 pub const SAMPLING_CEILING_1E7: u64 = 5_000_000;
-pub const SAMPLING_SLOPE_PER_MICRO: u64 = 3;
+pub const SAMPLING_SLOPE_PER_MICRO: i64 = 3;
 
 pub fn alpha_from_block_hash(block_hash: &str) -> Result<[u8; 32], Error> {
     let hex = block_hash
@@ -29,7 +29,7 @@ pub fn draw(beta: &[u8; 64], delta_id: &str) -> u64 {
 pub struct SamplingConstants {
     pub floor_1e7: u64,
     pub ceiling_1e7: u64,
-    pub slope_per_micro: u64,
+    pub slope_per_micro: i64,
 }
 
 pub const DEFAULT_SAMPLING: SamplingConstants = SamplingConstants {
@@ -55,9 +55,9 @@ pub fn p_1e7(
     }
     let rep = reputation_u.min(1_000_000);
     let rate =
-        u128::from(c.floor_1e7) + u128::from(c.slope_per_micro) * u128::from(1_000_000 - rep);
-    rate.max(u128::from(c.floor_1e7))
-        .min(u128::from(c.ceiling_1e7)) as u64
+        i128::from(c.floor_1e7) + i128::from(c.slope_per_micro) * i128::from(1_000_000 - rep);
+    rate.max(i128::from(c.floor_1e7))
+        .min(i128::from(c.ceiling_1e7)) as u64
 }
 
 pub fn selected(d: u64, p_1e7: u64) -> bool {
@@ -137,7 +137,7 @@ mod tests {
         let amended = SamplingConstants {
             floor_1e7: 200_000,
             ceiling_1e7: 5_000_000,
-            slope_per_micro: u64::MAX,
+            slope_per_micro: i64::MAX,
         };
         assert_eq!(p_1e7(999_999, false, false, &amended), 5_000_000);
     }

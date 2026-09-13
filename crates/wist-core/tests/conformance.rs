@@ -608,6 +608,36 @@ fn wist4_sampling_vector() {
     }
 }
 
+#[test]
+fn wist4_sampling_signed_parameter_rates() {
+    use wist_core::sampling::{p_1e7, SamplingConstants};
+
+    let vector = read_json("vectors/wist4/sampling.json");
+    let cases = vector["parameter_rate_cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 24);
+    for case in cases {
+        let params = &case["parameters"];
+        let constants = SamplingConstants {
+            floor_1e7: params["floor_1e7"].as_u64().unwrap(),
+            ceiling_1e7: params["ceiling_1e7"].as_u64().unwrap(),
+            slope_per_micro: params["slope_per_micro"].as_i64().unwrap(),
+        };
+        let displaced = case["level1_or_escalation"].as_bool().unwrap();
+        for (sanction, escalation) in [(displaced, false), (false, displaced)] {
+            assert_eq!(
+                p_1e7(
+                    case["reputation_u"].as_u64().unwrap(),
+                    sanction,
+                    escalation,
+                    &constants
+                ),
+                case["p_1e7"].as_u64().unwrap(),
+                "{case}"
+            );
+        }
+    }
+}
+
 fn confirmation_records(case: &serde_json::Value) -> Vec<serde_json::Value> {
     case["records"].as_array().unwrap().to_vec()
 }
