@@ -75,6 +75,15 @@ Audit Record deserialization requires all five measured fields, including
 verdicts. `not_auditable` additionally requires `unmeasured`. Snapshot state
 supports escalation, Observer tenure and live canary commitment tuples.
 
+`verdict::record_scores_valid` checks the score/verdict relation under WIST-4
+§§3/5. Supply the reference Delta's change type and the audited Delta's
+sealing-Block thresholds. It enforces score presence, micro-unit ranges,
+deletion mirroring, extract-before-link bands and neutral link dimensions;
+an omitted optional link score leaves the extract band unchanged. This check
+establishes neither measurement truth nor full Record eligibility. Callers
+reject malformed wire values, including explicit nulls, before converting
+absent scores to `None`.
+
 ## Parameter validation
 
 `parameters::PARAMS` lists the amendable identifiers, defaults and fixed

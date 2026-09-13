@@ -415,6 +415,62 @@ fn wist4_link_agreement_vector() {
 }
 
 #[test]
+fn wist4_record_scores_follow_link_profile_vectors() {
+    use wist_core::verdict::{record_scores_valid, ChangeType, Thresholds, Verdict};
+
+    let vector = read_json("vectors/wist4/link-agreement.json");
+    let verdicts = [
+        ("consistent", Verdict::Consistent),
+        ("dynamic_variance", Verdict::DynamicVariance),
+        ("inconsistent", Verdict::Inconsistent),
+        ("link_variance", Verdict::LinkVariance),
+        ("link_inconsistent", Verdict::LinkInconsistent),
+        ("unreachable", Verdict::Unreachable),
+        ("not_auditable", Verdict::NotAuditable),
+    ];
+    for case in vector["verdict_profiles"]["cases"].as_array().unwrap() {
+        let profile = &case["expected_profile"];
+        let thresholds = Thresholds {
+            similarity_consistent: profile["similarity_consistent"].as_u64().unwrap(),
+            similarity_variance_floor: profile["similarity_variance_floor"].as_u64().unwrap(),
+            link_agreement_consistent: profile["link_agreement_consistent"].as_u64().unwrap(),
+            link_variance_floor: profile["link_variance_floor"].as_u64().unwrap(),
+            min_observed_words: profile["min_observed_words"].as_u64().unwrap(),
+        };
+        for reading in case["readings"].as_array().unwrap() {
+            let change = change_type(reading["reference_change"].as_str().unwrap());
+            for (name, verdict) in verdicts {
+                let valid = record_scores_valid(
+                    change,
+                    verdict,
+                    reading["similarity"].as_u64(),
+                    reading["link_agreement"].as_u64(),
+                    &thresholds,
+                );
+                assert_eq!(
+                    valid,
+                    change != ChangeType::Delete && reading["verdict"] == name,
+                    "{}: {reading}, {name}",
+                    case["label"]
+                );
+                if change == ChangeType::Delete {
+                    assert_eq!(
+                        record_scores_valid(
+                            change,
+                            verdict,
+                            reading["similarity"].as_u64(),
+                            None,
+                            &thresholds,
+                        ),
+                        reading["verdict"] == name
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn wist4_audit_commitments_vector() {
     let v = read_json("vectors/wist4/audit-commitments.json");
     let payload = read_json("examples/payload.json");

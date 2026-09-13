@@ -92,6 +92,41 @@ pub fn resolve(
             (similarity, link_agreement)
         }
     };
+    let link_applies =
+        change != ChangeType::Delete && matches!(observation, Observation::Html { .. });
+    measured_verdict(
+        change,
+        similarity,
+        link_agreement.filter(|_| link_applies),
+        thresholds,
+    )
+}
+
+pub fn record_scores_valid(
+    change: ChangeType,
+    verdict: Verdict,
+    similarity: Option<u64>,
+    link_agreement: Option<u64>,
+    thresholds: &Thresholds,
+) -> bool {
+    if matches!(verdict, Verdict::Unreachable | Verdict::NotAuditable) {
+        return similarity.is_none() && link_agreement.is_none();
+    }
+    let Some(similarity) = similarity.filter(|value| *value <= MICRO) else {
+        return false;
+    };
+    if link_agreement.is_some_and(|value| value > MICRO || change == ChangeType::Delete) {
+        return false;
+    }
+    measured_verdict(change, similarity, link_agreement, thresholds) == verdict
+}
+
+fn measured_verdict(
+    change: ChangeType,
+    similarity: u64,
+    link_agreement: Option<u64>,
+    thresholds: &Thresholds,
+) -> Verdict {
     let effective = effective_similarity(similarity, change);
     if effective < thresholds.similarity_variance_floor {
         return Verdict::Inconsistent;
@@ -99,10 +134,8 @@ pub fn resolve(
     if effective < thresholds.similarity_consistent {
         return Verdict::DynamicVariance;
     }
-    let link_applies =
-        change != ChangeType::Delete && matches!(observation, Observation::Html { .. });
     match link_agreement {
-        Some(link) if link_applies => {
+        Some(link) => {
             if link >= thresholds.link_agreement_consistent {
                 Verdict::Consistent
             } else if link >= thresholds.link_variance_floor {
@@ -377,5 +410,107 @@ mod tests {
             resolve(ChangeType::New, Reference::Available, low_mass, &t),
             Verdict::NotAuditable
         );
+    }
+
+    #[test]
+    fn record_scores_enforce_presence_ranges_and_neutral_dimensions() {
+        let thresholds = Thresholds::default();
+        for change in [
+            ChangeType::New,
+            ChangeType::Update,
+            ChangeType::Attest,
+            ChangeType::Delete,
+        ] {
+            for verdict in [Verdict::Unreachable, Verdict::NotAuditable] {
+                assert!(record_scores_valid(
+                    change,
+                    verdict,
+                    None,
+                    None,
+                    &thresholds
+                ));
+                for score in [0, 1_000_000, 1_000_001, u64::MAX] {
+                    assert!(!record_scores_valid(
+                        change,
+                        verdict,
+                        Some(score),
+                        None,
+                        &thresholds
+                    ));
+                    assert!(!record_scores_valid(
+                        change,
+                        verdict,
+                        None,
+                        Some(score),
+                        &thresholds
+                    ));
+                }
+            }
+            for verdict in [
+                Verdict::Consistent,
+                Verdict::DynamicVariance,
+                Verdict::Inconsistent,
+                Verdict::LinkVariance,
+                Verdict::LinkInconsistent,
+            ] {
+                for similarity in [None, Some(1_000_001), Some(u64::MAX)] {
+                    assert!(!record_scores_valid(
+                        change,
+                        verdict,
+                        similarity,
+                        None,
+                        &thresholds
+                    ));
+                }
+                for link in [1_000_001, u64::MAX] {
+                    assert!(!record_scores_valid(
+                        change,
+                        verdict,
+                        Some(0),
+                        Some(link),
+                        &thresholds
+                    ));
+                }
+                assert!(!record_scores_valid(
+                    ChangeType::Delete,
+                    verdict,
+                    Some(0),
+                    Some(1_000_000),
+                    &thresholds
+                ));
+            }
+        }
+        for (similarity, expected) in [
+            (0, Verdict::Inconsistent),
+            (299_999, Verdict::Inconsistent),
+            (300_000, Verdict::DynamicVariance),
+            (599_999, Verdict::DynamicVariance),
+            (600_000, Verdict::Consistent),
+            (1_000_000, Verdict::Consistent),
+        ] {
+            assert!(record_scores_valid(
+                ChangeType::New,
+                expected,
+                Some(similarity),
+                None,
+                &thresholds
+            ));
+            assert!(record_scores_valid(
+                ChangeType::Delete,
+                expected,
+                Some(1_000_000 - similarity),
+                None,
+                &thresholds
+            ));
+        }
+        for verdict in [Verdict::LinkVariance, Verdict::LinkInconsistent] {
+            assert!(!record_scores_valid(
+                ChangeType::New,
+                verdict,
+                Some(1_000_000),
+                None,
+                &thresholds
+            ));
+        }
     }
 }
