@@ -302,6 +302,13 @@ impl Roster {
             .map(|t| t.public_key.as_str())
     }
 
+    pub fn tenure(&self, auditor_id: &str, key_id: &str) -> Option<(i64, Option<i64>)> {
+        self.tenures
+            .iter()
+            .find(|t| t.auditor_id == auditor_id && t.key_id == key_id)
+            .map(|t| (t.from_s, t.until_s))
+    }
+
     pub fn admitted_at(&self, t_s: i64) -> Vec<(&str, &str)> {
         let mut admitted: Vec<(&str, &str)> = self
             .tenures
@@ -479,6 +486,20 @@ mod tests {
         assert_eq!(roster.key_at(A, 0), None);
         assert_eq!(roster.key_at(B, 0), Some("k3"));
         assert!(roster.apply_block(1, &[admit(A, "k1")]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tenures_run_from_admission_to_removal_exclusive() {
+        let mut roster = Roster::new(LOG);
+        roster.apply_block(0, &[admit(A, "k1")]).unwrap();
+        assert_eq!(roster.tenure(A, "k1"), Some((0, None)));
+        roster
+            .apply_block(10, &[remove(A, "k1", false), admit(A, "k2")])
+            .unwrap();
+        assert_eq!(roster.tenure(A, "k1"), Some((0, Some(10))));
+        assert_eq!(roster.tenure(A, "k2"), Some((10, None)));
+        assert_eq!(roster.tenure(B, "k1"), None);
+        assert_eq!(roster.tenure(A, "k9"), None);
     }
 
     #[test]
