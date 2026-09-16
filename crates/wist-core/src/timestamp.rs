@@ -12,7 +12,7 @@ fn leap_year(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn days_in_month(year: i64, month: i64) -> i64 {
+pub(crate) fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -22,7 +22,7 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
