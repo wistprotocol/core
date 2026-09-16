@@ -12,6 +12,7 @@ use crate::roster::{
     validate_admission_evidence, ObserverCheckpoint, ObserverRegistration, Roster, RosterAct,
     RosterAction,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,7 +62,7 @@ pub struct Tenure {
     pub until_s: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealedCheckpoint {
     pub observer_id: String,
     pub height: u64,
@@ -115,15 +116,17 @@ pub enum Outcome {
     Idempotent,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RosterReplay {
     log_id: String,
     hashes: Vec<[u8; 32]>,
     roster: Roster,
+    #[serde(skip)]
     verifiers: BTreeMap<String, Option<PublicKey>>,
     registrations: Vec<(String, u64)>,
     registration_instants: Vec<(String, u64, i64)>,
     checkpoints: Vec<SealedCheckpoint>,
+    #[serde(skip)]
     rejected: Vec<RejectedAct>,
     accepted_ids: BTreeSet<String>,
     idempotent: Vec<Position>,
@@ -149,6 +152,85 @@ impl RosterReplay {
             rejected: Vec::new(),
             accepted_ids: BTreeSet::new(),
             idempotent: Vec::new(),
+        }
+    }
+
+    /// Restores the verifier cache after deserialization.
+    pub fn restore(mut self) -> Self {
+        let keys: Vec<String> = self.roster.public_keys().map(str::to_owned).collect();
+        for public_key in keys {
+            self.verifiers
+                .entry(public_key.clone())
+                .or_insert_with(|| PublicKey::from_b64u(&public_key).ok());
+        }
+        self
+    }
+
+    /// Starts the replay after a Snapshot's anchor Block: the Blocks below
+    /// `block_number` were never walked and carry no hash.
+    pub fn seed_head(&mut self, block_number: u64, block_hash: &str) -> Result<()> {
+        let hash = block_hash
+            .strip_prefix("sha256:")
+            .and_then(|hex| crate::crypto::hex_decode(hex).ok())
+            .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+            .ok_or_else(|| Error::History("Block hash is not a sha256 digest".into()))?;
+        self.hashes.resize(block_number as usize, [0u8; 32]);
+        self.hashes.push(hash);
+        Ok(())
+    }
+
+    /// Adopts a Snapshot's `auditor` tuple: an admission holding since
+    /// before the anchor, or a removed binding that stays retired.
+    pub fn adopt_auditor(
+        &mut self,
+        auditor_id: &str,
+        key_id: &str,
+        public_key: &str,
+        active: bool,
+    ) {
+        if active {
+            self.roster.adopt(
+                RosterAction::Admit,
+                auditor_id,
+                key_id,
+                public_key,
+                i64::MIN,
+            );
+            self.verifiers
+                .entry(public_key.to_owned())
+                .or_insert_with(|| PublicKey::from_b64u(public_key).ok());
+        } else {
+            self.roster.retire(key_id, public_key);
+        }
+    }
+
+    /// Adopts a Snapshot's `observer` tuple: a registration holding since
+    /// its registration height.
+    pub fn adopt_observer(
+        &mut self,
+        observer_id: &str,
+        key_id: &str,
+        public_key: &str,
+        registered_height: u64,
+        active: bool,
+    ) {
+        if active {
+            self.roster.adopt(
+                RosterAction::Register,
+                observer_id,
+                key_id,
+                public_key,
+                i64::MIN,
+            );
+            self.registrations
+                .push((observer_id.to_owned(), registered_height));
+            self.registration_instants
+                .push((observer_id.to_owned(), registered_height, i64::MIN));
+            self.verifiers
+                .entry(public_key.to_owned())
+                .or_insert_with(|| PublicKey::from_b64u(public_key).ok());
+        } else {
+            self.roster.retire(key_id, public_key);
         }
     }
 

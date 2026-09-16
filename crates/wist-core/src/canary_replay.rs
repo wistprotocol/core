@@ -11,11 +11,12 @@ use crate::envelope::verify_envelope;
 use crate::objects::audit::{RegistryAction, RegistryUpdateEnvelope};
 use crate::objects::PublisherKey;
 use crate::roster_replay::hostname_subject;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The canary parameters in force at a Block (WIST-4 §9).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanaryProfile {
     pub lead_blocks: u64,
     pub leaves_max: u64,
@@ -27,13 +28,13 @@ pub struct CanaryProfile {
 }
 
 /// The coverage parameters in force at a Block that the reveal test reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageProfile {
     pub deadline_hours: u64,
     pub seal_blocks: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanaryCommitment {
     pub id: String,
     pub planter: String,
@@ -43,7 +44,7 @@ pub struct CanaryCommitment {
     pub revealed_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanaryReveal {
     pub position: Position,
     pub id: String,
@@ -76,22 +77,28 @@ struct RevealCandidate {
     leaves: Vec<RevealLeaf>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct BlockFacts {
     sealed_at_s: i64,
     canary: CanaryProfile,
     coverage: CoverageProfile,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct CanaryReplay {
     blocks: Vec<BlockFacts>,
+    /// Heights below this were never walked: their instants, profiles and
+    /// registrations are unknown, so the tests that read them are skipped.
+    unverifiable_below: u64,
     deltas: BTreeMap<String, (u64, String)>,
     applied: BTreeSet<String>,
     commitments: BTreeMap<String, CanaryCommitment>,
-    suffix_epoch_commitments: BTreeMap<(String, u64), u64>,
+    suffix_epoch_commitments: Vec<((String, u64), u64)>,
     reserved_deltas: BTreeMap<String, String>,
+    #[serde(skip)]
     block_reveals: Vec<RevealCandidate>,
     reveals: Vec<CanaryReveal>,
+    #[serde(skip)]
     rejected: Vec<RejectedAct>,
 }
 
@@ -131,6 +138,62 @@ impl CanaryReplay {
             coverage,
         });
         Ok(())
+    }
+
+    /// Starts the replay after a Snapshot's anchor Block: the Blocks
+    /// through `block_number` carry the given profiles and no instant, and
+    /// reveals that read them skip the timing and sealing-opportunity
+    /// tests they cannot evaluate.
+    pub fn seed_head(
+        &mut self,
+        block_number: u64,
+        canary: CanaryProfile,
+        coverage: CoverageProfile,
+    ) {
+        while (self.blocks.len() as u64) <= block_number {
+            self.blocks.push(BlockFacts {
+                sealed_at_s: 0,
+                canary,
+                coverage,
+            });
+        }
+        self.unverifiable_below = block_number + 1;
+    }
+
+    /// Adopts a Snapshot's `canary_commitment` tuple: a commitment live at
+    /// the anchor, unrevealed and inside its lifetime.
+    pub fn adopt_commitment(
+        &mut self,
+        id: &str,
+        planter: &str,
+        root: &str,
+        leaves: u64,
+        height: u64,
+    ) {
+        self.applied.insert(id.to_owned());
+        self.commitments.insert(
+            id.to_owned(),
+            CanaryCommitment {
+                id: id.to_owned(),
+                planter: planter.to_owned(),
+                root: root.to_owned(),
+                leaves,
+                height,
+                revealed_at: None,
+            },
+        );
+    }
+
+    /// Seeds a Log-wide reservation an earlier accepted reveal holds.
+    pub fn reserve(&mut self, delta_id: &str, reveal_id: &str) {
+        self.reserved_deltas
+            .insert(delta_id.to_owned(), reveal_id.to_owned());
+    }
+
+    /// Seeds the commitments a planter suffix already sealed in an epoch.
+    pub fn seed_suffix_commitments(&mut self, suffix: &str, epoch: u64, count: u64) {
+        self.suffix_epoch_commitments
+            .push(((suffix.to_owned(), epoch), count));
     }
 
     /// Records a sealed Delta a reveal may later bind.
@@ -240,10 +303,19 @@ impl CanaryReplay {
                     "no budgeting epoch covers the Block".to_owned(),
                 ))?;
                 let suffix = crate::observer::suffix(&update.subject).to_owned();
-                let sealed = self
+                let key = (suffix, epoch.number);
+                let slot = match self
                     .suffix_epoch_commitments
-                    .entry((suffix, epoch.number))
-                    .or_insert(0);
+                    .iter()
+                    .position(|(k, _)| *k == key)
+                {
+                    Some(slot) => slot,
+                    None => {
+                        self.suffix_epoch_commitments.push((key, 0));
+                        self.suffix_epoch_commitments.len() - 1
+                    }
+                };
+                let sealed = &mut self.suffix_epoch_commitments[slot].1;
                 if *sealed >= profile.commitments_max {
                     return Err((
                         "WIST4-E08",
@@ -408,6 +480,11 @@ impl CanaryReplay {
             .iter()
             .max()
             .ok_or_else(|| "no leaves".to_owned())?;
+        if commitment.height < self.unverifiable_below
+            || delta_heights.iter().any(|h| *h < self.unverifiable_below)
+        {
+            return Ok(delta_heights);
+        }
         let newest_block = &self.blocks[newest as usize];
         let registered_at_newest_owned = registered_at(newest_block.sealed_at_s);
         let registered_at_newest: Vec<&str> = registered_at_newest_owned

@@ -1,5 +1,6 @@
 use crate::confirmation::independent;
 use crate::error::Error;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +37,7 @@ pub struct RosterAct<'a> {
     pub public_key: &'a str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Tenure {
     auditor_id: String,
     key_id: String,
@@ -51,7 +52,7 @@ impl Tenure {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Roster {
     log_id: String,
     tenures: Vec<Tenure>,
@@ -81,6 +82,52 @@ impl Roster {
 
     pub fn log_id(&self) -> &str {
         &self.log_id
+    }
+
+    /// Seeds an admission or registration holding since `from_s`, as a
+    /// Snapshot's `auditor` or `observer` tuple states it (WIST-3 §7).
+    pub fn adopt(
+        &mut self,
+        action: RosterAction,
+        subject: &str,
+        key_id: &str,
+        public_key: &str,
+        from_s: i64,
+    ) {
+        let tenure = Tenure {
+            auditor_id: subject.to_owned(),
+            key_id: key_id.to_owned(),
+            public_key: public_key.to_owned(),
+            from_s,
+            until_s: None,
+        };
+        match action {
+            RosterAction::Admit => {
+                self.held.insert(subject.to_owned(), self.tenures.len());
+                self.tenures.push(tenure);
+            }
+            RosterAction::Register => {
+                self.observers
+                    .insert(subject.to_owned(), self.observer_tenures.len());
+                self.observer_tenures.push(tenure);
+            }
+            RosterAction::Remove { .. } => {}
+        }
+    }
+
+    /// Seeds a retired key binding from a Snapshot's removed `auditor`
+    /// tuple: neither the identifier nor the public bytes may be held again.
+    pub fn retire(&mut self, key_id: &str, public_key: &str) {
+        self.retired_key_ids.insert(key_id.to_owned());
+        self.retired_public_keys.insert(public_key.to_owned());
+    }
+
+    /// Every public key an admitted or registered tenure carries.
+    pub fn public_keys(&self) -> impl Iterator<Item = &str> {
+        self.tenures
+            .iter()
+            .chain(&self.observer_tenures)
+            .map(|tenure| tenure.public_key.as_str())
     }
 
     pub fn apply_block(
