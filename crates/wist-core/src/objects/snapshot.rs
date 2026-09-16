@@ -106,6 +106,7 @@ pub struct DeclarationEntry {
     pub domain: String,
     pub declaration: Value,
     pub sealing_height: u64,
+    pub highest_accepted_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +129,8 @@ pub struct RecoveryWindowEntry {
     pub domain: String,
     pub declaration_height: u64,
     pub window_end: String,
+    pub head: Value,
+    pub head_height: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -279,11 +282,12 @@ impl<'de> Deserialize<'de> for StateEntry {
                 }))
             }
             "declaration" => {
-                check_arity::<D::Error>(&kind, tail, 3)?;
+                check_arity::<D::Error>(&kind, tail, 4)?;
                 Ok(StateEntry::Declaration(DeclarationEntry {
                     domain: field(tail, 0)?,
                     declaration: field(tail, 1)?,
                     sealing_height: field(tail, 2)?,
+                    highest_accepted_seq: field(tail, 3)?,
                 }))
             }
             "parameter" => {
@@ -304,11 +308,13 @@ impl<'de> Deserialize<'de> for StateEntry {
                 }))
             }
             "recovery_window" => {
-                check_arity::<D::Error>(&kind, tail, 3)?;
+                check_arity::<D::Error>(&kind, tail, 5)?;
                 Ok(StateEntry::RecoveryWindow(RecoveryWindowEntry {
                     domain: field(tail, 0)?,
                     declaration_height: field(tail, 1)?,
                     window_end: field(tail, 2)?,
+                    head: field(tail, 3)?,
+                    head_height: field(tail, 4)?,
                 }))
             }
             "exclusion" => {
@@ -392,9 +398,13 @@ impl Serialize for StateEntry {
                 e.admitted_height,
                 e.removed_height
             ]),
-            StateEntry::Declaration(e) => {
-                serde_json::json!(["declaration", e.domain, e.declaration, e.sealing_height])
-            }
+            StateEntry::Declaration(e) => serde_json::json!([
+                "declaration",
+                e.domain,
+                e.declaration,
+                e.sealing_height,
+                e.highest_accepted_seq
+            ]),
             StateEntry::Parameter(e) => {
                 serde_json::json!(["parameter", e.name, e.effective_at, e.value])
             }
@@ -405,7 +415,9 @@ impl Serialize for StateEntry {
                 "recovery_window",
                 e.domain,
                 e.declaration_height,
-                e.window_end
+                e.window_end,
+                e.head,
+                e.head_height
             ]),
             StateEntry::Exclusion(e) => {
                 serde_json::json!(["exclusion", e.publisher, e.url, e.excluded_since_height])
@@ -468,7 +480,7 @@ mod tests {
             ]),
             serde_json::json!(["aggregator_key", "key-1", pk, 10, Value::Null]),
             serde_json::json!(["auditor", "auditor.example.com", "key-2", pk, 5, 20]),
-            serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42]),
+            serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42, 43]),
             serde_json::json!(["parameter", "max_shard_bytes", "2026-08-09T13:00:00Z", -5]),
             serde_json::json!([
                 "sanction_state",
@@ -477,7 +489,14 @@ mod tests {
                 [evidence_digest],
                 [["appeal", "2026-08-02T12:00:00Z"]]
             ]),
-            serde_json::json!(["recovery_window", "example.com", 7, "2026-08-02T12:00:00Z"]),
+            serde_json::json!([
+                "recovery_window",
+                "example.com",
+                7,
+                "2026-08-02T12:00:00Z",
+                {"policy": "head"},
+                9
+            ]),
             serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
             serde_json::json!(["coverage_failure", "auditor.example.com", 12]),
             serde_json::json!([
