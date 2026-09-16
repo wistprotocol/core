@@ -1,6 +1,7 @@
 mod schedule;
 pub use schedule::{
     validate_cadence_transitions, Amendment, CadenceProfile, Schedule, ScheduleReplay,
+    LOG_TIMESTAMP_MAX_S,
 };
 
 pub struct ParamSpec {

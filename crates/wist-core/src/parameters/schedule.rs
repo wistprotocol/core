@@ -2,6 +2,9 @@ use super::{spec, validate_combinations, validate_value, PARAMS};
 use crate::Error;
 use std::collections::BTreeSet;
 
+/// The last instant a Log timestamp denotes, `9999-12-31T23:59:59Z`.
+pub const LOG_TIMESTAMP_MAX_S: i64 = 253_402_300_799;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Amendment {
     pub parameter: String,
@@ -103,6 +106,14 @@ impl Schedule {
         }
         self.last_position = Some(position);
         validate_value(&amendment.parameter, amendment.value)?;
+        if amendment.parameter == "recovery_window_days"
+            && i128::from(amendment.effective_at_s) + i128::from(amendment.value) * 86_400
+                > i128::from(LOG_TIMESTAMP_MAX_S)
+        {
+            return Err(Error::Parameter(
+                "recovery_window_days would end a window past the Log timestamp range".into(),
+            ));
+        }
         let grace = self
             .value_at("param_grace_days", amendment.sealed_at_s)
             .unwrap();
@@ -306,6 +317,27 @@ mod tests {
             .unwrap();
         assert!(schedule.try_accept(floor).is_err());
         assert_eq!(schedule.value_at("sampling_floor", 10 * DAY), Some(200_000));
+    }
+
+    #[test]
+    fn recovery_window_days_stay_inside_the_log_timestamp_range() {
+        let effective = 10 * DAY;
+        let largest = (LOG_TIMESTAMP_MAX_S - effective) / DAY;
+        let replay = Schedule::replay(
+            0,
+            &[
+                change("recovery_window_days", largest, 0, 0, effective),
+                change("recovery_window_days", largest + 1, 1, 0, effective),
+                change("recovery_window_days", 7, 2, 0, effective),
+            ],
+        );
+        assert_eq!(replay.rejected, [1]);
+        assert_eq!(
+            replay.schedule.value_at("recovery_window_days", effective),
+            Some(7)
+        );
+        assert!(effective + largest * DAY <= LOG_TIMESTAMP_MAX_S);
+        assert!(effective + (largest + 1) * DAY > LOG_TIMESTAMP_MAX_S);
     }
 
     #[test]
