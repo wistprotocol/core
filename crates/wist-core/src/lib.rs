@@ -45,6 +45,7 @@ pub mod recovery;
 pub mod reference;
 pub mod reputation;
 pub mod roster;
+pub mod roster_replay;
 pub mod sampling;
 pub mod sanctions;
 pub mod snapshot;
