@@ -128,7 +128,24 @@ fn signed_parameter_wire_bounds() {
         }
         let details = &envelope["update"]["details"];
         let name = details["parameter"].as_str().unwrap();
-        let value = details["value"].as_i64().unwrap();
+        let integral = details["value"].as_i64().or_else(|| {
+            details["value"]
+                .as_f64()
+                .filter(|f| f.fract() == 0.0)
+                .map(|f| f as i64)
+        });
+        let timestamp_ok =
+            wist_core::timestamp::log_seconds(envelope["update"]["effective_at"].as_str().unwrap())
+                .is_ok();
+        let (Some(value), true) = (integral, timestamp_ok) else {
+            assert!(
+                !case["schema_valid"].as_bool().unwrap(),
+                "{}",
+                case["label"]
+            );
+            assert_eq!(case["sealed_disposition"], "ignored", "{}", case["label"]);
+            continue;
+        };
         let bounds = parameters::validate_value(name, value).is_ok();
         let combinations = parameters::validate_combinations(|p| {
             if p == name {
@@ -277,9 +294,13 @@ fn block_size_schedules() {
             let mut tentative = schedule.clone();
             let mut rejected = Vec::new();
             for (index, change) in block["amendments"].as_array().unwrap().iter().enumerate() {
+                let Some(value) = change["value"].as_i64() else {
+                    rejected.push(index);
+                    continue;
+                };
                 let amendment = Amendment {
                     parameter: "block_decompressed_cap_bytes".into(),
-                    value: change["value"].as_i64().unwrap(),
+                    value,
                     block_number: height as u64,
                     entry_index: index as u64,
                     sealed_at_s: at,

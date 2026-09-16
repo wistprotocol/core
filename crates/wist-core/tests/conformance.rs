@@ -1803,12 +1803,13 @@ fn wist3_chain_materialization_vectors() {
         let mut tips = ChainTips::new();
         let mut ignored = Vec::new();
         for (index, delta) in case["deltas"].as_array().unwrap().iter().enumerate() {
-            let applied = tips.apply(
-                delta["publisher"].as_str().unwrap(),
-                delta["url"].as_str().unwrap(),
-                delta["id"].as_str().unwrap(),
-                delta["prev"].as_str(),
-            );
+            let applied = delta["eligible"] != false
+                && tips.apply(
+                    delta["publisher"].as_str().unwrap(),
+                    delta["url"].as_str().unwrap(),
+                    delta["id"].as_str().unwrap(),
+                    delta["prev"].as_str(),
+                );
             if !applied {
                 ignored.push(index as u64);
             }

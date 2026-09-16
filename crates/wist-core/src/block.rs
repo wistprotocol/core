@@ -84,6 +84,35 @@ pub fn verify_checkpoint_binding(checkpoint: &Value, block: &Value) -> Result<()
     Ok(())
 }
 
+/// WIST-3 §3.3: Entries are grouped by type in the fixed order and, within
+/// a group, in ascending octet order of their Merkle leaf hashes; a Block
+/// ordered otherwise is rejected by every replaying party.
+pub fn validate_entry_order(entries: &[Value]) -> Result<(), Error> {
+    let mut previous = None;
+    for entry in entries {
+        let kind = match entry["type"].as_str() {
+            Some("publisher_declaration") => 0,
+            Some("registry_update") => 1,
+            Some("publisher_delta") => 2,
+            Some("audit_record") => 3,
+            _ => return Err(Error::Block("WIST3-E03 unknown Block Entry type".into())),
+        };
+        if entry.as_object().is_none_or(|object| object.len() != 2) || !entry["body"].is_object() {
+            return Err(Error::Block(
+                "WIST3-E03 malformed Block Entry envelope".into(),
+            ));
+        }
+        let order = (kind, merkle::leaf_hash(&jcs::canonicalize(entry)?));
+        if previous.is_some_and(|previous| previous > order) {
+            return Err(Error::Block(
+                "WIST3-E03 Block Entries are not in canonical order".into(),
+            ));
+        }
+        previous = Some(order);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,6 +20,7 @@ pub mod chain;
 pub mod confirmation;
 pub mod coverage;
 pub mod crypto;
+pub mod declaration;
 pub mod delta;
 pub mod delta_fields;
 pub mod derivation;
