@@ -34,4 +34,6 @@ pub enum Error {
     Sanction(String),
     #[error("timestamp: {0}")]
     Timestamp(String),
+    #[error("history: {0}")]
+    History(String),
 }

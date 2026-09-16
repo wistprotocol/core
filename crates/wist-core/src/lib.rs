@@ -12,6 +12,9 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The wire version this revision of the suite emits and validates.
+pub const WIST_VERSION: &str = "1.0.0";
+
 pub mod agreement;
 pub mod block;
 pub mod block_frames;
@@ -21,6 +24,7 @@ pub mod confirmation;
 pub mod coverage;
 pub mod crypto;
 pub mod declaration;
+pub mod declarations;
 pub mod delta;
 pub mod delta_fields;
 pub mod derivation;
