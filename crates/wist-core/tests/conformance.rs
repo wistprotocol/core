@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[path = "conformance/canary.rs"]
 mod canary;
+#[path = "conformance/declarations.rs"]
+mod declarations;
 #[path = "conformance/observer.rs"]
 mod observer;
 #[path = "conformance/parameters.rs"]

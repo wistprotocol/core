@@ -5,19 +5,20 @@
 //! Log.
 use crate::declaration::{evaluate, evaluate_initial, inner_hash, validate_fields, Decision};
 use crate::error::Error;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Position {
     pub block_number: u64,
     pub entry_index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Declaration {
     envelope: Value,
     hash: String,
@@ -43,7 +44,7 @@ impl Declaration {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryWindow {
     owner: Arc<Declaration>,
     head: Arc<Declaration>,
@@ -70,7 +71,7 @@ impl RecoveryWindow {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Domain {
     current: Arc<Declaration>,
     highest_accepted_seq: u64,
@@ -163,7 +164,7 @@ impl Projection {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Declarations {
     domains: BTreeMap<String, Domain>,
     head: Option<(u64, String)>,
@@ -207,6 +208,14 @@ impl Declarations {
         self.head = Some((block_number, block_hash.to_owned()));
         self.sealed_at_s = Some(projection.sealed_at_s);
         Ok(projection.effects)
+    }
+
+    /// Seeds the accepted prefix's head for a party that starts at a
+    /// Snapshot's `log_position` rather than at Block 0; the next applied
+    /// Block must be the following height.
+    pub fn seed_head(&mut self, block_number: u64, block_hash: &str, sealed_at_s: Option<i64>) {
+        self.head = Some((block_number, block_hash.to_owned()));
+        self.sealed_at_s = sealed_at_s;
     }
 
     /// Seeds a domain's accepted state from a Snapshot: the current
