@@ -14,6 +14,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod agreement;
 pub mod block;
+pub mod block_frames;
 pub mod canary;
 pub mod chain;
 pub mod confirmation;
@@ -39,6 +40,7 @@ pub mod roster;
 pub mod sampling;
 pub mod sanctions;
 pub mod snapshot;
+pub mod timestamp;
 pub mod unauditable;
 pub mod verdict;
 pub mod vrf;

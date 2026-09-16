@@ -32,4 +32,6 @@ pub enum Error {
     Roster(String),
     #[error("sanction: {0}")]
     Sanction(String),
+    #[error("timestamp: {0}")]
+    Timestamp(String),
 }

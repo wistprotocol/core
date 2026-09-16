@@ -2,8 +2,7 @@ use super::{spec, validate_combinations, validate_value, PARAMS};
 use crate::Error;
 use std::collections::BTreeSet;
 
-/// The last instant a Log timestamp denotes, `9999-12-31T23:59:59Z`.
-pub const LOG_TIMESTAMP_MAX_S: i64 = 253_402_300_799;
+pub use crate::timestamp::LOG_TIMESTAMP_MAX_S;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Amendment {
@@ -55,6 +54,13 @@ impl Schedule {
         }
         rejected.sort_unstable();
         ScheduleReplay { schedule, rejected }
+    }
+
+    /// Restores an amendment a Snapshot's `parameter` tuple carries
+    /// (WIST-3 §7): already accepted by the Log, so no admission check
+    /// applies; a resuming validator starts from the accepted schedule.
+    pub fn adopt(&mut self, amendment: Amendment) {
+        self.accepted.push(amendment);
     }
 
     pub fn accepted(&self) -> &[Amendment] {
