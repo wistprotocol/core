@@ -19,6 +19,7 @@ pub mod agreement;
 pub mod block;
 pub mod block_frames;
 pub mod canary;
+pub mod canary_replay;
 pub mod chain;
 pub mod confirmation;
 pub mod coverage;
