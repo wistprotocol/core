@@ -60,6 +60,7 @@ pub fn log_seconds(at: &str) -> Result<i64, Error> {
             10 => *byte == b'T',
             13 | 16 => *byte == b':',
             19 => *byte == b'Z',
+            17 => (b'0'..=b'5').contains(byte),
             _ => byte.is_ascii_digit(),
         });
     if !shaped {

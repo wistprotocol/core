@@ -63,6 +63,10 @@ impl Schedule {
         self.accepted.push(amendment);
     }
 
+    pub fn first_block_s(&self) -> i64 {
+        self.first_block_s
+    }
+
     pub fn accepted(&self) -> &[Amendment] {
         &self.accepted
     }
