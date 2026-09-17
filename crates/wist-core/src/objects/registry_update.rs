@@ -110,8 +110,8 @@ impl RegistryUpdate {
             }
             RegistryDetails::PayloadWithdrawal(d) => {
                 digest(&d.delta_id)
-                    && !d.legal_basis.is_empty()
-                    && !d.jurisdiction.is_empty()
+                    && (1..=1024).contains(&d.legal_basis.chars().count())
+                    && (1..=128).contains(&d.jurisdiction.chars().count())
                     && crate::host::canonical_host(&self.subject)
                         .is_ok_and(|host| host == self.subject)
             }

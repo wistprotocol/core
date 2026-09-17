@@ -42,6 +42,20 @@ identifier and byte count; a violation is WIST4-E04.
 Authentication under a Log key valid at the act's Block, the grace period
 and the Delta a withdrawal names remain caller checks.
 
+## Withdrawal replay
+
+`withdrawal::WithdrawalReplay::apply` replays one `payload_withdrawal`
+act at a height under WIST-4 §5.1: raw JSON eligibility (WIST1-E05),
+the field partition between WIST4-E11 and WIST4-E04, authentication
+under the Log key the caller resolves for `sig.key_id` at that Block,
+and the sealed-Delta contract the caller answers with `SealedDelta`
+(`Known` with the signed publisher and height, `Absent`, or
+`Unverifiable` for a Delta below what the party holds, which is read as
+consistent). The earliest accepted withdrawal's height is kept for a
+repeated act, `entries` yields the WIST-3 §7 withdrawal tuples and
+`adopt` seeds the replay from tuples or a store. The conformance test
+consumes `vectors/wist4/withdrawal.json`.
+
 ## Parameter validation
 
 `parameters::PARAMS` lists the amendable identifiers, defaults and fixed

@@ -594,6 +594,103 @@ fn wist2_page_keyset_vectors() {
 }
 
 #[test]
+fn wist4_withdrawal_vectors() {
+    use wist_core::withdrawal::{Disposition, SealedDelta, WithdrawalReplay};
+    let vector = read_json("vectors/wist4/withdrawal.json");
+    let log_key =
+        wist_core::crypto::PublicKey::from_b64u(vector["log_key"]["public_key"].as_str().unwrap())
+            .unwrap();
+    let log_key_id = vector["log_key"]["key_id"].as_str().unwrap();
+    let sealed: Vec<(String, String, u64)> = vector["sealed_deltas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["delta_id"].as_str().unwrap().into(),
+                d["publisher"].as_str().unwrap().into(),
+                d["height"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let mut replay = WithdrawalReplay::new();
+    let mut codes = std::collections::BTreeSet::new();
+    for case in vector["act_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let disposition = replay.apply_raw(
+            case["height"].as_u64().unwrap(),
+            case["envelope_json"].as_str().unwrap().as_bytes(),
+            |key_id| (key_id == log_key_id).then(|| log_key.clone()),
+            |delta_id| {
+                sealed.iter().find(|(id, _, _)| id == delta_id).map_or(
+                    SealedDelta::Absent,
+                    |(_, publisher, height)| SealedDelta::Known {
+                        publisher: publisher.clone(),
+                        height: *height,
+                    },
+                )
+            },
+        );
+        match disposition {
+            Disposition::Accepted {
+                withdrawn_height, ..
+            } => {
+                assert!(case["code"].is_null(), "{label}");
+                assert_eq!(
+                    Some(withdrawn_height),
+                    case["withdrawn_height"].as_u64(),
+                    "{label}"
+                );
+                codes.insert(None);
+            }
+            Disposition::Rejected(code) => {
+                assert_eq!(Some(code), case["code"].as_str(), "{label}");
+                assert!(case["withdrawn_height"].is_null(), "{label}");
+                codes.insert(Some(code));
+            }
+            Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),
+        }
+    }
+    assert_eq!(
+        codes,
+        [None, Some("WIST4-E11"), Some("WIST4-E04")]
+            .into_iter()
+            .collect()
+    );
+    let tuples: Vec<serde_json::Value> = replay
+        .entries()
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_value(wist_core::objects::StateEntry::Withdrawal(entry)).unwrap()
+        })
+        .collect();
+    let mut expected = vector["state_tuples"].as_array().unwrap().clone();
+    expected.sort_by_key(|t| t.to_string());
+    let mut got = tuples;
+    got.sort_by_key(|t| t.to_string());
+    assert_eq!(got, expected);
+    let mut resumed = WithdrawalReplay::new();
+    for entry in replay.entries() {
+        resumed.adopt(&entry.delta_id, &entry.publisher, entry.sealing_height);
+    }
+    assert_eq!(resumed.entries().len(), replay.entries().len());
+    assert_eq!(
+        replay.apply_raw(
+            9,
+            br#"{"update": {"wist_version": "1.0.0", "action": "parameter_change", "subject": "quota_base", "effective_at": "2026-08-05T12:00:00Z", "details": {"parameter": "quota_base", "value": 2}}, "sig": {"key_id": "x", "alg": "Ed25519", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#,
+            |_| None,
+            |_| SealedDelta::Absent
+        ),
+        Disposition::NotWithdrawal
+    );
+    let duplicate = br#"{"update": {"a": 1, "a": 2}, "sig": {}}"#;
+    assert_eq!(
+        replay.apply_raw(9, duplicate, |_| None, |_| SealedDelta::Absent),
+        Disposition::Rejected("WIST1-E05")
+    );
+}
+
+#[test]
 fn wist4_parameter_in_force_vectors() {
     use wist_core::parameters::{value_in_force, ParameterChange};
 
