@@ -866,3 +866,151 @@ fn signed_delta_publisher_fields_and_ids() {
         );
     }
 }
+
+#[test]
+fn wist4_registrable_domain_vectors() {
+    use std::collections::BTreeMap;
+    use wist_core::suffix_list::{
+        check_block_capacity, registrable_domain, BlockCaps, Disposition, SuffixList,
+        SuffixListReplay,
+    };
+    let vector = read_json("vectors/wist4/registrable-domain.json");
+    let mut lists: BTreeMap<String, SuffixList> = BTreeMap::new();
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    for list in vector["lists"].as_array().unwrap() {
+        let parsed = SuffixList::parse(list["text"].as_str().unwrap().as_bytes()).unwrap();
+        assert_eq!(parsed.identifier(), list["sha256"].as_str().unwrap());
+        assert_eq!(parsed.bytes(), list["bytes"].as_u64().unwrap());
+        let name = list["name"].as_str().unwrap().to_string();
+        names.insert(parsed.identifier().to_string(), name.clone());
+        lists.insert(name, parsed);
+    }
+    let name_of = |in_force: Option<(&str, u64)>| in_force.map(|(id, _)| names[id].clone());
+    let list_named = |name: Option<&str>| name.map(|name| &lists[name]);
+    let mut exercised = 0;
+    for case in vector["official_cases"].as_array().unwrap() {
+        let Some(host) = case["host"].as_str() else {
+            continue;
+        };
+        let derived = lists["first"].registrable_domain(host);
+        assert_eq!(derived.domain, case["registrable"], "{}", case["input"]);
+        assert_eq!(
+            derived.public_suffix, case["public_suffix"],
+            "{}",
+            case["input"]
+        );
+        exercised += 1;
+    }
+    assert!(exercised >= 60);
+    for case in vector["domain_cases"].as_array().unwrap() {
+        let derived = registrable_domain(
+            case["host"].as_str().unwrap(),
+            list_named(case["list"].as_str()),
+        );
+        assert_eq!(derived.domain, case["registrable"], "{}", case["label"]);
+        assert_eq!(
+            derived.public_suffix, case["public_suffix"],
+            "{}",
+            case["label"]
+        );
+    }
+    let log_key =
+        wist_core::crypto::PublicKey::from_b64u(vector["log_key"]["public_key"].as_str().unwrap())
+            .unwrap();
+    let log_key_id = vector["log_key"]["key_id"].as_str().unwrap();
+    let mut replay = SuffixListReplay::new();
+    let mut codes = std::collections::BTreeSet::new();
+    for case in vector["act_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let height = case["height"].as_u64().unwrap();
+        let doc =
+            wist_core::json::parse(case["envelope_json"].as_str().unwrap().as_bytes()).unwrap();
+        let disposition = replay.apply(
+            height,
+            &doc,
+            |key_id| (key_id == log_key_id).then(|| log_key.clone()),
+            |id| names.get(id).map(|name| lists[name].bytes()),
+        );
+        match disposition {
+            Disposition::Accepted { .. } => assert!(case["code"].is_null(), "{label}"),
+            Disposition::Rejected(code) => {
+                assert_eq!(Some(code), case["code"].as_str(), "{label}");
+                codes.insert(code);
+            }
+            Disposition::NotSuffixList => panic!("{label}: not a suffix_list_update"),
+        }
+        assert_eq!(
+            name_of(replay.in_force_after(height)).as_deref(),
+            case["in_force_after"].as_str(),
+            "{label}"
+        );
+    }
+    assert_eq!(codes, ["WIST4-E11", "WIST4-E04"].into_iter().collect());
+    for row in vector["in_force"].as_array().unwrap() {
+        let height = row["height"].as_u64().unwrap();
+        assert_eq!(
+            name_of(replay.in_force_at_block(height)).as_deref(),
+            row["list"].as_str(),
+            "height {height}"
+        );
+    }
+    let list_at_block =
+        |height: u64| list_named(name_of(replay.in_force_at_block(height)).as_deref());
+    for case in vector["capacity_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let cap = case["domain_block_entries_max"].as_u64().unwrap();
+        let entries: Vec<(&str, &str)> = case["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["type"].as_str().unwrap(), e["domain"].as_str().unwrap()))
+            .collect();
+        let outcome = check_block_capacity(
+            entries,
+            list_at_block(case["height"].as_u64().unwrap()),
+            BlockCaps {
+                domain_block_entries_max: cap,
+                labeler_block_entries_max: cap,
+            },
+        );
+        match case["expected"].as_str() {
+            Some(code) => assert!(
+                outcome
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains(code)),
+                "{label}: {outcome:?}"
+            ),
+            None => assert!(outcome.is_ok(), "{label}: {outcome:?}"),
+        }
+    }
+    for case in vector["quota_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let list = list_at_block(case["height"].as_u64().unwrap());
+        let base = case["quota_base"].as_u64().unwrap();
+        let mut noise: BTreeMap<String, u64> = BTreeMap::new();
+        for ping in case["pings"].as_array().unwrap() {
+            let unit = registrable_domain(ping["host"].as_str().unwrap(), list).domain;
+            let count = noise.entry(unit).or_default();
+            let status = if *count >= base {
+                429
+            } else {
+                if ping["noise"].as_bool().unwrap() {
+                    *count += 1;
+                }
+                202
+            };
+            assert_eq!(Some(status), ping["expected"].as_u64(), "{label}: {ping}");
+        }
+    }
+    for row in vector["state_tuples"].as_array().unwrap() {
+        let log_position = row["log_position"].as_u64().unwrap();
+        let entry = replay.entry_at(log_position).unwrap();
+        let tuple =
+            serde_json::to_value(wist_core::objects::StateEntry::SuffixList(entry)).unwrap();
+        assert_eq!(
+            vec![tuple],
+            *row["entries"].as_array().unwrap(),
+            "{log_position}"
+        );
+    }
+}

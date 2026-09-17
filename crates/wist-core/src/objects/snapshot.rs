@@ -109,6 +109,12 @@ pub struct RecoveryWindowEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct SuffixListEntry {
+    pub identifier: String,
+    pub sealing_height: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct WithdrawalEntry {
     pub delta_id: String,
     pub publisher: String,
@@ -139,6 +145,7 @@ pub enum StateEntry {
     Declaration(DeclarationEntry),
     Parameter(ParameterEntry),
     RecoveryWindow(RecoveryWindowEntry),
+    SuffixList(SuffixListEntry),
     Withdrawal(WithdrawalEntry),
     Label(LabelEntry),
     Record(RecordEntry),
@@ -208,6 +215,13 @@ impl<'de> Deserialize<'de> for StateEntry {
                     head_height: field(tail, 4)?,
                 }))
             }
+            "suffix_list" => {
+                check_arity::<D::Error>(&kind, tail, 2)?;
+                Ok(StateEntry::SuffixList(SuffixListEntry {
+                    identifier: field(tail, 0)?,
+                    sealing_height: field(tail, 1)?,
+                }))
+            }
             "withdrawal" => {
                 check_arity::<D::Error>(&kind, tail, 3)?;
                 Ok(StateEntry::Withdrawal(WithdrawalEntry {
@@ -270,6 +284,9 @@ impl Serialize for StateEntry {
                 e.head,
                 e.head_height
             ]),
+            StateEntry::SuffixList(e) => {
+                serde_json::json!(["suffix_list", e.identifier, e.sealing_height])
+            }
             StateEntry::Withdrawal(e) => {
                 serde_json::json!(["withdrawal", e.delta_id, e.publisher, e.sealing_height])
             }

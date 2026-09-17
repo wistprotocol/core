@@ -150,7 +150,7 @@ impl WithdrawalReplay {
 /// WIST-4 §5.1's field checks outside any action's contract: release
 /// version spelling under major 1, the general `subject` bound, a Log
 /// timestamp `effective_at` and a well-formed signature block.
-fn envelope_fields(envelope: &RegistryUpdateEnvelope) -> Result<(), &'static str> {
+pub(crate) fn envelope_fields(envelope: &RegistryUpdateEnvelope) -> Result<(), &'static str> {
     let update = &envelope.update;
     if !release_version(&update.wist_version)
         || update.wist_version.split('.').next() != Some("1")

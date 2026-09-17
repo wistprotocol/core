@@ -25,7 +25,7 @@ pub use snapshot::{
     AggregatorKeyEntry, DeclarationEntry, LabelEntry, ParameterEntry, RecordEntry,
     RecoveryWindowEntry, SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope,
     SnapshotManifest, SnapshotManifestEnvelope, SnapshotShards, SnapshotState,
-    SnapshotStateEnvelope, SnapshotStateFile, StateEntry, WithdrawalEntry,
+    SnapshotStateEnvelope, SnapshotStateFile, StateEntry, SuffixListEntry, WithdrawalEntry,
 };
 pub use status::{PublisherState, Status, StatusRejection};
 

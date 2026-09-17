@@ -56,6 +56,25 @@ repeated act, `entries` yields the WIST-3 §7 withdrawal tuples and
 `adopt` seeds the replay from tuples or a store. The conformance test
 consumes `vectors/wist4/withdrawal.json`.
 
+## Suffix lists and the Registrable Domain
+
+`suffix_list::SuffixList::parse` reads a Public Suffix List snapshot's
+exact octets into rules in Canonical Host form, and `registrable_domain`
+derives a Canonical Host's Registrable Domain under it by WIST-4 §3.1's
+algorithm, the host itself where the list leaves none or while no
+snapshot is in force. `SuffixListReplay::apply` replays a
+`suffix_list_update` at a height: the field partition, the details
+contract, authentication under the Log key the caller resolves, and the
+named file's octet count the caller answers with; an accepted act is in
+force from the Block after its sealing Block, a repeated pin of the
+snapshot in force changes nothing, and `entry_at` yields the WIST-3 §7
+`suffix_list` tuple. `check_block_capacity` counts a Block's
+`publisher_delta`, `label` and `dispute` Entries per Registrable Domain
+against `domain_block_entries_max` and its `label` and `dispute` Entries
+against `labeler_block_entries_max` (WIST-3 §3.2). The conformance test
+consumes `vectors/wist4/registrable-domain.json`, the Public Suffix List
+project's own cases included.
+
 ## Parameter validation
 
 `parameters::PARAMS` lists the amendable identifiers, defaults and fixed

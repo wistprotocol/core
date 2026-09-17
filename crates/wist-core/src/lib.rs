@@ -2,8 +2,9 @@
 //! Ed25519 envelopes, delta identity, Key Set resolution, chain tips,
 //! Merkle trees/proofs, block/checkpoint verification, snapshot digests,
 //! WIST-2 link/text extraction, the Declaration and recovery-window
-//! replay, the WIST-4 Parameter Registry with its schedule replay and
-//! the payload_withdrawal replay.
+//! replay, the WIST-4 Parameter Registry with its schedule replay, the
+//! payload_withdrawal replay and the Public Suffix List snapshots with
+//! the Registrable Domain.
 //! Conformance is defined by the sibling spec repo's schemas and vectors,
 //! not by this crate — every normative behavior is verified against those
 //! vectors in `tests/conformance.rs`.
@@ -35,6 +36,7 @@ pub mod parameters;
 pub mod publisher_time;
 pub mod recovery;
 pub mod snapshot;
+pub mod suffix_list;
 pub mod timestamp;
 pub mod withdrawal;
 pub use error::Error;
