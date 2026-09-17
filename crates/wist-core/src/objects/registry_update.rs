@@ -9,6 +9,7 @@ pub enum RegistryAction {
     AggregatorKeyRemove,
     ParameterChange,
     PayloadWithdrawal,
+    SuffixListUpdate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,12 +63,20 @@ pub struct PayloadWithdrawalDetails {
     pub jurisdiction: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuffixListDetails {
+    pub sha256: String,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum RegistryDetails {
     KeyAdd(KeyAddDetails),
     KeyRemove(KeyRemoveDetails),
     ParameterChange(ParameterChangeDetails),
     PayloadWithdrawal(PayloadWithdrawalDetails),
+    SuffixListUpdate(SuffixListDetails),
 }
 
 impl RegistryUpdate {
@@ -82,6 +91,9 @@ impl RegistryUpdate {
             ParameterChange => serde_json::from_value(value).map(RegistryDetails::ParameterChange),
             PayloadWithdrawal => {
                 serde_json::from_value(value).map(RegistryDetails::PayloadWithdrawal)
+            }
+            SuffixListUpdate => {
+                serde_json::from_value(value).map(RegistryDetails::SuffixListUpdate)
             }
         };
         let details =
@@ -102,6 +114,11 @@ impl RegistryUpdate {
                     && !d.jurisdiction.is_empty()
                     && crate::host::canonical_host(&self.subject)
                         .is_ok_and(|host| host == self.subject)
+            }
+            RegistryDetails::SuffixListUpdate(d) => {
+                digest(&d.sha256)
+                    && (1..=9_007_199_254_740_991).contains(&d.bytes)
+                    && self.subject == d.sha256
             }
         };
         if !valid {

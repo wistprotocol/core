@@ -19,7 +19,7 @@ pub use publisher::{Publisher, PublisherEnvelope, PublisherKey};
 pub use registry_update::{
     KeyAddDetails, KeyAlgorithm, KeyRemoveDetails, ParameterChangeDetails,
     PayloadWithdrawalDetails, RegistryAction, RegistryDetails, RegistryUpdate,
-    RegistryUpdateEnvelope,
+    RegistryUpdateEnvelope, SuffixListDetails,
 };
 pub use snapshot::{
     AggregatorKeyEntry, DeclarationEntry, LabelEntry, ParameterEntry, RecordEntry,

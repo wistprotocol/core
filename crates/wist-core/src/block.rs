@@ -95,6 +95,7 @@ pub fn validate_entry_order(entries: &[Value]) -> Result<(), Error> {
             Some("registry_update") => 1,
             Some("publisher_delta") => 2,
             Some("label") => 3,
+            Some("dispute") => 4,
             _ => return Err(Error::Block("WIST3-E03 unknown Block Entry type".into())),
         };
         if entry.as_object().is_none_or(|object| object.len() != 2) || !entry["body"].is_object() {

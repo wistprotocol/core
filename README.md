@@ -1,6 +1,6 @@
 # wist-core
 
-The signed Delta format targets [WIST specification revision `d75bd49abcfbbe6a672e4fb695e078b489f51ba7`](https://github.com/wistprotocol/spec/tree/d75bd49abcfbbe6a672e4fb695e078b489f51ba7). Object version `1.0.0` alone does not identify a compatible draft.
+The signed Delta format targets [WIST specification revision `5d6424729cb65edbf0ba52f4dc3876d4da0b7ee5`](https://github.com/wistprotocol/spec/tree/5d6424729cb65edbf0ba52f4dc3876d4da0b7ee5). Object version `1.0.0` alone does not identify a compatible draft.
 
 Delta Envelopes require a canonical `publisher` inside the signed and hashed object. The typed object and `delta::publisher` reject missing or noncanonical identities without rewriting signed bytes. Signature/key-history and `(publisher, url)` chain validation remain caller obligations.
 
@@ -34,10 +34,11 @@ exercise both Unicode 16 additions and Unicode 17 exclusions.
 
 ## Registry Updates
 
-`objects::RegistryUpdate` carries the four WIST-4 §3 governance acts.
+`objects::RegistryUpdate` carries the five WIST-4 §3 governance acts.
 `typed_details` parses `details` under the act's §5.1 contract and checks
 the `subject` shape, key fields, parameter identifier and bounds, and the
-withdrawal's Delta ID and Canonical Host; a violation is WIST4-E04.
+withdrawal's Delta ID and Canonical Host, and the suffix-list snapshot's
+identifier and byte count; a violation is WIST4-E04.
 Authentication under a Log key valid at the act's Block, the grace period
 and the Delta a withdrawal names remain caller checks.
 

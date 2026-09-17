@@ -39,6 +39,7 @@ pub const PARAMS: &[ParamSpec] = &[
     p("mirror_retention_days", Some(90), Some(30), None),
     p("record_seal_blocks", Some(24), Some(1), None),
     p("domain_block_entries_max", Some(10000), Some(1), None),
+    p("labeler_block_entries_max", Some(1000), Some(1), None),
     p("max_inclusion_blocks", Some(4), Some(1), None),
     p(
         "ingest_budget_bytes_day",
@@ -79,6 +80,11 @@ const COMBO_RULES: &[ComboRule] = &[
         participants: &["mirror_retention_days", "payload_window_days"],
         description: "mirror_retention_days must not be below payload_window_days / 6",
         holds: |eff| eff("mirror_retention_days") * 6 >= eff("payload_window_days"),
+    },
+    ComboRule {
+        participants: &["labeler_block_entries_max", "domain_block_entries_max"],
+        description: "labeler_block_entries_max must not exceed domain_block_entries_max",
+        holds: |eff| eff("labeler_block_entries_max") <= eff("domain_block_entries_max"),
     },
 ];
 
@@ -155,6 +161,10 @@ mod tests {
         validate("payload_window_days", 540, defaults).unwrap();
         assert!(validate("mirror_retention_days", 29, defaults).is_err());
         validate("mirror_retention_days", 30, defaults).unwrap();
+        assert!(validate("labeler_block_entries_max", 10001, defaults).is_err());
+        validate("labeler_block_entries_max", 10000, defaults).unwrap();
+        assert!(validate("domain_block_entries_max", 999, defaults).is_err());
+        validate("domain_block_entries_max", 1000, defaults).unwrap();
         assert!(validate("mirror_retention_days", 30, |name| {
             if name == "payload_window_days" {
                 181
