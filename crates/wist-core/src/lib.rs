@@ -3,8 +3,8 @@
 //! Merkle trees/proofs, block/checkpoint verification, snapshot digests,
 //! WIST-2 link/text extraction, the Declaration and recovery-window
 //! replay, the WIST-4 Parameter Registry with its schedule replay, the
-//! payload_withdrawal replay and the Public Suffix List snapshots with
-//! the Registrable Domain.
+//! payload_withdrawal replay, the Public Suffix List snapshots with
+//! the Registrable Domain, and Labels with their disputes and definitions.
 //! Conformance is defined by the sibling spec repo's schemas and vectors,
 //! not by this crate — every normative behavior is verified against those
 //! vectors in `tests/conformance.rs`.
@@ -30,6 +30,7 @@ pub mod host;
 pub mod jcs;
 pub mod json;
 pub mod keyset;
+pub mod label;
 pub mod merkle;
 pub mod objects;
 pub mod parameters;

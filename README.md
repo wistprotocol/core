@@ -56,6 +56,28 @@ repeated act, `entries` yields the WIST-3 §7 withdrawal tuples and
 `adopt` seeds the replay from tuples or a store. The conformance test
 consumes `vectors/wist4/withdrawal.json`.
 
+## Labels, disputes and definitions
+
+`label::validate_label` checks one Label Envelope under the Labeler's
+Declaration and the `url_cap_bytes` in force: fields, version, the
+subject's normalization and cap, the WIST-4 §6 name form with the
+`wist` terms, `expires_at` after `asserted_at`, `delta` only with a URL
+subject, self-labeling against the declared scope, and the signature
+under the named signing entry valid at `asserted_at`; the rejection
+carries its `WIST2-E06`, `WIST1-E02` or `WIST1-E01` code.
+`validate_dispute` adds the sealed-Label and subject-authority checks
+and `validate_definition` the description and treatment. `label_id`,
+`dispute_id` and `definition_path` derive identifiers; `current_label`
+and `current_dispute` pick the current object of a triple or pair by
+`asserted_at` and Log order; `label_tuple` and `dispute_tuple` yield
+the WIST-3 §7 tuples, none for a retracted or expired Label;
+`binding_applies` reads a Label's `delta` against a record's anchor;
+`labeler_rows` computes `tier1/labelers.parquet`; `counted_at` and
+`labeler_active` are WIST-4 §6's recommended default profile. The
+conformance tests consume `vectors/wist2/labels.json`,
+`disputes.json`, `label-definitions.json` and
+`vectors/wist3/label-tables.json`.
+
 ## Suffix lists and the Registrable Domain
 
 `suffix_list::SuffixList::parse` reads a Public Suffix List snapshot's

@@ -128,6 +128,17 @@ pub struct LabelEntry {
     pub name: String,
     pub value: Option<u64>,
     pub asserted_at: String,
+    pub expires_at: Option<String>,
+    pub delta: Option<String>,
+    pub sealing_height: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DisputeEntry {
+    pub label_id: String,
+    pub disputant: String,
+    pub reason: Option<String>,
+    pub asserted_at: String,
     pub sealing_height: u64,
 }
 
@@ -148,6 +159,7 @@ pub enum StateEntry {
     SuffixList(SuffixListEntry),
     Withdrawal(WithdrawalEntry),
     Label(LabelEntry),
+    Dispute(DisputeEntry),
     Record(RecordEntry),
 }
 
@@ -231,14 +243,26 @@ impl<'de> Deserialize<'de> for StateEntry {
                 }))
             }
             "label" => {
-                check_arity::<D::Error>(&kind, tail, 6)?;
+                check_arity::<D::Error>(&kind, tail, 8)?;
                 Ok(StateEntry::Label(LabelEntry {
                     labeler: field(tail, 0)?,
                     subject: field(tail, 1)?,
                     name: field(tail, 2)?,
                     value: field(tail, 3)?,
                     asserted_at: field(tail, 4)?,
-                    sealing_height: field(tail, 5)?,
+                    expires_at: field(tail, 5)?,
+                    delta: field(tail, 6)?,
+                    sealing_height: field(tail, 7)?,
+                }))
+            }
+            "dispute" => {
+                check_arity::<D::Error>(&kind, tail, 5)?;
+                Ok(StateEntry::Dispute(DisputeEntry {
+                    label_id: field(tail, 0)?,
+                    disputant: field(tail, 1)?,
+                    reason: field(tail, 2)?,
+                    asserted_at: field(tail, 3)?,
+                    sealing_height: field(tail, 4)?,
                 }))
             }
             "record" => {
@@ -297,6 +321,16 @@ impl Serialize for StateEntry {
                 e.name,
                 e.value,
                 e.asserted_at,
+                e.expires_at,
+                e.delta,
+                e.sealing_height
+            ]),
+            StateEntry::Dispute(e) => serde_json::json!([
+                "dispute",
+                e.label_id,
+                e.disputant,
+                e.reason,
+                e.asserted_at,
                 e.sealing_height
             ]),
             StateEntry::Record(e) => {
@@ -343,6 +377,7 @@ mod tests {
                 9
             ]),
             serde_json::json!(["withdrawal", delta_id, "example.com", 3]),
+            serde_json::json!(["suffix_list", delta_id, 4]),
             serde_json::json!([
                 "label",
                 "labeler.example.net",
@@ -350,7 +385,17 @@ mod tests {
                 "wist:spam",
                 Value::Null,
                 "2026-08-02T12:00:00Z",
+                "2026-09-02T12:00:00Z",
+                delta_id,
                 12
+            ]),
+            serde_json::json!([
+                "dispute",
+                delta_id,
+                "example.com",
+                Value::Null,
+                "2026-08-02T13:00:00Z",
+                13
             ]),
             serde_json::json!([
                 "record",
@@ -359,7 +404,7 @@ mod tests {
                 delta_id
             ]),
         ];
-        assert_eq!(cases.len(), 7);
+        assert_eq!(cases.len(), 9);
         for tuple in cases {
             let entry: StateEntry =
                 serde_json::from_value(tuple.clone()).unwrap_or_else(|e| panic!("{tuple}: {e}"));

@@ -78,6 +78,9 @@ fn example_envelopes_verify() {
         ("snapshot-state.json", "state"),
         ("registry-update.json", "update"),
         ("log-anchor.json", "anchor"),
+        ("label.json", "label"),
+        ("label-feed.json", "feed"),
+        ("label-definition.json", "definition"),
     ] {
         let doc = read_json(&format!("examples/{file}"));
         wist_core::envelope::verify_envelope(&doc, inner, &pk)
@@ -292,6 +295,10 @@ fn every_example_parses_typed() {
     let _: o::Status = p("status.json");
     let _: o::Payload = p("payload.json");
     let _: o::RegistryUpdateEnvelope = p("registry-update.json");
+    let _: o::LabelEnvelope = p("label.json");
+    let _: o::FeedEnvelope = p("label-feed.json");
+    let _: o::DisputeEnvelope = p("dispute.json");
+    let _: o::LabelDefinitionEnvelope = p("label-definition.json");
 }
 
 #[test]
@@ -1126,6 +1133,325 @@ fn wist4_registrable_domain_vectors() {
             vec![tuple],
             *row["entries"].as_array().unwrap(),
             "{log_position}"
+        );
+    }
+}
+
+fn label_outcome(result: &Result<(), wist_core::label::Rejection>) -> &'static str {
+    use wist_core::label::Rejection;
+    match result {
+        Ok(()) => "accepted",
+        Err(Rejection::Fields) => "fields",
+        Err(Rejection::SelfLabel) => "self",
+        Err(Rejection::Unsealed) => "unsealed",
+        Err(Rejection::Authority) => "authority",
+        Err(Rejection::Binding) => "binding",
+        Err(Rejection::Signature) => "signature",
+    }
+}
+
+#[test]
+fn wist2_label_vectors() {
+    use wist_core::label::{self, SealedLabel};
+    let vector = read_json("vectors/wist2/labels.json");
+    let declaration: wist_core::objects::PublisherEnvelope =
+        serde_json::from_value(vector["declaration"].clone()).unwrap();
+    let url_cap = vector["url_cap_bytes"].as_i64().unwrap();
+    let spec = std::fs::read_to_string(spec_dir().join("specs/WIST-4-governance.md")).unwrap();
+    let registry = spec
+        .split("## 6. Label Registry")
+        .nth(1)
+        .unwrap()
+        .split("## 7.")
+        .next()
+        .unwrap();
+    let terms: Vec<&str> = registry
+        .lines()
+        .filter(|line| line.starts_with("| `wist:"))
+        .map(|line| line[3..].split('`').next().unwrap())
+        .collect();
+    assert_eq!(terms, label::WIST_TERMS);
+    let mut outcomes = std::collections::BTreeSet::new();
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let result = label::validate_label(&case["envelope"], &declaration, url_cap).map(|_| ());
+        let got = label_outcome(&result);
+        assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
+        match result {
+            Ok(()) => {
+                assert!(case["code"].is_null(), "{name}");
+                assert_eq!(
+                    label::label_id(&case["envelope"]["label"]).unwrap(),
+                    case["label_id"],
+                    "{name}"
+                );
+            }
+            Err(rejection) => {
+                assert_eq!(Some(rejection.code()), case["code"].as_str(), "{name}");
+                assert!(case["label_id"].is_null(), "{name}");
+            }
+        }
+        outcomes.insert(got);
+    }
+    assert_eq!(outcomes.len(), 5);
+    let example = read_json("examples/label.json");
+    assert!(label::validate_label(&example, &declaration, url_cap).is_ok());
+    let feed = read_json("examples/label-feed.json");
+    assert_eq!(
+        feed["feed"]["deltas"],
+        serde_json::json!([label::label_id(&example["label"]).unwrap()])
+    );
+    let mut dropped = 0;
+    for case in vector["current_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let sealed: Vec<SealedLabel> = case["sealed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| SealedLabel {
+                label: serde_json::from_value(s["label"].clone()).unwrap(),
+                label_id: s["label_id"].as_str().unwrap().into(),
+                height: s["height"].as_u64().unwrap(),
+                entry_index: s["entry_index"].as_u64().unwrap(),
+            })
+            .collect();
+        let current = label::current_label(&sealed).unwrap();
+        assert_eq!(current.label_id, case["current"], "{name}");
+        let tuple = label::label_tuple(current, case["sealed_at"].as_str().unwrap())
+            .map(|t| serde_json::to_value(wist_core::objects::StateEntry::Label(t)).unwrap());
+        assert_eq!(
+            tuple.unwrap_or(serde_json::Value::Null),
+            case["state_tuple"],
+            "{name}"
+        );
+        dropped += usize::from(case["state_tuple"].is_null());
+    }
+    assert!(dropped >= 2);
+    for case in vector["binding_cases"].as_array().unwrap() {
+        assert_eq!(
+            label::binding_applies(case["delta"].as_str(), case["record_anchor"].as_str()),
+            case["applies"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
+    }
+}
+
+#[test]
+fn wist2_dispute_vectors() {
+    use wist_core::label::{self, LabelLookup, SealedDispute};
+    let vector = read_json("vectors/wist2/disputes.json");
+    let sealed: Vec<(String, String)> = vector["sealed_labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["label_id"].as_str().unwrap().into(),
+                l["subject"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let lookup = |id: &str| {
+        sealed.iter().find(|(label_id, _)| label_id == id).map_or(
+            LabelLookup::Absent,
+            |(_, subject)| LabelLookup::Known {
+                subject: subject.clone(),
+            },
+        )
+    };
+    let mut outcomes = std::collections::BTreeSet::new();
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let declaration: wist_core::objects::PublisherEnvelope =
+            serde_json::from_value(case["declaration"].clone()).unwrap();
+        let result = label::validate_dispute(&case["envelope"], &declaration, lookup).map(|_| ());
+        let got = label_outcome(&result);
+        assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
+        match result {
+            Ok(()) => assert_eq!(
+                label::dispute_id(&case["envelope"]["dispute"]).unwrap(),
+                case["dispute_id"],
+                "{name}"
+            ),
+            Err(rejection) => assert_eq!(Some(rejection.code()), case["code"].as_str(), "{name}"),
+        }
+        outcomes.insert(got);
+    }
+    assert_eq!(outcomes.len(), 6);
+    let example = read_json("examples/dispute.json");
+    let publisher: wist_core::objects::PublisherEnvelope =
+        serde_json::from_value(read_json("examples/publisher.json")).unwrap();
+    assert!(
+        label::validate_dispute(&example, &publisher, |_| LabelLookup::Known {
+            subject: "https://example.com/blog/post-1".into()
+        })
+        .is_ok()
+    );
+    let unsealed = vector["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["expected"] == "unsealed")
+        .unwrap();
+    let authority = vector["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["expected"] == "authority")
+        .unwrap();
+    for case in [unsealed, authority] {
+        let declaration: wist_core::objects::PublisherEnvelope =
+            serde_json::from_value(case["declaration"].clone()).unwrap();
+        assert!(
+            label::validate_dispute(&case["envelope"], &declaration, |_| {
+                LabelLookup::Unverifiable
+            })
+            .is_ok(),
+            "{}",
+            case["name"]
+        );
+    }
+    for case in vector["current_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let sealed: Vec<SealedDispute> = case["sealed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| SealedDispute {
+                dispute: serde_json::from_value(s["dispute"].clone()).unwrap(),
+                dispute_id: s["dispute_id"].as_str().unwrap().into(),
+                height: s["height"].as_u64().unwrap(),
+                entry_index: s["entry_index"].as_u64().unwrap(),
+            })
+            .collect();
+        let current = label::current_dispute(&sealed).unwrap();
+        assert_eq!(current.dispute_id, case["current"], "{name}");
+        let tuple = serde_json::to_value(wist_core::objects::StateEntry::Dispute(
+            label::dispute_tuple(current),
+        ))
+        .unwrap();
+        assert_eq!(tuple, case["state_tuple"], "{name}");
+    }
+}
+
+#[test]
+fn wist2_label_definition_vectors() {
+    use wist_core::label;
+    let vector = read_json("vectors/wist2/label-definitions.json");
+    let declaration: wist_core::objects::PublisherEnvelope =
+        serde_json::from_value(vector["declaration"].clone()).unwrap();
+    let mut treatments = std::collections::BTreeSet::new();
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let result = label::validate_definition(&case["envelope"], &declaration);
+        assert_eq!(
+            result.is_ok(),
+            case["expected"] == "accepted",
+            "{name}: {result:?}"
+        );
+        match result {
+            Ok(definition) => {
+                treatments.insert(definition.definition.treatment);
+                assert_eq!(
+                    label::definition_path(&definition.definition.name),
+                    case["path"],
+                    "{name}"
+                );
+            }
+            Err(_) => assert!(case["path"].is_null(), "{name}"),
+        }
+    }
+    assert_eq!(treatments.len(), 3);
+    let example = read_json("examples/label-definition.json");
+    assert!(label::validate_definition(&example, &declaration).is_ok());
+}
+
+#[test]
+fn wist3_label_table_vectors() {
+    use wist_core::label::{self, LabelEvent, SealedLabelCount};
+    use wist_core::suffix_list::{check_block_capacity, BlockCaps};
+    let vector = read_json("vectors/wist3/label-tables.json");
+    for case in vector["statistics_cases"].as_array().unwrap() {
+        let rows = label::labeler_rows(case["sealed"].as_array().unwrap().iter().map(|e| {
+            SealedLabelCount {
+                height: e["height"].as_u64().unwrap(),
+                labeler: e["labeler"].as_str().unwrap(),
+                subject: e["subject"].as_str().unwrap(),
+                retracted: e["retracted"].as_bool().unwrap(),
+            }
+        }));
+        let expected: Vec<label::LabelerRow> = case["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| label::LabelerRow {
+                labeler: r["labeler"].as_str().unwrap().into(),
+                label_count: r["label_count"].as_u64().unwrap(),
+                retraction_count: r["retraction_count"].as_u64().unwrap(),
+                distinct_subjects: r["distinct_subjects"].as_u64().unwrap(),
+                first_seen_height: r["first_seen_height"].as_u64().unwrap(),
+            })
+            .collect();
+        assert_eq!(rows, expected, "{}", case["label"]);
+    }
+    for case in vector["cap_cases"].as_array().unwrap() {
+        let entries: Vec<(&str, &str)> = case["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["type"].as_str().unwrap(), e["domain"].as_str().unwrap()))
+            .collect();
+        let outcome = check_block_capacity(
+            entries,
+            None,
+            BlockCaps {
+                domain_block_entries_max: case["domain_block_entries_max"].as_u64().unwrap(),
+                labeler_block_entries_max: case["labeler_block_entries_max"].as_u64().unwrap(),
+            },
+        );
+        match case["expected"].as_str() {
+            Some(code) => assert!(
+                outcome
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains(code)),
+                "{}: {outcome:?}",
+                case["label"]
+            ),
+            None => assert!(outcome.is_ok(), "{}: {outcome:?}", case["label"]),
+        }
+    }
+    for case in vector["persistence_cases"].as_array().unwrap() {
+        let events: Vec<LabelEvent> = case["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| LabelEvent {
+                height: e["height"].as_u64().unwrap(),
+                asserted_at: e["asserted_at"].as_str().unwrap(),
+                retracted: e["retracted"].as_bool().unwrap(),
+            })
+            .collect();
+        let expiry = case["expires_at_height"].as_u64();
+        for probe in case["probes"].as_array().unwrap() {
+            assert_eq!(
+                label::counted_at(&events, expiry, probe["height"].as_u64().unwrap()),
+                probe["counted"].as_bool().unwrap(),
+                "{}: {probe}",
+                case["label"]
+            );
+        }
+    }
+    for case in vector["inactivity_cases"].as_array().unwrap() {
+        assert_eq!(
+            label::labeler_active(
+                case["last_sealed_height"].as_u64().unwrap(),
+                case["inactivity_blocks"].as_u64().unwrap(),
+                case["height"].as_u64().unwrap()
+            ),
+            case["applies"].as_bool().unwrap(),
+            "{}",
+            case["label"]
         );
     }
 }
