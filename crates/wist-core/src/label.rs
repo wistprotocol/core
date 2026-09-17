@@ -491,14 +491,15 @@ pub struct LabelEvent<'a> {
 /// WIST-4 §6's recommended default profile: whether the triple's Label is
 /// live at `height` — current, unretracted and not yet at
 /// `expires_at_height`, the first height whose Block instant reaches the
-/// expiry.
+/// expiry. `events` are in ascending Log order, which WIST-2 §3.3 uses to
+/// break equal `asserted_at` instants.
 pub fn live_at(events: &[LabelEvent<'_>], expires_at_height: Option<u64>, height: u64) -> bool {
     let current = events.iter().filter(|event| event.height <= height).fold(
         None,
         |best: Option<&LabelEvent>, event| match best {
             Some(best)
                 if publisher_time::compare(best.asserted_at, event.asserted_at)
-                    != Some(Ordering::Less) =>
+                    == Some(Ordering::Greater) =>
             {
                 Some(best)
             }
