@@ -142,6 +142,18 @@ pub fn registrable_domain(host: &str, list: Option<&SuffixList>) -> RegistrableD
     }
 }
 
+/// What the replaying party holds under the identifier an act names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldFile {
+    /// The file, verified to hash to the identifier, with its octet count.
+    Bytes(u64),
+    /// No such file: the party that must hold every file it seals under
+    /// knows the act fails its contract.
+    Absent,
+    /// A file the party could not obtain, so the act cannot be checked.
+    Unobtainable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disposition {
     /// The act is accepted; `in_force_height` is the sealing height of the
@@ -152,7 +164,8 @@ pub enum Disposition {
         changed: bool,
     },
     /// The act is ignored: `WIST1-E05`, `WIST4-E11` or `WIST4-E04`; or
-    /// the named file is held by nobody the caller can reach, `WIST3-E01`.
+    /// the named file could not be obtained, `WIST3-E01`, which stops a
+    /// Consumer at the act's Block.
     Rejected(&'static str),
     /// The act is a governance act of another kind.
     NotSuffixList,
@@ -176,15 +189,13 @@ impl SuffixListReplay {
     }
 
     /// Replays one `registry_update` body at `height`. `held` answers
-    /// with the octet count of the file the caller holds under the named
-    /// identifier, verified against it, or `None` for a file it cannot
-    /// obtain.
+    /// what the caller holds under the named identifier.
     pub fn apply(
         &mut self,
         height: u64,
         doc: &Value,
         log_key: impl Fn(&str) -> Option<PublicKey>,
-        held: impl Fn(&str) -> Option<u64>,
+        held: impl Fn(&str) -> HeldFile,
     ) -> Disposition {
         if crate::jcs::canonicalize(doc).is_err() {
             return Disposition::Rejected("WIST1-E05");
@@ -210,9 +221,12 @@ impl SuffixListReplay {
             return Disposition::Rejected("WIST4-E11");
         }
         match held(&details.sha256) {
-            None => return Disposition::Rejected("WIST3-E01"),
-            Some(bytes) if bytes != details.bytes => return Disposition::Rejected("WIST4-E04"),
-            Some(_) => {}
+            HeldFile::Unobtainable => return Disposition::Rejected("WIST3-E01"),
+            HeldFile::Absent => return Disposition::Rejected("WIST4-E04"),
+            HeldFile::Bytes(bytes) if bytes != details.bytes => {
+                return Disposition::Rejected("WIST4-E04")
+            }
+            HeldFile::Bytes(_) => {}
         }
         if let Some((current, in_force_height)) = self.in_force_after(height) {
             if current == details.sha256 {

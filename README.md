@@ -1,6 +1,6 @@
 # wist-core
 
-The signed Delta format targets [WIST specification revision `5d6424729cb65edbf0ba52f4dc3876d4da0b7ee5`](https://github.com/wistprotocol/spec/tree/5d6424729cb65edbf0ba52f4dc3876d4da0b7ee5). Object version `1.0.0` alone does not identify a compatible draft.
+The signed Delta format targets [WIST specification revision `2d572b4d64e2f6fc01f57af87184b4e97be99b59`](https://github.com/wistprotocol/spec/tree/2d572b4d64e2f6fc01f57af87184b4e97be99b59). Object version `1.0.0` alone does not identify a compatible draft.
 
 Delta Envelopes require a canonical `publisher` inside the signed and hashed object. The typed object and `delta::publisher` reject missing or noncanonical identities without rewriting signed bytes. Signature/key-history and `(publisher, url)` chain validation remain caller obligations.
 

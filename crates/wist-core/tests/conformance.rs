@@ -674,6 +674,102 @@ fn wist4_withdrawal_vectors() {
         resumed.adopt(&entry.delta_id, &entry.publisher, entry.sealing_height);
     }
     assert_eq!(resumed.entries().len(), replay.entries().len());
+    let mut records: Vec<serde_json::Value> = vector["sealed_deltas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            serde_json::to_value(wist_core::objects::StateEntry::Record(
+                wist_core::objects::RecordEntry {
+                    publisher: d["publisher"].as_str().unwrap().into(),
+                    url: d["url"].as_str().unwrap().into(),
+                    delta_id: d["delta_id"].as_str().unwrap().into(),
+                },
+            ))
+            .unwrap()
+        })
+        .collect();
+    records.sort_by_key(|t| t.to_string());
+    let mut expected_records = vector["record_tuples"].as_array().unwrap().clone();
+    expected_records.sort_by_key(|t| t.to_string());
+    assert_eq!(records, expected_records);
+    let materialized: Vec<&str> = vector["sealed_deltas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["delta_id"].as_str().unwrap())
+        .filter(|id| !replay.is_withdrawn(id))
+        .collect();
+    let expected_materialized: Vec<&str> = vector["materialized"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(materialized, expected_materialized);
+    let resume = &vector["resume"];
+    let mut resumed = WithdrawalReplay::new();
+    for tuple in resume["adopted"].as_array().unwrap() {
+        resumed.adopt(
+            tuple[1].as_str().unwrap(),
+            tuple[2].as_str().unwrap(),
+            tuple[3].as_u64().unwrap(),
+        );
+    }
+    let walked: Vec<(String, String, u64)> = resume["walked_deltas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["delta_id"].as_str().unwrap().into(),
+                d["publisher"].as_str().unwrap().into(),
+                d["height"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    for case in resume["act_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let disposition = resumed.apply_raw(
+            case["height"].as_u64().unwrap(),
+            case["envelope_json"].as_str().unwrap().as_bytes(),
+            |key_id| (key_id == log_key_id).then(|| log_key.clone()),
+            |delta_id| {
+                walked.iter().find(|(id, _, _)| id == delta_id).map_or(
+                    SealedDelta::Unverifiable,
+                    |(_, publisher, height)| SealedDelta::Known {
+                        publisher: publisher.clone(),
+                        height: *height,
+                    },
+                )
+            },
+        );
+        match disposition {
+            Disposition::Accepted {
+                withdrawn_height, ..
+            } => {
+                assert!(case["code"].is_null(), "{label}");
+                assert_eq!(
+                    Some(withdrawn_height),
+                    case["withdrawn_height"].as_u64(),
+                    "{label}"
+                );
+            }
+            Disposition::Rejected(code) => assert_eq!(Some(code), case["code"].as_str(), "{label}"),
+            Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),
+        }
+    }
+    let mut resumed_tuples: Vec<serde_json::Value> = resumed
+        .entries()
+        .into_iter()
+        .map(|entry| {
+            serde_json::to_value(wist_core::objects::StateEntry::Withdrawal(entry)).unwrap()
+        })
+        .collect();
+    resumed_tuples.sort_by_key(|t| t.to_string());
+    let mut expected_resumed = resume["state_tuples"].as_array().unwrap().clone();
+    expected_resumed.sort_by_key(|t| t.to_string());
+    assert_eq!(resumed_tuples, expected_resumed);
     assert_eq!(
         replay.apply_raw(
             9,
@@ -871,7 +967,7 @@ fn signed_delta_publisher_fields_and_ids() {
 fn wist4_registrable_domain_vectors() {
     use std::collections::BTreeMap;
     use wist_core::suffix_list::{
-        check_block_capacity, registrable_domain, BlockCaps, Disposition, SuffixList,
+        check_block_capacity, registrable_domain, BlockCaps, Disposition, HeldFile, SuffixList,
         SuffixListReplay,
     };
     let vector = read_json("vectors/wist4/registrable-domain.json");
@@ -925,11 +1021,28 @@ fn wist4_registrable_domain_vectors() {
         let height = case["height"].as_u64().unwrap();
         let doc =
             wist_core::json::parse(case["envelope_json"].as_str().unwrap().as_bytes()).unwrap();
+        if let Some(consumer) = case["consumer"].as_str() {
+            let mut stopped = replay.clone();
+            let disposition = stopped.apply(
+                height,
+                &doc,
+                |key_id| (key_id == log_key_id).then(|| log_key.clone()),
+                |_| HeldFile::Unobtainable,
+            );
+            assert!(
+                matches!(disposition, Disposition::Rejected(code) if code == consumer),
+                "{label}: {disposition:?}"
+            );
+        }
         let disposition = replay.apply(
             height,
             &doc,
             |key_id| (key_id == log_key_id).then(|| log_key.clone()),
-            |id| names.get(id).map(|name| lists[name].bytes()),
+            |id| {
+                names.get(id).map_or(HeldFile::Absent, |name| {
+                    HeldFile::Bytes(lists[name].bytes())
+                })
+            },
         );
         match disposition {
             Disposition::Accepted { .. } => assert!(case["code"].is_null(), "{label}"),
@@ -985,11 +1098,13 @@ fn wist4_registrable_domain_vectors() {
     }
     for case in vector["quota_cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
-        let list = list_at_block(case["height"].as_u64().unwrap());
         let base = case["quota_base"].as_u64().unwrap();
         let mut noise: BTreeMap<String, u64> = BTreeMap::new();
         for ping in case["pings"].as_array().unwrap() {
-            let unit = registrable_domain(ping["host"].as_str().unwrap(), list).domain;
+            let at = ping["height"]
+                .as_u64()
+                .unwrap_or_else(|| case["height"].as_u64().unwrap());
+            let unit = registrable_domain(ping["host"].as_str().unwrap(), list_at_block(at)).domain;
             let count = noise.entry(unit).or_default();
             let status = if *count >= base {
                 429
