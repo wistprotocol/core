@@ -154,12 +154,12 @@ fn signer(
     let entry = publisher
         .keys
         .iter()
-        .find(|key| key.key_id == key_id)
+        .find(|key| key.kid == key_id)
         .ok_or(Rejection::Binding)?;
-    if publisher_time::compare(&entry.valid_from, asserted_at) == Some(Ordering::Greater) {
+    if entry.admits(asserted_at) != Some(true) {
         return Err(Rejection::Binding);
     }
-    let key = PublicKey::from_b64u(&entry.public_key).map_err(|_| Rejection::Binding)?;
+    let key = PublicKey::from_b64u(&entry.x).map_err(|_| Rejection::Binding)?;
     crate::envelope::verify_envelope(doc, inner, &key).map_err(|_| Rejection::Signature)
 }
 

@@ -13,27 +13,12 @@ fn strings(value: &Value) -> Vec<String> {
         .collect()
 }
 
-fn fixture_time(value: &str) -> &str {
-    assert_eq!(value.len(), 20, "fixture requires whole-second UTC time");
-    assert!(value.ends_with('Z'));
-    assert!(value.is_ascii());
-    value
-}
-
 fn verifies_fixture_delta(delta: &Value, keys: &[PublisherKey]) -> bool {
     keys.iter()
-        .find(|key| delta["sig"]["key_id"] == key.key_id)
-        .filter(|key| {
-            fixture_time(delta["delta"]["observed_at"].as_str().unwrap())
-                >= fixture_time(key.valid_from.as_str())
-        })
+        .find(|key| delta["sig"]["key_id"] == key.kid)
+        .filter(|key| key.admits(delta["delta"]["observed_at"].as_str().unwrap()) == Some(true))
         .is_some_and(|key| {
-            verify_envelope(
-                delta,
-                "delta",
-                &PublicKey::from_b64u(&key.public_key).unwrap(),
-            )
-            .is_ok()
+            verify_envelope(delta, "delta", &PublicKey::from_b64u(&key.x).unwrap()).is_ok()
         })
 }
 
@@ -53,16 +38,16 @@ fn declaration(value: &Value, previous: Option<&Value>) -> WindowDeclaration {
     }
     let signer = candidates
         .iter()
-        .filter(|key| key["key_id"] == envelope["sig"]["key_id"])
+        .filter(|key| key["kid"] == envelope["sig"]["key_id"])
         .find(|key| {
             verify_envelope(
                 envelope,
                 "publisher",
-                &PublicKey::from_b64u(key["public_key"].as_str().unwrap()).unwrap(),
+                &PublicKey::from_b64u(key["x"].as_str().unwrap()).unwrap(),
             )
             .is_ok()
         })
-        .expect("authenticated Declaration signer")["public_key"]
+        .expect("authenticated Declaration signer")["x"]
         .as_str()
         .unwrap()
         .to_string();

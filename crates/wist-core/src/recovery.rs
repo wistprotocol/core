@@ -42,7 +42,7 @@ pub fn settle(
                 .keys
                 .iter()
                 .chain(&head.recovery_keys)
-                .any(|key| key.public_key == declaration.signer)
+                .any(|key| key.x == declaration.signer)
         {
             head = declaration;
         } else {
@@ -60,7 +60,7 @@ pub fn settle(
     }
     Settlement {
         effective_declaration: head.label.clone(),
-        effective_keys: head.keys.iter().map(|key| key.key_id.clone()).collect(),
+        effective_keys: head.keys.iter().map(|key| key.kid.clone()).collect(),
         superseded,
         eligible,
         rejected,

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[path = "conformance/declarations.rs"]
 mod declarations;
+#[path = "conformance/key_directory.rs"]
+mod key_directory;
 #[path = "conformance/parameters.rs"]
 mod parameters;
 #[path = "conformance/recovery.rs"]

@@ -54,6 +54,7 @@ pub const PARAMS: &[ParamSpec] = &[
     p("quota_base", Some(1000), Some(1), None),
     p("recovery_window_days", Some(7), Some(1), None),
     p("param_grace_days", Some(7), Some(1), None),
+    p("declaration_activation_blocks", Some(24), Some(0), None),
 ];
 
 pub fn spec(name: &str) -> Option<&'static ParamSpec> {

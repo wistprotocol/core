@@ -5,6 +5,7 @@
 use crate::crypto::PublicKey;
 use crate::delta_fields::{self, canonical_b64u};
 use crate::envelope::verify_envelope;
+use crate::objects::publisher::{key_set_fingerprint, thumbprint, NUMERIC_DATE_MAX};
 use crate::objects::{Publisher, PublisherEnvelope, PublisherKey};
 use crate::publisher_time;
 use serde_json::Value;
@@ -44,11 +45,14 @@ pub fn validate_fields(doc: &Value) -> Result<PublisherEnvelope, Rejection> {
         .iter()
         .chain(envelope.publisher.recovery_keys.iter().flatten())
     {
-        if !canonical_b64u(&key.public_key, 32) {
+        if !canonical_b64u(&key.x, 32) {
             return Err((
                 "WIST1-E14",
-                "public_key: expected canonical base64url encoding of 32 octets".into(),
+                "x: expected canonical base64url encoding of 32 octets".into(),
             ));
+        }
+        if key.kid != thumbprint(&key.x) {
+            return Err(("WIST1-E14", "kid is not the entry's JWK thumbprint".into()));
         }
     }
     if !canonical_b64u(&envelope.sig.value, 64) {
@@ -66,6 +70,7 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
         "prev_declaration",
         "subdomain_scope",
         "recovery_keys",
+        "next_keys",
         "contact",
     ] {
         if doc["publisher"].get(field).is_some_and(Value::is_null) {
@@ -78,15 +83,27 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
     if !delta_fields::version_spelled(&publisher.wist_version) {
         return Err("wist_version must contain three decimal components".into());
     }
-    if publisher.prev_declaration.as_ref().is_some_and(|hash| {
-        !hash.strip_prefix("sha256:").is_some_and(|hex| {
+    let sha256_shaped = |hash: &String| {
+        hash.strip_prefix("sha256:").is_some_and(|hex| {
             hex.len() == 64
                 && hex
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         })
-    }) {
+    };
+    if publisher
+        .prev_declaration
+        .as_ref()
+        .is_some_and(|hash| !sha256_shaped(hash))
+    {
         return Err("prev_declaration must be a lowercase SHA-256 hash".into());
+    }
+    if publisher
+        .next_keys
+        .as_ref()
+        .is_some_and(|hash| !sha256_shaped(hash))
+    {
+        return Err("next_keys must be a lowercase SHA-256 fingerprint".into());
     }
     for host in std::iter::once(&publisher.domain).chain(publisher.subdomain_scope.iter().flatten())
     {
@@ -104,16 +121,28 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
     if publisher.keys.is_empty() {
         return Err("keys must not be empty".into());
     }
-    for key in publisher
+    for (index, key) in publisher
         .keys
         .iter()
         .chain(publisher.recovery_keys.iter().flatten())
+        .enumerate()
     {
-        if key.key_id.chars().count() > 64 || key.alg != "Ed25519" {
-            return Err("key_id exceeds 64 characters or alg is not Ed25519".into());
+        let signed = if index < publisher.keys.len() {
+            &doc["publisher"]["keys"][index]
+        } else {
+            &doc["publisher"]["recovery_keys"][index - publisher.keys.len()]
+        };
+        if key.kty != "OKP" || key.crv != "Ed25519" {
+            return Err("key entries must be Ed25519 OKP JSON Web Keys".into());
         }
-        if !publisher_time::valid(&key.valid_from) {
-            return Err("valid_from must satisfy the Publisher timestamp profile".into());
+        if signed.get("exp").is_some_and(Value::is_null) {
+            return Err("exp must not be null".into());
+        }
+        if key.nbf > NUMERIC_DATE_MAX || key.exp.is_some_and(|exp| exp > NUMERIC_DATE_MAX) {
+            return Err("nbf and exp must not exceed 253402300799".into());
+        }
+        if key.exp.is_some_and(|exp| exp <= key.nbf) {
+            return Err("exp must be greater than nbf".into());
         }
     }
     if envelope.sig.key_id.chars().count() > 64 || envelope.sig.alg != "Ed25519" {
@@ -127,7 +156,7 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
 /// but never a signer candidate.
 pub fn usable_keys(keys: &[PublisherKey]) -> impl Iterator<Item = &PublisherKey> {
     keys.iter()
-        .filter(|key| key.alg == "Ed25519" && PublicKey::from_b64u(&key.public_key).is_ok())
+        .filter(|key| PublicKey::from_b64u(&key.x).is_ok())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,37 +192,21 @@ fn recovery_keys_bytes(p: &Publisher) -> Result<Vec<u8>, String> {
     }
 }
 
-/// WIST-1 §5.2 and ADR-0023: every identifier occurs once across `keys`
-/// and `recovery_keys`, identical duplicates included, and the two sets
-/// share neither identifiers nor public bytes.
+/// WIST-1 §5.2 and ADR-0023: every public key occurs once across `keys`
+/// and `recovery_keys`, identical duplicates included.
 pub fn disjoint_key_sets(p: &Publisher) -> Result<(), String> {
-    let mut identifiers = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for key in p.keys.iter().chain(p.recovery_keys.iter().flatten()) {
-        if !identifiers.insert(&key.key_id) {
-            return Err(format!("duplicate key_id {} in Declaration", key.key_id));
-        }
-    }
-    let Some(recovery) = p.recovery_keys.as_deref() else {
-        return Ok(());
-    };
-    for r in recovery {
-        if let Some(clash) = p
-            .keys
-            .iter()
-            .find(|k| k.key_id == r.key_id || k.public_key == r.public_key)
-        {
-            return Err(format!(
-                "key {} is named in both keys and recovery_keys",
-                clash.key_id
-            ));
+        if !seen.insert(&key.x) {
+            return Err(format!("key {} listed twice in Declaration", key.kid));
         }
     }
     Ok(())
 }
 
 fn verify_with(doc: &Value, key: &PublisherKey) -> bool {
-    (key.alg == "Ed25519" && doc["sig"]["alg"] == "Ed25519")
-        .then(|| PublicKey::from_b64u(&key.public_key).ok())
+    (doc["sig"]["alg"] == "Ed25519")
+        .then(|| PublicKey::from_b64u(&key.x).ok())
         .flatten()
         .is_some_and(|public| verify_envelope(doc, "publisher", &public).is_ok())
 }
@@ -230,7 +243,7 @@ pub fn resolve_signer<'a>(
             usable_keys(&p.keys).chain(usable_keys(p.recovery_keys.as_deref().unwrap_or(&[])))
         })
         .chain(usable_keys(&incoming.keys))
-        .filter(|key| key.key_id == key_id)
+        .filter(|key| key.kid == key_id)
         .collect();
     if candidates.is_empty() {
         return Err((
@@ -305,7 +318,7 @@ pub fn url_host(url: &str) -> &str {
 }
 
 /// WIST-1 §5.1/§5.2 Key Set checks for a signed object. `observed_at`
-/// activates the `valid_from` bound (Deltas); pass None for Feeds.
+/// activates the `nbf`/`exp` window (Deltas); pass None for Feeds.
 pub fn verify_signed(
     keys: &[&PublisherKey],
     doc: &Value,
@@ -315,33 +328,24 @@ pub fn verify_signed(
     if kind == "delta" {
         delta_fields::validate_version(doc)?;
     }
-    if observed_at.is_some_and(|value| !publisher_time::valid(value))
-        || keys
-            .iter()
-            .any(|key| !publisher_time::valid(&key.valid_from))
-    {
+    if observed_at.is_some_and(|value| !publisher_time::valid(value)) {
         return Err("WIST1-E14");
     }
     if !canonical_b64u(doc["sig"]["value"].as_str().ok_or("WIST1-E14")?, 64) {
         return Err("WIST1-E14");
     }
     for key in keys {
-        if !canonical_b64u(&key.public_key, 32) {
+        if !canonical_b64u(&key.x, 32) || key.kid != thumbprint(&key.x) {
             return Err("WIST1-E14");
         }
     }
     let key_id = doc["sig"]["key_id"].as_str().unwrap_or_default();
     let mut eligible = false;
-    for key in keys.iter().filter(|key| key.key_id == key_id) {
-        if key.alg != "Ed25519" {
-            continue;
-        }
-        let Ok(public) = PublicKey::from_b64u(&key.public_key) else {
+    for key in keys.iter().filter(|key| key.kid == key_id) {
+        let Ok(public) = PublicKey::from_b64u(&key.x) else {
             continue;
         };
-        if observed_at.is_some_and(|at| {
-            !publisher_time::compare(at, &key.valid_from).is_some_and(|order| !order.is_lt())
-        }) {
+        if observed_at.is_some_and(|at| key.admits(at) != Some(true)) {
             continue;
         }
         eligible = true;
@@ -357,12 +361,14 @@ pub fn verify_signed(
 }
 
 /// WIST-1 §5.2: evaluate a fetched Declaration against the accepted one,
-/// with an open recovery window's chain head as an alternative
-/// predecessor and the accepted sequence floor every replacement must
-/// exceed.
+/// with an open recovery window's chain head or a pending head as an
+/// alternative predecessor and the accepted sequence floor every
+/// replacement must exceed. The caller reads which predecessor the
+/// Declaration named from `prev_declaration`.
 pub fn evaluate_with_heads(
     current: &Value,
     recovery_head: Option<&Value>,
+    pending_head: Option<&Value>,
     highest_accepted_seq: u64,
     fetched: &Value,
 ) -> Result<Decision, Rejection> {
@@ -370,9 +376,14 @@ pub fn evaluate_with_heads(
     if incoming.domain != current["publisher"]["domain"] {
         return Err(("WIST2-E04", "declaration domain changed".into()));
     }
-    if inner_hash(current).map_err(|e| ("WIST2-E04", e))?
-        == inner_hash(fetched).map_err(|e| ("WIST2-E04", e))?
-    {
+    let fetched_hash = inner_hash(fetched).map_err(|e| ("WIST2-E04", e))?;
+    if inner_hash(current).map_err(|e| ("WIST2-E04", e))? == fetched_hash {
+        return Ok(Decision::Unchanged);
+    }
+    // A served Declaration is re-fetched throughout the activation delay, so
+    // a re-serve of the pending head installs nothing rather than reading as
+    // a superseded replay (§5.2).
+    if pending_head.is_some_and(|head| inner_hash(head).ok().as_deref() == Some(&fetched_hash)) {
         return Ok(Decision::Unchanged);
     }
     if incoming.seq <= highest_accepted_seq {
@@ -383,6 +394,7 @@ pub fn evaluate_with_heads(
     }
     let previous = std::iter::once(current)
         .chain(recovery_head)
+        .chain(pending_head)
         .find(|head| inner_hash(head).ok().as_deref() == incoming.prev_declaration.as_deref())
         .ok_or(("WIST1-E08", "ineligible Declaration predecessor".into()))?;
     evaluate(previous, fetched)
@@ -435,22 +447,36 @@ pub fn evaluate(stored: &Value, fetched: &Value) -> Result<Decision, Rejection> 
     }
 
     let signer = resolve_signer(fetched, &fetched_p, Some(&stored_p))?;
-    let decision = if stored_p
-        .keys
-        .iter()
-        .any(|key| key.public_key == signer.public_key)
-    {
+    let decision = if stored_p.keys.iter().any(|key| key.x == signer.x) {
         Decision::Ordinary
     } else if stored_p
         .recovery_keys
         .iter()
         .flatten()
-        .any(|key| key.public_key == signer.public_key)
+        .any(|key| key.x == signer.x)
     {
         Decision::Recovery
     } else {
         Decision::FreshIdentity
     };
+
+    if decision == Decision::Ordinary {
+        if let Some(commitment) = &stored_p.next_keys {
+            let kids = |keys: &[PublisherKey]| {
+                keys.iter()
+                    .map(|key| key.kid.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            let kept = kids(&stored_p.keys) == kids(&fetched_p.keys)
+                && fetched_p.next_keys.as_deref() == Some(commitment.as_str());
+            if !kept && key_set_fingerprint(&fetched_p.keys) != *commitment {
+                return Err((
+                    "WIST1-E08",
+                    "ordinary rotation neither keeps nor installs the next_keys commitment".into(),
+                ));
+            }
+        }
+    }
 
     if decision != Decision::Recovery {
         let stored_recovery = recovery_keys_bytes(&stored_p).map_err(|e| ("WIST2-E04", e))?;

@@ -27,10 +27,11 @@ pub use registry_update::{
     RegistryUpdateEnvelope, SuffixListDetails,
 };
 pub use snapshot::{
-    AggregatorKeyEntry, DeclarationEntry, DisputeEntry, LabelEntry, ParameterEntry, RecordEntry,
-    RecoveryWindowEntry, SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope,
-    SnapshotManifest, SnapshotManifestEnvelope, SnapshotShards, SnapshotState,
-    SnapshotStateEnvelope, SnapshotStateFile, StateEntry, SuffixListEntry, WithdrawalEntry,
+    AggregatorKeyEntry, DeclarationEntry, DisputeEntry, LabelEntry, ParameterEntry,
+    PendingDeclarationEntry, RecordEntry, RecoveryWindowEntry, SnapshotFile, SnapshotIndex,
+    SnapshotIndexEntry, SnapshotIndexEnvelope, SnapshotManifest, SnapshotManifestEnvelope,
+    SnapshotShards, SnapshotState, SnapshotStateEnvelope, SnapshotStateFile, StateEntry,
+    SuffixListEntry, WithdrawalEntry,
 };
 pub use status::{PublisherState, Status, StatusRejection};
 

@@ -93,6 +93,14 @@ pub struct DeclarationEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingDeclarationEntry {
+    pub domain: String,
+    pub head: Value,
+    pub sealing_height: u64,
+    pub activation_height: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ParameterEntry {
     pub name: String,
     pub effective_at: String,
@@ -155,6 +163,7 @@ pub struct RecordEntry {
 pub enum StateEntry {
     AggregatorKey(AggregatorKeyEntry),
     Declaration(DeclarationEntry),
+    PendingDeclaration(PendingDeclarationEntry),
     Parameter(ParameterEntry),
     RecoveryWindow(RecoveryWindowEntry),
     SuffixList(SuffixListEntry),
@@ -208,6 +217,15 @@ impl<'de> Deserialize<'de> for StateEntry {
                     declaration: field(tail, 1)?,
                     sealing_height: field(tail, 2)?,
                     highest_accepted_seq: field(tail, 3)?,
+                }))
+            }
+            "pending_declaration" => {
+                check_arity::<D::Error>(&kind, tail, 4)?;
+                Ok(StateEntry::PendingDeclaration(PendingDeclarationEntry {
+                    domain: field(tail, 0)?,
+                    head: field(tail, 1)?,
+                    sealing_height: field(tail, 2)?,
+                    activation_height: field(tail, 3)?,
                 }))
             }
             "parameter" => {
@@ -298,6 +316,13 @@ impl Serialize for StateEntry {
                 e.declaration,
                 e.sealing_height,
                 e.highest_accepted_seq
+            ]),
+            StateEntry::PendingDeclaration(e) => serde_json::json!([
+                "pending_declaration",
+                e.domain,
+                e.head,
+                e.sealing_height,
+                e.activation_height
             ]),
             StateEntry::Parameter(e) => {
                 serde_json::json!(["parameter", e.name, e.effective_at, e.value])

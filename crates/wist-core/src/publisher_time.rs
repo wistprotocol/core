@@ -106,6 +106,18 @@ pub fn within_bound(value: &str, bound_s: i128, bound_fraction: &str) -> Option<
     Some(parse(value)? <= bound)
 }
 
+/// Whether `value` is at or after the whole second `bound_s`; `None` when
+/// `value` is malformed.
+pub fn at_or_after(value: &str, bound_s: i128) -> Option<bool> {
+    Some(
+        parse(value)?
+            >= Instant {
+                second: bound_s,
+                fraction: "",
+            },
+    )
+}
+
 /// WIST-1 §3.4's clock check against a whole-second clock such as a Block's
 /// `sealed_at`: `value <= clock + allowance`, endpoint included, with a
 /// signed allowance and no clamping to the spelling range.

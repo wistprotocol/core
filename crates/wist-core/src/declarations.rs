@@ -1,8 +1,8 @@
 //! WIST-1 §5.2 Declaration replay: the accepted Declaration per domain,
 //! the sequence floor, recovery windows with their owner, chain head,
 //! pre-recovery source and competitors, settlement at the window's end,
-//! and identity resets — computed identically by every party replaying a
-//! Log.
+//! pending fresh identities with their activation and reversal, and
+//! identity resets — computed identically by every party replaying a Log.
 use crate::declaration::{evaluate, evaluate_initial, inner_hash, validate_fields, Decision};
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,24 @@ impl RecoveryWindow {
     }
 }
 
+/// WIST-1 §5.2: a fresh identity accepted outside a recovery window, held
+/// without authority until the Block at its activation height.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pending {
+    head: Arc<Declaration>,
+    activation_height: u64,
+}
+
+impl Pending {
+    pub fn head(&self) -> &Declaration {
+        &self.head
+    }
+
+    pub fn activation_height(&self) -> u64 {
+        self.activation_height
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Domain {
     current: Arc<Declaration>,
@@ -78,6 +96,8 @@ pub struct Domain {
     first: Position,
     reset: Option<Position>,
     window: Option<RecoveryWindow>,
+    #[serde(default)]
+    pending: Option<Pending>,
 }
 
 impl Domain {
@@ -101,6 +121,10 @@ impl Domain {
         self.window.as_ref()
     }
 
+    pub fn pending(&self) -> Option<&Pending> {
+        self.pending.as_ref()
+    }
+
     pub fn delta_admission_sources(&self) -> Vec<&Declaration> {
         self.window.as_ref().map_or_else(
             || vec![self.current()],
@@ -119,6 +143,18 @@ pub struct Installation {
     pub decision: Option<Decision>,
     pub opens_window: bool,
     pub resets_identity: bool,
+    /// The Declaration became or replaced the pending head instead of
+    /// the current Declaration.
+    pub pending: bool,
+    /// The pending head this replacement of the current Declaration
+    /// discarded.
+    pub reversed: Option<Arc<Declaration>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Activation {
+    pub domain: String,
+    pub activated: Arc<Declaration>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +167,7 @@ pub struct Settlement {
 #[derive(Debug, Clone, Default)]
 pub struct Effects {
     pub settlements: Vec<Settlement>,
+    pub activations: Vec<Activation>,
     pub installations: Vec<Installation>,
 }
 
@@ -179,6 +216,7 @@ impl Declarations {
     }
 
     /// Applies the next Block of the accepted prefix.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_block(
         &mut self,
         block_number: u64,
@@ -186,6 +224,7 @@ impl Declarations {
         block_hash: &str,
         sealed_at: &str,
         recovery_window_days: i64,
+        declaration_activation_blocks: i64,
         entries: &[Value],
     ) -> Result<Effects> {
         let continues = match &self.head {
@@ -199,7 +238,12 @@ impl Declarations {
                 "Declaration replay requires the next Block of its accepted prefix".into(),
             ));
         }
-        let projection = self.project(sealed_at, recovery_window_days, entries)?;
+        let projection = self.project(
+            sealed_at,
+            recovery_window_days,
+            declaration_activation_blocks,
+            entries,
+        )?;
         self.domains = projection.domains;
         self.head = Some((block_number, block_hash.to_owned()));
         self.sealed_at_s = Some(projection.sealed_at_s);
@@ -215,8 +259,11 @@ impl Declarations {
     }
 
     /// Seeds a domain's accepted state from a Snapshot: the current
-    /// Declaration at its sealing position, the accepted sequence floor
-    /// and, when a window is open, its chain head and frozen end.
+    /// Declaration at its sealing position, the accepted sequence floor,
+    /// when a window is open its chain head and frozen end, and when a
+    /// fresh identity is pending its head, sealing position and
+    /// activation height.
+    #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         &mut self,
         domain: &str,
@@ -225,6 +272,7 @@ impl Declarations {
         sealed_at_s: i64,
         highest_accepted_seq: u64,
         window: Option<(Value, Position, i64, i128)>,
+        pending: Option<(Value, Position, i64, u64)>,
     ) -> Result<()> {
         let hash = inner_hash(&current).map_err(failure)?;
         let current = Arc::new(Declaration {
@@ -252,6 +300,21 @@ impl Declarations {
             }
             None => None,
         };
+        let pending = match pending {
+            Some((head, head_position, head_sealed_at_s, activation_height)) => {
+                let hash = inner_hash(&head).map_err(failure)?;
+                Some(Pending {
+                    head: Arc::new(Declaration {
+                        envelope: head,
+                        hash,
+                        position: head_position,
+                        sealed_at_s: head_sealed_at_s,
+                    }),
+                    activation_height,
+                })
+            }
+            None => None,
+        };
         self.domains.insert(
             domain.to_owned(),
             Domain {
@@ -260,6 +323,7 @@ impl Declarations {
                 first: position,
                 reset: None,
                 window,
+                pending,
             },
         );
         Ok(())
@@ -269,6 +333,7 @@ impl Declarations {
         &self,
         sealed_at: &str,
         recovery_window_days: i64,
+        declaration_activation_blocks: i64,
         entries: &[Value],
     ) -> Result<Projection> {
         let sealed_at_s = crate::timestamp::log_seconds(sealed_at)?;
@@ -281,6 +346,10 @@ impl Declarations {
             ));
         }
         crate::parameters::validate_value("recovery_window_days", recovery_window_days)?;
+        crate::parameters::validate_value(
+            "declaration_activation_blocks",
+            declaration_activation_blocks,
+        )?;
         crate::block::validate_entry_order(entries)?;
         let block_number = self.head.as_ref().map_or(Ok(0), |(height, _)| {
             height
@@ -303,6 +372,22 @@ impl Declarations {
                     superseded: window.competitors,
                 });
             }
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| block_number >= pending.activation_height)
+            {
+                let pending = state.pending.take().unwrap();
+                state.current = pending.head.clone();
+                state.reset = Some(Position {
+                    block_number,
+                    entry_index: 0,
+                });
+                effects.activations.push(Activation {
+                    domain: domain.clone(),
+                    activated: pending.head,
+                });
+            }
         }
         let mut groups = BTreeMap::<(String, u64), Vec<(usize, &Value)>>::new();
         for (index, entry) in entries.iter().enumerate() {
@@ -321,9 +406,11 @@ impl Declarations {
         for ((domain, seq), group) in groups {
             let (index, incoming) = group[0];
             if let Some(state) = staged.get(&domain) {
+                let pending = state.pending.as_ref().map(|pending| &pending.head.hash);
                 let mut unchanged = true;
                 for (_, envelope) in &group {
-                    unchanged &= inner_hash(envelope).map_err(failure)? == state.current.hash;
+                    let hash = inner_hash(envelope).map_err(failure)?;
+                    unchanged &= hash == state.current.hash || pending == Some(&hash);
                 }
                 if unchanged {
                     continue;
@@ -349,6 +436,8 @@ impl Declarations {
                 decision: None,
                 opens_window: false,
                 resets_identity: false,
+                pending: false,
+                reversed: None,
             };
             if let Some(state) = staged.get_mut(&domain) {
                 if seq <= state.highest_accepted_seq {
@@ -358,10 +447,51 @@ impl Declarations {
                 }
                 let previous = std::iter::once(&state.current)
                     .chain(state.window.iter().map(|window| &window.head))
+                    .chain(state.pending.iter().map(|pending| &pending.head))
                     .find(|head| incoming["publisher"]["prev_declaration"] == head.hash)
                     .ok_or_else(|| failure("WIST1-E08 ineligible Declaration predecessor"))?
                     .clone();
                 let decision = evaluate(previous.envelope(), incoming).map_err(rejection)?;
+                if let Some(pending) = state
+                    .pending
+                    .as_mut()
+                    .filter(|pending| pending.head.hash == previous.hash)
+                {
+                    pending.head = declaration.clone();
+                    state.highest_accepted_seq = seq;
+                    installation.pending = true;
+                    installation.decision = Some(decision);
+                    effects.installations.push(installation);
+                    continue;
+                }
+                if decision == Decision::FreshIdentity && state.window.is_none() {
+                    if state.pending.is_some() {
+                        return Err(failure(
+                            "WIST1-E08 fresh identity names the current Declaration beside a pending head",
+                        ));
+                    }
+                    let activation_height = block_number
+                        .checked_add(declaration_activation_blocks as u64)
+                        .ok_or_else(|| failure("activation height overflow"))?;
+                    state.highest_accepted_seq = seq;
+                    installation.decision = Some(decision);
+                    if activation_height > block_number {
+                        state.pending = Some(Pending {
+                            head: declaration,
+                            activation_height,
+                        });
+                        installation.pending = true;
+                    } else {
+                        state.current = declaration.clone();
+                        state.reset = Some(declaration.position);
+                        installation.resets_identity = true;
+                    }
+                    effects.installations.push(installation);
+                    continue;
+                }
+                if let Some(pending) = state.pending.take() {
+                    installation.reversed = Some(pending.head);
+                }
                 if let Some(window) = &mut state.window {
                     if previous.hash == window.head.hash
                         && matches!(decision, Decision::Ordinary | Decision::Recovery)
@@ -385,9 +515,6 @@ impl Declarations {
                         competitors: Vec::new(),
                     });
                     installation.opens_window = true;
-                } else if decision == Decision::FreshIdentity {
-                    state.reset = Some(declaration.position);
-                    installation.resets_identity = true;
                 }
                 state.current = declaration;
                 state.highest_accepted_seq = seq;
@@ -402,6 +529,7 @@ impl Declarations {
                         first: declaration.position,
                         reset: None,
                         window: None,
+                        pending: None,
                     },
                 );
             }

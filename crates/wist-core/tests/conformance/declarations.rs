@@ -5,14 +5,32 @@ use wist_core::declaration::Decision;
 use wist_core::declarations::{Declarations, Domain, Effects};
 use wist_core::Error;
 
-fn apply(state: &mut Declarations, block: &Value, days: i64) -> Result<Effects, Error> {
+/// The recovery window length and the fresh-identity activation delay a
+/// vector's parameter map fixes; an absent delay is the registry default.
+#[derive(Clone, Copy)]
+struct Params {
+    days: i64,
+    activation_blocks: i64,
+}
+
+fn params(vector: &Value) -> Params {
+    Params {
+        days: vector["recovery_window_days"].as_i64().unwrap(),
+        activation_blocks: vector["declaration_activation_blocks"]
+            .as_i64()
+            .unwrap_or(24),
+    }
+}
+
+fn apply(state: &mut Declarations, block: &Value, params: Params) -> Result<Effects, Error> {
     let header = &block["header"];
     state.apply_block(
         header["block_number"].as_u64().unwrap(),
         header["prev_block_hash"].as_str().unwrap(),
         &block_hash(header).unwrap(),
         header["sealed_at"].as_str().unwrap(),
-        days,
+        params.days,
+        params.activation_blocks,
         block["entries"].as_array().map_or(&[][..], Vec::as_slice),
     )
 }
@@ -78,7 +96,7 @@ fn candidate_block(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Va
 /// candidate leaves the state untouched.
 fn probe(
     blocks: &[Value],
-    days: i64,
+    days: Params,
     probe: &Value,
 ) -> (Declarations, Result<Effects, String>, u64) {
     let height = probe["prefix_height"].as_u64().unwrap() as usize;
@@ -109,7 +127,8 @@ fn probe(
     let before = format!("{state:?}");
     let projection = state.project(
         candidate["header"]["sealed_at"].as_str().unwrap(),
-        days,
+        days.days,
+        days.activation_blocks,
         candidate["entries"].as_array().unwrap(),
     );
     assert_eq!(format!("{state:?}"), before);
@@ -152,7 +171,7 @@ fn probe(
 #[test]
 fn recovery_heads_sequence_floors_and_named_predecessors() {
     let vector = read_json("vectors/wist1/recovery-heads.json");
-    let days = vector["recovery_window_days"].as_i64().unwrap();
+    let days = params(&vector);
     for branch in std::iter::once(&vector).chain(vector["branches"].as_array().unwrap()) {
         let blocks = branch["blocks"].as_array().unwrap();
         let mut state = Declarations::default();
@@ -201,7 +220,7 @@ fn recovery_heads_sequence_floors_and_named_predecessors() {
 #[test]
 fn recovery_ownership_uses_sequence_with_original_canonical_positions() {
     let vector = read_json("vectors/wist1/recovery-order.json");
-    let days = vector["recovery_window_days"].as_i64().unwrap();
+    let days = params(&vector);
     for case in vector["cases"].as_array().unwrap() {
         let blocks = case["blocks"].as_array().unwrap();
         let mut state = Declarations::default();
@@ -234,7 +253,7 @@ fn recovery_ownership_uses_sequence_with_original_canonical_positions() {
 #[test]
 fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
     let vector = read_json("vectors/wist1/declaration-conflicts.json");
-    let days = vector["recovery_window_days"].as_i64().unwrap();
+    let days = params(&vector);
     for case in vector["cases"].as_array().unwrap() {
         let mut blocks = vector["prefixes"][case["prefix"].as_str().unwrap()]
             .as_array()
@@ -310,7 +329,7 @@ fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
 #[test]
 fn settlement_restores_authenticated_chain_and_reports_competitors() {
     let vector = read_json("vectors/wist1/recovery-settlement.json");
-    let days = vector["recovery_window_days"].as_i64().unwrap();
+    let days = params(&vector);
     for case in vector["cases"].as_array().unwrap() {
         let blocks = case["blocks"].as_array().unwrap();
         let mut state = Declarations::default();
