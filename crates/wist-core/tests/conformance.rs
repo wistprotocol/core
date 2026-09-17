@@ -1457,3 +1457,27 @@ fn wist3_label_table_vectors() {
         );
     }
 }
+
+#[test]
+fn wist3_materialization_preference_vectors() {
+    let vector = read_json("vectors/wist3/materialization-preference.json");
+    for case in vector["cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
+        let candidates: Vec<&str> = case["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap())
+            .collect();
+        let materialized = wist_core::materialization::preferred(
+            case["host"].as_str().unwrap(),
+            case["self_declared"].as_bool().unwrap(),
+            candidates,
+        );
+        assert_eq!(
+            materialized,
+            case["materialized"].as_str(),
+            "{label}: materialized Publisher"
+        );
+    }
+}

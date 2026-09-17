@@ -31,6 +31,7 @@ pub mod jcs;
 pub mod json;
 pub mod keyset;
 pub mod label;
+pub mod materialization;
 pub mod merkle;
 pub mod objects;
 pub mod parameters;
