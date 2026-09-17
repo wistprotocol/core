@@ -6,8 +6,24 @@ pub struct WindowDeclaration {
     pub label: String,
     pub predecessor: Option<String>,
     pub signer: String,
+    pub domain: String,
+    pub subdomain_scope: Vec<String>,
     pub keys: Vec<PublisherKey>,
     pub recovery_keys: Vec<PublisherKey>,
+}
+
+impl WindowDeclaration {
+    /// WIST-1 §3.2: authority passes only where the source covers the
+    /// Delta's URL host and one of its own bindings verifies the Delta.
+    fn authorizes(
+        &self,
+        delta: &Value,
+        verifies: &impl Fn(&Value, &[PublisherKey]) -> bool,
+    ) -> bool {
+        delta["delta"]["url"].as_str().is_some_and(|url| {
+            crate::declaration::url_in_scope(url, &self.domain, &self.subdomain_scope)
+        }) && verifies(delta, &self.keys)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,13 +35,15 @@ pub struct Settlement {
     pub rejected: Vec<String>,
 }
 
+/// WIST-1 §5.2: a Delta is queued when either frozen admission source
+/// authorizes it, each under its own bindings and its own scope.
 pub fn admits_to_queue(
-    pre_recovery_keys: &[PublisherKey],
-    recovery_keys: &[PublisherKey],
+    pre_recovery: &WindowDeclaration,
+    recovery: &WindowDeclaration,
     delta: &Value,
     verifies: impl Fn(&Value, &[PublisherKey]) -> bool,
 ) -> bool {
-    verifies(delta, pre_recovery_keys) || verifies(delta, recovery_keys)
+    pre_recovery.authorizes(delta, &verifies) || recovery.authorizes(delta, &verifies)
 }
 
 pub fn settle(
@@ -52,7 +70,7 @@ pub fn settle(
     let mut eligible = Vec::new();
     let mut rejected = Vec::new();
     for (delta_id, delta) in queued {
-        if verifies(delta, &head.keys) {
+        if head.authorizes(delta, &verifies) {
             eligible.push(delta_id.clone());
         } else {
             rejected.push(delta_id.clone());

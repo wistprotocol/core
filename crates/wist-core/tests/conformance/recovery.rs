@@ -55,6 +55,11 @@ fn declaration(value: &Value, previous: Option<&Value>) -> WindowDeclaration {
         label: value["label"].as_str().unwrap().into(),
         predecessor: inner["prev_declaration"].as_str().map(String::from),
         signer,
+        domain: inner["domain"].as_str().unwrap().into(),
+        subdomain_scope: inner["subdomain_scope"]
+            .as_array()
+            .map(|hosts| strings(&Value::Array(hosts.clone())))
+            .unwrap_or_default(),
         keys: serde_json::from_value(inner["keys"].clone()).unwrap(),
         recovery_keys: serde_json::from_value(inner["recovery_keys"].clone()).unwrap(),
     }
@@ -84,8 +89,8 @@ fn signed_recovery_settlement() {
             let id = served["delta_id"].as_str().unwrap().to_string();
             let delta = served["envelope"].clone();
             if admits_to_queue(
-                &declarations[0].keys,
-                &declarations[1].keys,
+                &declarations[0],
+                &declarations[1],
                 &delta,
                 verifies_fixture_delta,
             ) {
@@ -130,12 +135,18 @@ fn signed_recovery_settlement() {
 fn delta_bindings_control_queue_admission_and_settlement() {
     let vector = super::read_json("vectors/wist1/recovery-settlement.json");
     for case in vector["binding_cases"].as_array().unwrap() {
-        let before: Vec<PublisherKey> =
-            serde_json::from_value(case["pre_recovery_keys"].clone()).unwrap();
-        let opening: Vec<PublisherKey> =
-            serde_json::from_value(case["recovery_keys"].clone()).unwrap();
-        let final_keys: Vec<PublisherKey> =
-            serde_json::from_value(case["settlement_keys"].clone()).unwrap();
+        let source = |keys: &str, scope: &str| WindowDeclaration {
+            label: keys.into(),
+            predecessor: None,
+            signer: String::new(),
+            domain: case[scope]["domain"].as_str().unwrap().into(),
+            subdomain_scope: strings(&case[scope]["subdomain_scope"]),
+            keys: serde_json::from_value(case[keys].clone()).unwrap(),
+            recovery_keys: Vec::new(),
+        };
+        let before = source("pre_recovery_keys", "pre_recovery_scope");
+        let opening = source("recovery_keys", "recovery_scope");
+        let settlement = source("settlement_keys", "settlement_scope");
         let delta = &case["envelope"];
         if let Some(index) = case["re_serve_of"].as_u64() {
             let earlier = &vector["binding_cases"][index as usize];
@@ -147,20 +158,13 @@ fn delta_bindings_control_queue_admission_and_settlement() {
         }
         let queued = admits_to_queue(&before, &opening, delta, verifies_fixture_delta);
         assert_eq!(queued, case["expected_queued"], "{}", case["name"]);
-        let declaration = WindowDeclaration {
-            label: "settled".into(),
-            predecessor: None,
-            signer: String::new(),
-            keys: final_keys,
-            recovery_keys: Vec::new(),
-        };
         let id = case["delta_id"].as_str().unwrap().to_string();
         let queue = if queued {
             vec![(id.clone(), delta.clone())]
         } else {
             Vec::new()
         };
-        let result = settle(&declaration, &[], &queue, verifies_fixture_delta);
+        let result = settle(&settlement, &[], &queue, verifies_fixture_delta);
         assert_eq!(
             result.eligible.contains(&id),
             case["expected_eligible"],
