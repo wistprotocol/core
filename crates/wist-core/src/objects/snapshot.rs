@@ -130,6 +130,7 @@ pub struct LabelEntry {
     pub asserted_at: String,
     pub expires_at: Option<String>,
     pub delta: Option<String>,
+    pub label_id: String,
     pub sealing_height: u64,
 }
 
@@ -243,7 +244,7 @@ impl<'de> Deserialize<'de> for StateEntry {
                 }))
             }
             "label" => {
-                check_arity::<D::Error>(&kind, tail, 8)?;
+                check_arity::<D::Error>(&kind, tail, 9)?;
                 Ok(StateEntry::Label(LabelEntry {
                     labeler: field(tail, 0)?,
                     subject: field(tail, 1)?,
@@ -252,7 +253,8 @@ impl<'de> Deserialize<'de> for StateEntry {
                     asserted_at: field(tail, 4)?,
                     expires_at: field(tail, 5)?,
                     delta: field(tail, 6)?,
-                    sealing_height: field(tail, 7)?,
+                    label_id: field(tail, 7)?,
+                    sealing_height: field(tail, 8)?,
                 }))
             }
             "dispute" => {
@@ -323,6 +325,7 @@ impl Serialize for StateEntry {
                 e.asserted_at,
                 e.expires_at,
                 e.delta,
+                e.label_id,
                 e.sealing_height
             ]),
             StateEntry::Dispute(e) => serde_json::json!([
@@ -386,6 +389,7 @@ mod tests {
                 Value::Null,
                 "2026-08-02T12:00:00Z",
                 "2026-09-02T12:00:00Z",
+                delta_id,
                 delta_id,
                 12
             ]),

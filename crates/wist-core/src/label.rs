@@ -297,6 +297,7 @@ pub fn label_tuple(current: &SealedLabel, sealed_at: &str) -> Option<LabelEntry>
         asserted_at: label.asserted_at.clone(),
         expires_at: label.expires_at.clone(),
         delta: label.delta.clone(),
+        label_id: current.label_id.clone(),
         sealing_height: current.height,
     })
 }
