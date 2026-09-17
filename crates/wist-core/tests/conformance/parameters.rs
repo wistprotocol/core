@@ -1,7 +1,6 @@
 use super::{parameter_default, read_json};
 use serde_json::Value;
-use wist_core::parameters::{self, Amendment, CadenceProfile, Schedule};
-use wist_core::sanctions::{self, Notice, Outcome, ProcessAct, ProcessKind};
+use wist_core::parameters::{self, Amendment, Schedule};
 
 fn vector() -> Value {
     read_json("vectors/wist4/parameter-combinations.json")
@@ -50,67 +49,6 @@ fn prospective_schedule() {
                 );
             }
         }
-    }
-}
-
-#[test]
-fn cadence_transitions() {
-    for case in vector()["cadence_transition_cases"].as_array().unwrap() {
-        let profiles: Vec<_> = case["profiles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| CadenceProfile {
-                from_s: p["from_s"].as_i64().unwrap(),
-                confirm_window_hours: p["confirm_window_hours"].as_i64().unwrap(),
-                record_seal_blocks: p["record_seal_blocks"].as_i64().unwrap(),
-                block_cadence_seconds: p["block_cadence_seconds"].as_i64().unwrap(),
-            })
-            .collect();
-        assert_eq!(
-            parameters::validate_cadence_transitions(&profiles).is_ok(),
-            case["transition_valid"].as_bool().unwrap(),
-            "{}",
-            case["label"]
-        );
-        let mut schedule = Schedule::new(0);
-        let mut index = 0;
-        let mut rejected = false;
-        for pair in profiles.windows(2) {
-            for (name, old, value) in [
-                (
-                    "confirm_window_hours",
-                    pair[0].confirm_window_hours,
-                    pair[1].confirm_window_hours,
-                ),
-                (
-                    "block_cadence_seconds",
-                    pair[0].block_cadence_seconds,
-                    pair[1].block_cadence_seconds,
-                ),
-            ] {
-                if old == value {
-                    continue;
-                }
-                rejected |= schedule
-                    .try_accept(Amendment {
-                        parameter: name.into(),
-                        value,
-                        block_number: 0,
-                        entry_index: index,
-                        sealed_at_s: 0,
-                        effective_at_s: pair[1].from_s,
-                    })
-                    .is_err();
-                index += 1;
-            }
-        }
-        assert_eq!(
-            !rejected,
-            case["transition_valid"].as_bool().unwrap(),
-            "{}",
-            case["label"]
-        );
     }
 }
 
@@ -183,91 +121,6 @@ fn signed_parameter_wire_bounds() {
             "{}",
             case["label"]
         );
-    }
-}
-
-#[test]
-fn live_evidence_retention() {
-    let vectors = vector();
-    let param = |name: &str, at: i64| {
-        vectors["retention_profiles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|p| p["from_s"].as_i64().unwrap() <= at)
-            .unwrap()[name]
-            .as_i64()
-            .unwrap()
-    };
-    for case in vectors["retention_cases"].as_array().unwrap() {
-        let first_served = case["evidence_first_served_s"].as_i64().unwrap();
-        for probe in case["probes"].as_array().unwrap() {
-            let now = probe["n_s"].as_i64().unwrap();
-            let mut processes = Vec::new();
-            for notice in case["notices"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|n| n["accepted"].as_bool().unwrap())
-            {
-                let opened = notice["sealed_at_s"].as_i64().unwrap();
-                let notice = (
-                    notice,
-                    Notice {
-                        id: "notice",
-                        subject: "sample.net",
-                        sanction: true,
-                        height: opened as u64,
-                        sealed_at_s: opened,
-                        activation_height: opened as u64,
-                        appeal_window_days: param("appeal_window_days", opened) as u64,
-                        appeal_seal_days: param("appeal_seal_days", opened) as u64,
-                    },
-                );
-                let acts: Vec<_> = [
-                    ("appeal_s", ProcessKind::Appeal),
-                    ("merits_ruling_s", ProcessKind::Ruling(Outcome::Upheld)),
-                    ("unappealed_s", ProcessKind::Ruling(Outcome::Unappealed)),
-                ]
-                .into_iter()
-                .filter_map(|(id, kind)| {
-                    notice.0[id].as_i64().map(|at| ProcessAct {
-                        id,
-                        notice: "notice",
-                        subject: "sample.net",
-                        height: at as u64,
-                        sealed_at_s: at,
-                        kind,
-                        ruling_deadline_days: param("ruling_deadline_days", at) as u64,
-                    })
-                })
-                .collect();
-                processes.push(sanctions::process_at(notice.1, &acts, now as u64, now));
-            }
-            let ends: Vec<_> = processes
-                .iter()
-                .filter_map(|p| p.retention_end_at_s)
-                .collect();
-            let expected: Vec<_> = probe["process_ends_s"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| i128::from(v.as_i64().unwrap()))
-                .collect();
-            assert_eq!(ends, expected, "{} at {now}", case["label"]);
-            assert_eq!(
-                sanctions::must_retain_evidence(
-                    first_served,
-                    param("mirror_retention_days", first_served),
-                    &processes,
-                    now
-                ),
-                probe["must_serve"].as_bool().unwrap(),
-                "{} at {now}",
-                case["label"]
-            );
-        }
     }
 }
 

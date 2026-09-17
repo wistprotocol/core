@@ -1,8 +1,5 @@
 mod schedule;
-pub use schedule::{
-    validate_cadence_transitions, Amendment, CadenceProfile, Schedule, ScheduleReplay,
-    LOG_TIMESTAMP_MAX_S,
-};
+pub use schedule::{Amendment, Schedule, ScheduleReplay, LOG_TIMESTAMP_MAX_S};
 
 pub struct ParamSpec {
     pub name: &'static str,
@@ -34,59 +31,12 @@ pub const PARAMS: &[ParamSpec] = &[
         None,
     ),
     p("extract_cap_bytes", Some(32768), Some(2), None),
-    p("summary_cap_bytes", Some(2048), Some(12), None),
-    p("feed_window", Some(1000), Some(1), None),
-    p("clock_skew_seconds", Some(600), None, None),
-    p("baseline_poll_seconds", Some(86400), None, None),
-    p("keyset_cache_ttl_seconds", Some(86400), None, None),
-    p("recovery_window_days", Some(7), Some(1), None),
-    p("sampling_floor", Some(200_000), Some(1), None),
-    p("sampling_ceiling", Some(5_000_000), Some(1), None),
-    p("sampling_slope", Some(3), None, None),
-    p(
-        "similarity_consistent",
-        Some(600_000),
-        Some(150_002),
-        Some(1_000_000),
-    ),
-    p(
-        "similarity_variance_floor",
-        Some(300_000),
-        Some(150_001),
-        Some(300_000),
-    ),
-    p("shingle_size", Some(8), Some(1), None),
-    p("confirm_auditors", Some(2), Some(2), None),
-    p("confirm_window_hours", Some(72), Some(1), None),
-    p("coverage_deadline_hours", Some(72), Some(1), None),
-    p("age_norm_days", Some(730), Some(1), None),
-    p("decay_horizon_days", Some(1825), Some(1), Some(1825)),
-    p("penalty_weight", Some(5), Some(1), None),
-    p("c_cap", Some(500), Some(1), None),
-    p("provisional_age_days", Some(30), None, None),
-    p("provisional_audits", Some(10), None, None),
-    p("provisional_cap_u", Some(100_000), Some(0), None),
-    p("quota_base", Some(100), None, None),
-    p("quota_slope", Some(10000), None, None),
-    p("latency_threshold_u", Some(500_000), None, None),
-    p("appeal_window_days", Some(14), Some(1), None),
-    p("ruling_deadline_days", Some(30), Some(1), None),
-    p("param_grace_days", Some(7), Some(1), None),
-    p("payload_window_days", Some(180), Some(30), None),
-    p("unauditable_horizon_days", Some(30), Some(7), None),
-    p("mirror_retention_days", Some(90), Some(51), None),
-    p("appeal_seal_days", Some(7), Some(1), None),
-    p("url_cap_bytes", Some(2048), Some(14), None),
     p("links_cap_bytes", Some(4096), Some(21), None),
     p("link_url_cap_bytes", Some(2048), Some(14), None),
-    p(
-        "link_agreement_consistent",
-        Some(600_000),
-        Some(2),
-        Some(1_000_000),
-    ),
-    p("link_variance_floor", Some(300_000), Some(1), Some(999999)),
-    p("warc_retention_days", Some(90), Some(51), None),
+    p("summary_cap_bytes", Some(2048), Some(12), None),
+    p("url_cap_bytes", Some(2048), Some(14), None),
+    p("payload_window_days", Some(180), Some(30), None),
+    p("mirror_retention_days", Some(90), Some(30), None),
     p("record_seal_blocks", Some(24), Some(1), None),
     p("domain_block_entries_max", Some(10000), Some(1), None),
     p("max_inclusion_blocks", Some(4), Some(1), None),
@@ -96,32 +46,18 @@ pub const PARAMS: &[ParamSpec] = &[
         Some(1_048_576),
         None,
     ),
-    p("min_observed_words", Some(40), Some(1), None),
-    p("extension_triggers_max", Some(3), Some(1), None),
-    p("epoch_blocks", Some(24), Some(1), None),
-    p("observer_checkpoint_budget", Some(1024), Some(1), None),
-    p("canary_lead_blocks", Some(24), Some(1), None),
-    p("canary_leaves_max", Some(1024), Some(1), None),
-    p("canary_commitments_max", Some(8), Some(1), None),
-    p("canary_reveal_min_blocks", Some(168), Some(1), None),
-    p("canary_lifetime_blocks", Some(1440), Some(2), None),
-    p("audit_fetch_cap_bytes", Some(8_388_608), Some(65536), None),
-    p(
-        "audit_domain_budget_bytes_day",
-        Some(1_073_741_824),
-        None,
-        None,
-    ),
-    p("audit_redirect_max", Some(5), Some(1), None),
-    p("audit_fetch_timeout_seconds", Some(30), Some(1), None),
+    p("feed_window", Some(1000), Some(1), None),
+    p("clock_skew_seconds", Some(600), None, None),
+    p("keyset_cache_ttl_seconds", Some(86400), None, None),
+    p("baseline_poll_seconds", Some(86400), None, None),
+    p("quota_base", Some(1000), Some(1), None),
+    p("recovery_window_days", Some(7), Some(1), None),
+    p("param_grace_days", Some(7), Some(1), None),
 ];
 
 pub fn spec(name: &str) -> Option<&'static ParamSpec> {
     PARAMS.iter().find(|s| s.name == name)
 }
-
-const COVERAGE_FAILURES_MAX: i128 = 24;
-const COVERAGE_COUNT_WINDOW_S: i128 = 30 * 86400;
 
 type EffLookup<'a> = &'a dyn Fn(&str) -> i128;
 
@@ -131,116 +67,18 @@ struct ComboRule {
     holds: fn(EffLookup) -> bool,
 }
 
+/// WIST-4 §5's combination rules: the bounds a value satisfies only
+/// together with another parameter's value in the same map.
 const COMBO_RULES: &[ComboRule] = &[
-    ComboRule {
-        participants: &["sampling_floor", "sampling_ceiling"],
-        description: "sampling_ceiling must not be below sampling_floor",
-        holds: |eff| eff("sampling_ceiling") >= eff("sampling_floor"),
-    },
-    ComboRule {
-        participants: &["similarity_consistent", "similarity_variance_floor"],
-        description: "similarity_consistent must be greater than similarity_variance_floor",
-        holds: |eff| eff("similarity_consistent") > eff("similarity_variance_floor"),
-    },
-    ComboRule {
-        participants: &["c_cap", "provisional_audits"],
-        description: "c_cap must not be below provisional_audits",
-        holds: |eff| eff("c_cap") >= eff("provisional_audits"),
-    },
-    ComboRule {
-        participants: &["confirm_window_hours", "block_cadence_seconds"],
-        description: "confirm_window_hours must not be shorter than block_cadence_seconds",
-        holds: |eff| eff("confirm_window_hours") * 3600 >= eff("block_cadence_seconds"),
-    },
-    ComboRule {
-        participants: &["coverage_deadline_hours", "block_cadence_seconds"],
-        description: "coverage_deadline_hours must not be shorter than block_cadence_seconds",
-        holds: |eff| eff("coverage_deadline_hours") * 3600 >= eff("block_cadence_seconds"),
-    },
-    ComboRule {
-        participants: &["confirm_window_hours", "block_cadence_seconds"],
-        description: "confirm_window_hours / 2 must not be shorter than block_cadence_seconds",
-        holds: |eff| (eff("confirm_window_hours") / 2) * 3600 >= eff("block_cadence_seconds"),
-    },
-    ComboRule {
-        participants: &["confirm_window_hours", "coverage_deadline_hours"],
-        description: "confirm_window_hours / 2 must not exceed coverage_deadline_hours",
-        holds: |eff| eff("confirm_window_hours") / 2 <= eff("coverage_deadline_hours"),
-    },
-    ComboRule {
-        participants: &[
-            "coverage_deadline_hours",
-            "record_seal_blocks",
-            "block_cadence_seconds",
-        ],
-        description: "coverage_deadline_hours + (record_seal_blocks + coverage_failures_max) blocks must be shorter than 30 whole days",
-        holds: |eff| {
-            eff("coverage_deadline_hours") * 3600
-                + (eff("record_seal_blocks") + COVERAGE_FAILURES_MAX)
-                    * eff("block_cadence_seconds")
-                < COVERAGE_COUNT_WINDOW_S
-        },
-    },
-    ComboRule {
-        participants: &[
-            "mirror_retention_days",
-            "appeal_window_days",
-            "appeal_seal_days",
-            "ruling_deadline_days",
-        ],
-        description: "mirror_retention_days must not be below appeal_window_days + appeal_seal_days + ruling_deadline_days",
-        holds: |eff| {
-            eff("mirror_retention_days")
-                >= eff("appeal_window_days") + eff("appeal_seal_days") + eff("ruling_deadline_days")
-        },
-    },
     ComboRule {
         participants: &["links_cap_bytes", "link_url_cap_bytes"],
         description: "links_cap_bytes must not be below link_url_cap_bytes + 21",
         holds: |eff| eff("links_cap_bytes") >= eff("link_url_cap_bytes") + 21,
     },
     ComboRule {
-        participants: &["link_variance_floor", "link_agreement_consistent"],
-        description: "link_variance_floor must be below link_agreement_consistent",
-        holds: |eff| eff("link_variance_floor") < eff("link_agreement_consistent"),
-    },
-    ComboRule {
-        participants: &[
-            "audit_domain_budget_bytes_day",
-            "audit_fetch_cap_bytes",
-            "extract_cap_bytes",
-            "links_cap_bytes",
-            "summary_cap_bytes",
-        ],
-        description: "audit_domain_budget_bytes_day must cover audit_fetch_cap_bytes + extract_cap_bytes + links_cap_bytes + summary_cap_bytes + 32",
-        holds: |eff| {
-            eff("audit_domain_budget_bytes_day")
-                >= eff("audit_fetch_cap_bytes")
-                    + eff("extract_cap_bytes")
-                    + eff("links_cap_bytes")
-                    + eff("summary_cap_bytes")
-                    + 32
-        },
-    },
-    ComboRule {
-        participants: &["confirm_window_hours", "record_seal_blocks", "block_cadence_seconds"],
-        description: "extension publication and sealing must fit the confirmation window",
-        holds: |eff| eff("confirm_window_hours") / 2 * 3600
-            + eff("record_seal_blocks") * eff("block_cadence_seconds")
-            <= eff("confirm_window_hours") * 3600,
-    },
-    ComboRule {
-        participants: &["canary_reveal_min_blocks", "block_cadence_seconds", "coverage_deadline_hours", "record_seal_blocks", "epoch_blocks"],
-        description: "canary reveal minimum must cover Record and checkpoint publication and sealing",
-        holds: |eff| eff("canary_reveal_min_blocks") * eff("block_cadence_seconds")
-            >= eff("coverage_deadline_hours") * 3600
-                + (eff("record_seal_blocks") + 2 * eff("epoch_blocks")) * eff("block_cadence_seconds"),
-    },
-    ComboRule {
-        participants: &["canary_lifetime_blocks", "canary_lead_blocks", "canary_reveal_min_blocks"],
-        description: "canary lifetime must exceed lead plus reveal minimum",
-        holds: |eff| eff("canary_lifetime_blocks")
-            > eff("canary_lead_blocks") + eff("canary_reveal_min_blocks"),
+        participants: &["mirror_retention_days", "payload_window_days"],
+        description: "mirror_retention_days must not be below payload_window_days / 6",
+        holds: |eff| eff("mirror_retention_days") * 6 >= eff("payload_window_days"),
     },
 ];
 
@@ -254,7 +92,7 @@ pub fn validate_value(name: &str, value: i64) -> Result<(), crate::Error> {
         || parameter.max.is_some_and(|max| value > max)
     {
         return Err(crate::Error::Parameter(format!(
-            "{name} = {value} is outside the WIST-4 §9 bounds"
+            "{name} = {value} is outside the WIST-4 §5 bounds"
         )));
     }
     Ok(())
@@ -308,43 +146,42 @@ mod tests {
     }
 
     #[test]
-    fn canary_reveal_and_lifetime_boundaries() {
-        assert!(validate("canary_reveal_min_blocks", 143, defaults).is_err());
-        validate("canary_reveal_min_blocks", 144, defaults).unwrap();
-        assert!(validate("canary_lifetime_blocks", 192, defaults).is_err());
-        validate("canary_lifetime_blocks", 193, defaults).unwrap();
-        for (name, value) in [
-            ("epoch_blocks", 37),
-            ("coverage_deadline_hours", 97),
-            ("block_cadence_seconds", 2699),
-            ("record_seal_blocks", 49),
-        ] {
-            assert!(validate(name, value, defaults).is_err(), "{name}");
-        }
-        validate("epoch_blocks", 36, defaults).unwrap();
-        validate("coverage_deadline_hours", 96, defaults).unwrap();
-        validate("block_cadence_seconds", 2700, defaults).unwrap();
-        assert!(validate("canary_lead_blocks", 1272, defaults).is_err());
-        validate("canary_lead_blocks", 1271, defaults).unwrap();
+    fn combination_boundaries() {
+        assert!(validate("link_url_cap_bytes", 4076, defaults).is_err());
+        validate("link_url_cap_bytes", 4075, defaults).unwrap();
+        assert!(validate("links_cap_bytes", 2068, defaults).is_err());
+        validate("links_cap_bytes", 2069, defaults).unwrap();
+        assert!(validate("payload_window_days", 541, defaults).is_err());
+        validate("payload_window_days", 540, defaults).unwrap();
+        assert!(validate("mirror_retention_days", 29, defaults).is_err());
+        validate("mirror_retention_days", 30, defaults).unwrap();
+        assert!(validate("mirror_retention_days", 30, |name| {
+            if name == "payload_window_days" {
+                181
+            } else {
+                defaults(name)
+            }
+        })
+        .is_err());
     }
 
     #[test]
     fn wire_sized_intermediates_do_not_overflow() {
-        validate("canary_leaves_max", WIRE_INTEGER_MAX, defaults).unwrap();
-        for name in ["epoch_blocks", "record_seal_blocks", "canary_lead_blocks"] {
-            assert!(validate(name, WIRE_INTEGER_MAX, defaults).is_err());
-        }
-        assert!(
-            validate("canary_reveal_min_blocks", WIRE_INTEGER_MAX, |name| {
-                if name == "canary_lifetime_blocks" {
-                    WIRE_INTEGER_MAX
-                } else {
-                    defaults(name)
-                }
-            })
-            .is_err()
-        );
+        validate("links_cap_bytes", WIRE_INTEGER_MAX, defaults).unwrap();
+        assert!(validate("link_url_cap_bytes", WIRE_INTEGER_MAX, defaults).is_err());
+        validate("mirror_retention_days", WIRE_INTEGER_MAX, defaults).unwrap();
+        assert!(validate("payload_window_days", WIRE_INTEGER_MAX, defaults).is_err());
         assert!(validate_combinations(|_| WIRE_INTEGER_MAX).is_err());
+        validate_combinations(|name| {
+            if name == "link_url_cap_bytes" {
+                WIRE_INTEGER_MAX - 21
+            } else if name == "links_cap_bytes" || name == "mirror_retention_days" {
+                WIRE_INTEGER_MAX
+            } else {
+                defaults(name)
+            }
+        })
+        .unwrap();
     }
 
     fn change(

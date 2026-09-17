@@ -111,10 +111,6 @@ impl Domain {
     pub fn delta_sealing_source(&self) -> Option<&Declaration> {
         self.window.is_none().then(|| self.current())
     }
-
-    pub fn appeal_declaration(&self) -> &Declaration {
-        self.window.as_ref().map_or(&self.current, |w| &w.head)
-    }
 }
 
 #[derive(Debug, Clone)]

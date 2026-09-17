@@ -308,34 +308,6 @@ fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
 }
 
 #[test]
-fn recovery_competitors_preserve_identity_and_settlement_has_no_reset() {
-    let vector = read_json("vectors/wist4/recovery-identity.json");
-    let days = vector["recovery_window_days"].as_i64().unwrap();
-    for case in vector["cases"].as_array().unwrap() {
-        let blocks = case["blocks"].as_array().unwrap();
-        let mut state = Declarations::default();
-        let mut resets = Vec::new();
-        for block in blocks {
-            for installation in apply(&mut state, block, days).unwrap().installations {
-                if installation.resets_identity {
-                    resets.push(installation.declaration.position().block_number);
-                }
-            }
-        }
-        assert_eq!(json!(resets), case["expected_resets"]);
-        for candidate in case["probes"].as_array().unwrap() {
-            let (state, _, _) = probe(blocks, days, candidate);
-            assert_eq!(
-                json!(state.domains()["example.com"]
-                    .reset()
-                    .map(|p| p.block_number)),
-                candidate["expected_reset"]
-            );
-        }
-    }
-}
-
-#[test]
 fn settlement_restores_authenticated_chain_and_reports_competitors() {
     let vector = read_json("vectors/wist1/recovery-settlement.json");
     let days = vector["recovery_window_days"].as_i64().unwrap();

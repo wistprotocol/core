@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum PublisherState {
     New,
     Active,
-    SanctionedQuarantine,
-    Delisted,
+    Refused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

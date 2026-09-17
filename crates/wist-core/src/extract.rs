@@ -1,7 +1,5 @@
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use unicode_normalization::UnicodeNormalization;
-use unicode_segmentation::UnicodeSegmentation;
 
 const UNRESERVED: &[u8; 66] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
@@ -634,95 +632,6 @@ pub fn extract_text(html: &[u8]) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn shingles<T: Eq + std::hash::Hash + Clone>(units: &[T], n: usize) -> HashSet<Vec<T>> {
-    let len = units.len();
-    let count = (len + 1).saturating_sub(n);
-    (0..count).map(|k| units[k..k + n].to_vec()).collect()
-}
-
-fn contained_micro<T: Eq + std::hash::Hash + Clone>(a_units: &[T], b_units: &[T], n: usize) -> u64 {
-    let a = shingles(a_units, n);
-    let b = shingles(b_units, n);
-    let inter = a.intersection(&b).count() as u64;
-    (inter * 1_000_000) / (a.len() as u64)
-}
-
-/// The Unicode version every property §5 reads is sourced from. NFC,
-/// default full case-folding, UAX #29 segmentation and General Category
-/// all change between versions, so a build mixing two of them derives a
-/// similarity no other party can reproduce.
-pub const UNICODE_VERSION: (u8, u8, u8) = (16, 0, 0);
-/// WIST-4 §9 `shingle_size` default: the shingle length in words, and in
-/// extended grapheme clusters on §5's short-text branch.
-pub const SHINGLE_SIZE: usize = 8;
-
-/// WIST-4 §5 normalization: NFC, default full case-folding, untailored
-/// UAX #29 word segmentation, then every segment carrying no L\* or N\*
-/// character discarded. `form` is the word sequence joined by U+0020.
-struct NormalizedText {
-    words: Vec<String>,
-    form: String,
-}
-
-fn letter_or_number(c: char) -> bool {
-    use unicode_general_category::GeneralCategory::*;
-    matches!(
-        unicode_general_category::get_general_category(c),
-        UppercaseLetter
-            | LowercaseLetter
-            | TitlecaseLetter
-            | ModifierLetter
-            | OtherLetter
-            | DecimalNumber
-            | LetterNumber
-            | OtherNumber
-    )
-}
-
-fn normalize_text(text: &str) -> NormalizedText {
-    let nfc: String = text.nfc().collect();
-    let folded = caseless::default_case_fold_str(&nfc);
-    let words: Vec<String> = folded
-        .split_word_bounds()
-        .filter(|segment| segment.chars().any(letter_or_number))
-        .map(str::to_string)
-        .collect();
-    let form = words.join(" ");
-    NormalizedText { words, form }
-}
-
-/// WIST-4 §5 reference-containment similarity in micro-units, or `None`
-/// where the section rules the audit `not_auditable`: an empty reference
-/// text, or an observed text below `min_observed_words`.
-pub fn similarity(
-    reference: &str,
-    observed: &str,
-    min_observed_words: u64,
-    shingle_size: usize,
-) -> Option<u64> {
-    let reference = normalize_text(reference);
-    let observed = normalize_text(observed);
-    if reference.words.is_empty() {
-        return None;
-    }
-    if (observed.words.len() as u64) < min_observed_words {
-        return None;
-    }
-    if reference.words.len() >= shingle_size && observed.words.len() >= shingle_size {
-        return Some(contained_micro(
-            &reference.words,
-            &observed.words,
-            shingle_size,
-        ));
-    }
-    let reference_clusters: Vec<&str> = reference.form.graphemes(true).collect();
-    let observed_clusters: Vec<&str> = observed.form.graphemes(true).collect();
-    let n = shingle_size
-        .min(reference_clusters.len())
-        .min(observed_clusters.len());
-    Some(contained_micro(&reference_clusters, &observed_clusters, n))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,83 +724,6 @@ mod tests {
         assert_eq!(
             extract_links(arabic, BASE, "example.com").0,
             vec!["https://example.org/x?y=&"]
-        );
-    }
-
-    const SHINGLE: usize = SHINGLE_SIZE;
-    const UNICODE_VERSION_WIDE: (u64, u64, u64) = (
-        UNICODE_VERSION.0 as u64,
-        UNICODE_VERSION.1 as u64,
-        UNICODE_VERSION.2 as u64,
-    );
-
-    #[test]
-    fn every_unicode_property_source_carries_one_version() {
-        assert_eq!(unicode_normalization::UNICODE_VERSION, UNICODE_VERSION);
-        assert_eq!(unicode_segmentation::UNICODE_VERSION, UNICODE_VERSION_WIDE);
-        assert_eq!(caseless::UNICODE_VERSION, UNICODE_VERSION_WIDE);
-        assert_eq!(
-            unicode_general_category::UNICODE_VERSION,
-            UNICODE_VERSION_WIDE
-        );
-    }
-
-    #[test]
-    fn full_case_folding_folds_sharp_s_to_ss() {
-        let reference = "die straße ist lang und breit und schön";
-        let observed = "DIE STRASSE IST LANG UND BREIT UND SCHÖN";
-        assert_eq!(similarity(reference, observed, 1, SHINGLE), Some(1_000_000));
-    }
-
-    #[test]
-    fn nfc_precomposes_before_the_texts_are_compared() {
-        let reference = "cafe\u{301} au lait est tres bon ici aujourd hui";
-        let observed = "café au lait est tres bon ici aujourd hui";
-        assert_eq!(similarity(reference, observed, 1, SHINGLE), Some(1_000_000));
-    }
-
-    #[test]
-    fn han_characters_each_stand_as_their_own_word() {
-        let text = "天地玄黄宇宙洪荒";
-        assert_eq!(similarity(text, text, 8, SHINGLE), Some(1_000_000));
-    }
-
-    #[test]
-    fn segments_carrying_no_letter_or_number_are_discarded() {
-        let reference = "alpha, beta; gamma. delta! epsilon? zeta: eta - theta";
-        let observed = "alpha beta gamma delta epsilon zeta eta theta";
-        assert_eq!(similarity(reference, observed, 1, SHINGLE), Some(1_000_000));
-    }
-
-    #[test]
-    fn the_short_branch_shingles_extended_grapheme_clusters_not_code_points() {
-        let reference = "q\u{330}w\u{330}r\u{330}t\u{330}";
-        let observed = "q\u{330}w\u{330}r\u{330}";
-        assert_eq!(similarity(reference, observed, 1, SHINGLE), Some(500_000));
-    }
-
-    #[test]
-    fn an_amended_shingle_size_changes_both_the_branch_and_the_length() {
-        let reference = "one two three four five six seven eight nine";
-        let observed = "one two three four five six seven eight ten";
-        assert_eq!(similarity(reference, observed, 1, 8), Some(500_000));
-        assert_eq!(similarity(reference, observed, 1, 9), Some(0));
-    }
-
-    #[test]
-    fn similarity_empty_reference_is_none() {
-        assert_eq!(
-            similarity("", "some observed words to satisfy the guard", 3, SHINGLE),
-            None
-        );
-        assert_eq!(
-            similarity(
-                "   ",
-                "some observed words to satisfy the guard",
-                3,
-                SHINGLE
-            ),
-            None
         );
     }
 }

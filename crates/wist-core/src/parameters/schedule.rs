@@ -1,4 +1,4 @@
-use super::{spec, validate_combinations, validate_value, PARAMS};
+use super::{spec, validate_combinations, validate_value};
 use crate::Error;
 use std::collections::BTreeSet;
 
@@ -163,57 +163,8 @@ impl Schedule {
         for at_s in instants {
             validate_combinations(|name| self.value_at(name, at_s).unwrap())?;
         }
-        let boundaries: BTreeSet<i64> = std::iter::once(self.first_block_s)
-            .chain(self.accepted.iter().map(|a| a.effective_at_s))
-            .collect();
-        let mut previous = None;
-        let mut profiles = Vec::new();
-        for from_s in boundaries {
-            let values: Vec<i64> = PARAMS
-                .iter()
-                .map(|p| self.value_at(p.name, from_s).unwrap())
-                .collect();
-            if previous.as_ref() == Some(&values) {
-                continue;
-            }
-            profiles.push(CadenceProfile {
-                from_s,
-                confirm_window_hours: self.value_at("confirm_window_hours", from_s).unwrap(),
-                record_seal_blocks: self.value_at("record_seal_blocks", from_s).unwrap(),
-                block_cadence_seconds: self.value_at("block_cadence_seconds", from_s).unwrap(),
-            });
-            previous = Some(values);
-        }
-        validate_cadence_transitions(&profiles)
+        Ok(())
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct CadenceProfile {
-    pub from_s: i64,
-    pub confirm_window_hours: i64,
-    pub record_seal_blocks: i64,
-    pub block_cadence_seconds: i64,
-}
-
-pub fn validate_cadence_transitions(profiles: &[CadenceProfile]) -> Result<(), Error> {
-    for (i, profile) in profiles.iter().enumerate() {
-        let window = i128::from(profile.confirm_window_hours) * 3600;
-        let publication = i128::from(profile.confirm_window_hours / 2) * 3600;
-        let end = profiles.get(i + 1).map(|p| i128::from(p.from_s) + window);
-        let cadence = profiles[i..]
-            .iter()
-            .take_while(|p| end.is_none_or(|end| i128::from(p.from_s) < end))
-            .map(|p| i128::from(p.block_cadence_seconds))
-            .max()
-            .unwrap();
-        if publication + i128::from(profile.record_seal_blocks) * cadence > window {
-            return Err(Error::Parameter(
-                "cadence transition outlives an extension window".into(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -265,15 +216,15 @@ mod tests {
         let replay = Schedule::replay(
             0,
             &[
-                change("sampling_floor", 4_000_000, 0, 0, 10 * DAY),
-                change("sampling_floor", 6_000_000, 1, DAY, 10 * DAY),
+                change("links_cap_bytes", 3000, 0, 0, 10 * DAY),
+                change("links_cap_bytes", 2000, 1, DAY, 10 * DAY),
             ],
         );
         assert_eq!(replay.rejected, [1]);
         assert_eq!(replay.schedule.accepted().len(), 1);
         assert_eq!(
-            replay.schedule.value_at("sampling_floor", 10 * DAY),
-            Some(4_000_000)
+            replay.schedule.value_at("links_cap_bytes", 10 * DAY),
+            Some(3000)
         );
     }
 
@@ -282,51 +233,31 @@ mod tests {
         let replay = Schedule::replay(
             0,
             &[
-                change("sampling_floor", 4_000_000, 0, 0, 10 * DAY),
-                change("sampling_floor", 200_000, 1, DAY, 12 * DAY),
-                change("sampling_ceiling", 3_000_000, 2, 2 * DAY, 11 * DAY),
+                change("link_url_cap_bytes", 3000, 0, 0, 10 * DAY),
+                change("link_url_cap_bytes", 1000, 1, DAY, 12 * DAY),
+                change("links_cap_bytes", 3000, 2, 2 * DAY, 11 * DAY),
             ],
         );
         assert_eq!(replay.rejected, [2]);
         assert_eq!(
-            replay.schedule.value_at("sampling_ceiling", 12 * DAY),
-            Some(5_000_000)
-        );
-    }
-
-    #[test]
-    fn cadence_rejection_keeps_old_profiles_and_pending_changes() {
-        let replay = Schedule::replay(
-            0,
-            &[
-                change("confirm_window_hours", 96, 0, 0, 10 * DAY),
-                change("block_cadence_seconds", 7200, 1, DAY, 13 * DAY - 1),
-                change("block_cadence_seconds", 7200, 2, 2 * DAY, 13 * DAY),
-            ],
-        );
-        assert_eq!(replay.rejected, [1]);
-        assert_eq!(
-            replay
-                .schedule
-                .value_at("block_cadence_seconds", 13 * DAY - 1),
-            Some(3600)
-        );
-        assert_eq!(
-            replay.schedule.value_at("block_cadence_seconds", 13 * DAY),
-            Some(7200)
+            replay.schedule.value_at("links_cap_bytes", 12 * DAY),
+            Some(4096)
         );
     }
 
     #[test]
     fn rejected_candidates_cannot_be_resubmitted_out_of_order() {
         let mut schedule = Schedule::new(0);
-        let floor = change("sampling_floor", 6_000_000, 0, 0, 10 * DAY);
-        assert!(schedule.try_accept(floor.clone()).is_err());
+        let window = change("payload_window_days", 541, 0, 0, 10 * DAY);
+        assert!(schedule.try_accept(window.clone()).is_err());
         schedule
-            .try_accept(change("sampling_ceiling", 7_000_000, 1, DAY, 10 * DAY))
+            .try_accept(change("mirror_retention_days", 120, 1, DAY, 10 * DAY))
             .unwrap();
-        assert!(schedule.try_accept(floor).is_err());
-        assert_eq!(schedule.value_at("sampling_floor", 10 * DAY), Some(200_000));
+        assert!(schedule.try_accept(window).is_err());
+        assert_eq!(
+            schedule.value_at("payload_window_days", 10 * DAY),
+            Some(180)
+        );
     }
 
     #[test]
@@ -358,16 +289,9 @@ mod tests {
             &[
                 change("param_grace_days", max, 0, 0, 7 * DAY),
                 change("quota_base", 101, 1, 7 * DAY, i64::MAX),
-                change("confirm_window_hours", max, 2, 7 * DAY + 1, i64::MAX),
+                change("payload_window_days", max, 2, 7 * DAY + 1, i64::MAX),
             ],
         );
         assert_eq!(replay.rejected, [1, 2]);
-        validate_cadence_transitions(&[CadenceProfile {
-            from_s: i64::MAX,
-            confirm_window_hours: max,
-            record_seal_blocks: max,
-            block_cadence_seconds: 1,
-        }])
-        .unwrap();
     }
 }

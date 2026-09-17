@@ -4,7 +4,7 @@ use crate::jcs;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub const RECORD_FIELDS: [&str; 5] = ["url", "publisher", "delta_id", "observed_at", "weight"];
+pub const RECORD_FIELDS: [&str; 4] = ["url", "publisher", "delta_id", "observed_at"];
 
 pub fn check_record_shape(r: &Value) -> Result<(), Error> {
     let obj = r

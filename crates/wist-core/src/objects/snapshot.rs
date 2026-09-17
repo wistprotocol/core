@@ -76,28 +76,11 @@ pub struct SnapshotManifestEnvelope {
     pub sig: Sig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SanctionDeadlineLabel {
-    Appeal,
-    AppealSealing,
-    Ruling,
-}
-
 #[derive(Debug, Clone)]
 pub struct AggregatorKeyEntry {
     pub key_id: String,
     pub public_key: String,
     pub added_height: u64,
-    pub removed_height: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AuditorEntry {
-    pub auditor_id: String,
-    pub key_id: String,
-    pub public_key: String,
-    pub admitted_height: u64,
     pub removed_height: Option<u64>,
 }
 
@@ -117,14 +100,6 @@ pub struct ParameterEntry {
 }
 
 #[derive(Debug, Clone)]
-pub struct SanctionStateEntry {
-    pub domain: String,
-    pub level: u64,
-    pub evidence: Vec<String>,
-    pub deadlines: Vec<(SanctionDeadlineLabel, String)>,
-}
-
-#[derive(Debug, Clone)]
 pub struct RecoveryWindowEntry {
     pub domain: String,
     pub declaration_height: u64,
@@ -134,26 +109,20 @@ pub struct RecoveryWindowEntry {
 }
 
 #[derive(Debug, Clone)]
-pub struct ExclusionEntry {
+pub struct WithdrawalEntry {
+    pub delta_id: String,
     pub publisher: String,
-    pub url: String,
-    pub excluded_since_height: u64,
+    pub sealing_height: u64,
 }
 
 #[derive(Debug, Clone)]
-pub struct CoverageFailureEntry {
-    pub auditor_id: String,
-    pub block_number: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReputationInputsEntry {
-    pub domain: String,
-    pub first_accepted_sealed_at: String,
-    pub reset_height: Option<u64>,
-    pub counted_total: u64,
-    pub counted_url_digests: Vec<String>,
-    pub penalties: Vec<(String, u64)>,
+pub struct LabelEntry {
+    pub labeler: String,
+    pub subject: String,
+    pub name: String,
+    pub value: Option<u64>,
+    pub asserted_at: String,
+    pub sealing_height: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -163,44 +132,15 @@ pub struct RecordEntry {
     pub delta_id: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct EscalationEntry {
-    pub domain: String,
-    pub establishing_sealed_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ObserverEntry {
-    pub observer_id: String,
-    pub key_id: String,
-    pub public_key: String,
-    pub registered_height: u64,
-    pub ended_height: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CanaryCommitmentEntry {
-    pub update_id: String,
-    pub planter: String,
-    pub root: String,
-    pub leaves: u64,
-    pub sealing_height: u64,
-}
-
+/// One live-state tuple of WIST-3 §7's inventory, in the table's order.
 #[derive(Debug, Clone)]
 pub enum StateEntry {
-    CanaryCommitment(CanaryCommitmentEntry),
-    Observer(ObserverEntry),
-    Escalation(EscalationEntry),
     AggregatorKey(AggregatorKeyEntry),
-    Auditor(AuditorEntry),
     Declaration(DeclarationEntry),
     Parameter(ParameterEntry),
-    SanctionState(SanctionStateEntry),
     RecoveryWindow(RecoveryWindowEntry),
-    Exclusion(ExclusionEntry),
-    CoverageFailure(CoverageFailureEntry),
-    ReputationInputs(ReputationInputsEntry),
+    Withdrawal(WithdrawalEntry),
+    Label(LabelEntry),
     Record(RecordEntry),
 }
 
@@ -232,36 +172,6 @@ impl<'de> Deserialize<'de> for StateEntry {
             .to_string();
         let tail = &items[1..];
         match kind.as_str() {
-            "canary_commitment" => {
-                check_arity::<D::Error>(&kind, tail, 5)?;
-                Ok(StateEntry::CanaryCommitment(CanaryCommitmentEntry {
-                    update_id: field(tail, 0)?,
-                    planter: field(tail, 1)?,
-                    root: field(tail, 2)?,
-                    leaves: field(tail, 3)?,
-                    sealing_height: field(tail, 4)?,
-                }))
-            }
-
-            "observer" => {
-                check_arity::<D::Error>(&kind, tail, 5)?;
-                Ok(StateEntry::Observer(ObserverEntry {
-                    observer_id: field(tail, 0)?,
-                    key_id: field(tail, 1)?,
-                    public_key: field(tail, 2)?,
-                    registered_height: field(tail, 3)?,
-                    ended_height: field(tail, 4)?,
-                }))
-            }
-
-            "escalation" => {
-                check_arity::<D::Error>(&kind, tail, 2)?;
-                Ok(StateEntry::Escalation(EscalationEntry {
-                    domain: field(tail, 0)?,
-                    establishing_sealed_at: field(tail, 1)?,
-                }))
-            }
-
             "aggregator_key" => {
                 check_arity::<D::Error>(&kind, tail, 4)?;
                 Ok(StateEntry::AggregatorKey(AggregatorKeyEntry {
@@ -269,16 +179,6 @@ impl<'de> Deserialize<'de> for StateEntry {
                     public_key: field(tail, 1)?,
                     added_height: field(tail, 2)?,
                     removed_height: field(tail, 3)?,
-                }))
-            }
-            "auditor" => {
-                check_arity::<D::Error>(&kind, tail, 5)?;
-                Ok(StateEntry::Auditor(AuditorEntry {
-                    auditor_id: field(tail, 0)?,
-                    key_id: field(tail, 1)?,
-                    public_key: field(tail, 2)?,
-                    admitted_height: field(tail, 3)?,
-                    removed_height: field(tail, 4)?,
                 }))
             }
             "declaration" => {
@@ -298,15 +198,6 @@ impl<'de> Deserialize<'de> for StateEntry {
                     value: field(tail, 2)?,
                 }))
             }
-            "sanction_state" => {
-                check_arity::<D::Error>(&kind, tail, 4)?;
-                Ok(StateEntry::SanctionState(SanctionStateEntry {
-                    domain: field(tail, 0)?,
-                    level: field(tail, 1)?,
-                    evidence: field(tail, 2)?,
-                    deadlines: field(tail, 3)?,
-                }))
-            }
             "recovery_window" => {
                 check_arity::<D::Error>(&kind, tail, 5)?;
                 Ok(StateEntry::RecoveryWindow(RecoveryWindowEntry {
@@ -317,30 +208,23 @@ impl<'de> Deserialize<'de> for StateEntry {
                     head_height: field(tail, 4)?,
                 }))
             }
-            "exclusion" => {
+            "withdrawal" => {
                 check_arity::<D::Error>(&kind, tail, 3)?;
-                Ok(StateEntry::Exclusion(ExclusionEntry {
-                    publisher: field(tail, 0)?,
-                    url: field(tail, 1)?,
-                    excluded_since_height: field(tail, 2)?,
+                Ok(StateEntry::Withdrawal(WithdrawalEntry {
+                    delta_id: field(tail, 0)?,
+                    publisher: field(tail, 1)?,
+                    sealing_height: field(tail, 2)?,
                 }))
             }
-            "coverage_failure" => {
-                check_arity::<D::Error>(&kind, tail, 2)?;
-                Ok(StateEntry::CoverageFailure(CoverageFailureEntry {
-                    auditor_id: field(tail, 0)?,
-                    block_number: field(tail, 1)?,
-                }))
-            }
-            "reputation_inputs" => {
+            "label" => {
                 check_arity::<D::Error>(&kind, tail, 6)?;
-                Ok(StateEntry::ReputationInputs(ReputationInputsEntry {
-                    domain: field(tail, 0)?,
-                    first_accepted_sealed_at: field(tail, 1)?,
-                    reset_height: field(tail, 2)?,
-                    counted_total: field(tail, 3)?,
-                    counted_url_digests: field(tail, 4)?,
-                    penalties: field(tail, 5)?,
+                Ok(StateEntry::Label(LabelEntry {
+                    labeler: field(tail, 0)?,
+                    subject: field(tail, 1)?,
+                    name: field(tail, 2)?,
+                    value: field(tail, 3)?,
+                    asserted_at: field(tail, 4)?,
+                    sealing_height: field(tail, 5)?,
                 }))
             }
             "record" => {
@@ -361,41 +245,11 @@ impl<'de> Deserialize<'de> for StateEntry {
 impl Serialize for StateEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let value = match self {
-            StateEntry::CanaryCommitment(e) => serde_json::json!([
-                "canary_commitment",
-                e.update_id,
-                e.planter,
-                e.root,
-                e.leaves,
-                e.sealing_height
-            ]),
-
-            StateEntry::Observer(e) => serde_json::json!([
-                "observer",
-                e.observer_id,
-                e.key_id,
-                e.public_key,
-                e.registered_height,
-                e.ended_height
-            ]),
-
-            StateEntry::Escalation(e) => {
-                serde_json::json!(["escalation", e.domain, e.establishing_sealed_at])
-            }
-
             StateEntry::AggregatorKey(e) => serde_json::json!([
                 "aggregator_key",
                 e.key_id,
                 e.public_key,
                 e.added_height,
-                e.removed_height
-            ]),
-            StateEntry::Auditor(e) => serde_json::json!([
-                "auditor",
-                e.auditor_id,
-                e.key_id,
-                e.public_key,
-                e.admitted_height,
                 e.removed_height
             ]),
             StateEntry::Declaration(e) => serde_json::json!([
@@ -408,9 +262,6 @@ impl Serialize for StateEntry {
             StateEntry::Parameter(e) => {
                 serde_json::json!(["parameter", e.name, e.effective_at, e.value])
             }
-            StateEntry::SanctionState(e) => {
-                serde_json::json!(["sanction_state", e.domain, e.level, e.evidence, e.deadlines])
-            }
             StateEntry::RecoveryWindow(e) => serde_json::json!([
                 "recovery_window",
                 e.domain,
@@ -419,20 +270,17 @@ impl Serialize for StateEntry {
                 e.head,
                 e.head_height
             ]),
-            StateEntry::Exclusion(e) => {
-                serde_json::json!(["exclusion", e.publisher, e.url, e.excluded_since_height])
+            StateEntry::Withdrawal(e) => {
+                serde_json::json!(["withdrawal", e.delta_id, e.publisher, e.sealing_height])
             }
-            StateEntry::CoverageFailure(e) => {
-                serde_json::json!(["coverage_failure", e.auditor_id, e.block_number])
-            }
-            StateEntry::ReputationInputs(e) => serde_json::json!([
-                "reputation_inputs",
-                e.domain,
-                e.first_accepted_sealed_at,
-                e.reset_height,
-                e.counted_total,
-                e.counted_url_digests,
-                e.penalties
+            StateEntry::Label(e) => serde_json::json!([
+                "label",
+                e.labeler,
+                e.subject,
+                e.name,
+                e.value,
+                e.asserted_at,
+                e.sealing_height
             ]),
             StateEntry::Record(e) => {
                 serde_json::json!(["record", e.publisher, e.url, e.delta_id])
@@ -464,31 +312,11 @@ mod tests {
     #[test]
     fn state_entry_round_trips_every_kind() {
         let pk = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
-        let evidence_digest = format!("sha256:{}", "a".repeat(64));
-        let url_digest = "b".repeat(32);
         let delta_id = format!("sha256:{}", "c".repeat(64));
         let cases = [
-            serde_json::json!(["escalation", "example.com", "2026-08-02T12:00:00Z"]),
-            serde_json::json!(["observer", "watch.example.net", "key-3", pk, 5, Value::Null]),
-            serde_json::json!([
-                "canary_commitment",
-                delta_id,
-                "plant.example.org",
-                evidence_digest,
-                3,
-                8
-            ]),
             serde_json::json!(["aggregator_key", "key-1", pk, 10, Value::Null]),
-            serde_json::json!(["auditor", "auditor.example.com", "key-2", pk, 5, 20]),
             serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42, 43]),
-            serde_json::json!(["parameter", "max_shard_bytes", "2026-08-09T13:00:00Z", -5]),
-            serde_json::json!([
-                "sanction_state",
-                "example.com",
-                2,
-                [evidence_digest],
-                [["appeal", "2026-08-02T12:00:00Z"]]
-            ]),
+            serde_json::json!(["parameter", "quota_base", "2026-08-09T13:00:00Z", -5]),
             serde_json::json!([
                 "recovery_window",
                 "example.com",
@@ -497,16 +325,15 @@ mod tests {
                 {"policy": "head"},
                 9
             ]),
-            serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
-            serde_json::json!(["coverage_failure", "auditor.example.com", 12]),
+            serde_json::json!(["withdrawal", delta_id, "example.com", 3]),
             serde_json::json!([
-                "reputation_inputs",
-                "example.com",
-                "2026-08-02T12:00:00Z",
+                "label",
+                "labeler.example.net",
+                "https://example.com/blog/post-1",
+                "wist:spam",
                 Value::Null,
-                9,
-                [url_digest],
-                [["2026-08-02T12:00:00Z", 1]]
+                "2026-08-02T12:00:00Z",
+                12
             ]),
             serde_json::json!([
                 "record",
@@ -515,11 +342,22 @@ mod tests {
                 delta_id
             ]),
         ];
-        assert_eq!(cases.len(), 13);
+        assert_eq!(cases.len(), 7);
         for tuple in cases {
             let entry: StateEntry =
                 serde_json::from_value(tuple.clone()).unwrap_or_else(|e| panic!("{tuple}: {e}"));
             assert_eq!(serde_json::to_value(&entry).unwrap(), tuple);
+        }
+    }
+
+    #[test]
+    fn unknown_and_short_tuples_are_rejected() {
+        for tuple in [
+            serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
+            serde_json::json!(["withdrawal", "sha256:00", "example.com"]),
+            serde_json::json!([]),
+        ] {
+            assert!(serde_json::from_value::<StateEntry>(tuple).is_err());
         }
     }
 }
