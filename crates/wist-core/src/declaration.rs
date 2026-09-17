@@ -33,12 +33,23 @@ pub fn verify_delta_predecessor(doc: &Value, predecessor: &Value) -> Result<(), 
 }
 
 /// Complete Declaration field validation (`WIST1-E05` for
-/// non-canonicalizable input, `WIST1-E14` otherwise).
+/// non-canonicalizable input, `WIST1-E14` otherwise), with WIST-1 §3.1's
+/// major-version support: this revision implements major `1` alone, and a
+/// differing minor or patch component never rejects (`WIST1-E15`).
 pub fn validate_fields(doc: &Value) -> Result<PublisherEnvelope, Rejection> {
     let canonical = crate::jcs::canonicalize(doc).map_err(|e| ("WIST1-E05", e.to_string()))?;
     let envelope: PublisherEnvelope =
         serde_json::from_slice(&canonical).map_err(|e| ("WIST1-E14", e.to_string()))?;
     validate_structure(doc, &envelope).map_err(|e| ("WIST1-E14", e))?;
+    if envelope.publisher.wist_version.split('.').next() != Some("1") {
+        return Err((
+            "WIST1-E15",
+            format!(
+                "wist_version {} is a major version this revision does not implement",
+                envelope.publisher.wist_version
+            ),
+        ));
+    }
     for key in envelope
         .publisher
         .keys

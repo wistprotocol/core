@@ -395,9 +395,6 @@ impl Declarations {
                 continue;
             }
             let envelope = validate_fields(&entry["body"]).map_err(rejection)?;
-            if envelope.publisher.wist_version != crate::WIST_VERSION {
-                return Err(Error::History("unsupported Declaration version".into()));
-            }
             groups
                 .entry((envelope.publisher.domain, envelope.publisher.seq))
                 .or_default()
