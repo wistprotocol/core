@@ -498,6 +498,15 @@ pub fn check_sequence(
     Ok(())
 }
 
+pub fn check_size_zero_root(checkpoint: &Checkpoint) -> Result<(), Error> {
+    if checkpoint.tree_size() != 0 {
+        return Ok(());
+    }
+    merkle::verify_consistency(0, 0, &merkle::EMPTY_ROOT, checkpoint.root(), &[]).map_err(|_| {
+        divergence("a Checkpoint states tree size 0 with another root than the empty tree's")
+    })
+}
+
 pub fn check_consistency(
     previous: &Checkpoint,
     next: &Checkpoint,
@@ -665,6 +674,27 @@ mod tests {
             check_consistency(&stated, &four, &[]).unwrap_err().code(),
             Some("WIST3-E02")
         );
+    }
+
+    #[test]
+    fn a_size_zero_checkpoint_is_divergence_unless_it_states_the_empty_root() {
+        let empty = Checkpoint::new(
+            "log.example.org",
+            0,
+            merkle::EMPTY_ROOT,
+            0,
+            "2026-08-02T13:00:00Z",
+        )
+        .unwrap();
+        check_size_zero_root(&empty).unwrap();
+        let stated =
+            Checkpoint::new("log.example.org", 0, ROOT, 0, "2026-08-02T13:00:00Z").unwrap();
+        assert_eq!(
+            check_size_zero_root(&stated).unwrap_err().code(),
+            Some("WIST3-E02")
+        );
+        let (populated, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        check_size_zero_root(&populated).unwrap();
     }
 
     #[test]

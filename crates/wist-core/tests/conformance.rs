@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+#[path = "conformance/aggregator_keys.rs"]
+mod aggregator_keys;
 #[path = "conformance/declarations.rs"]
 mod declarations;
 #[path = "conformance/key_directory.rs"]

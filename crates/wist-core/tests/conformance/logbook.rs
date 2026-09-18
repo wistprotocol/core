@@ -101,21 +101,52 @@ fn each_block_of_the_vector_log_states_its_cumulative_tree() {
 
 #[test]
 fn consistency_proofs_verify_or_report_chain_divergence() {
+    let mut compared_the_size_zero_root = false;
     for case in vector()["consistency_cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
+        let m = case["m"].as_u64().unwrap();
         let m_root = hash_list(&serde_json::json!([case["m_root"]]))[0];
         let n_root = hash_list(&serde_json::json!([case["n_root"]]))[0];
         let path = hash_list(&case["path"]);
-        let result = merkle::verify_consistency(
-            case["m"].as_u64().unwrap(),
-            case["n"].as_u64().unwrap(),
-            &m_root,
-            &n_root,
-            &path,
-        );
+        let result =
+            merkle::verify_consistency(m, case["n"].as_u64().unwrap(), &m_root, &n_root, &path);
         let outcome = if result.is_ok() { "valid" } else { "WIST3-E02" };
         assert_eq!(case["expected"], outcome, "{name}");
+        if m == 0 && m_root != merkle::EMPTY_ROOT {
+            assert_eq!(case["expected"], "WIST3-E02", "{name}");
+            compared_the_size_zero_root = true;
+        }
     }
+    assert!(
+        compared_the_size_zero_root,
+        "no case offers size 0 with a root other than SHA-256(\"\")"
+    );
+}
+
+#[test]
+fn a_checkpoint_stating_tree_size_zero_states_the_empty_trees_root() {
+    let mut outcomes = std::collections::BTreeSet::new();
+    for case in vector()["size_zero_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let checkpoint = verified(case["checkpoint"].as_str().unwrap(), &[])
+            .unwrap_or_else(|code| panic!("{name}: the note is validly signed, got {code}"));
+        assert_eq!(checkpoint.tree_size(), 0, "{name}");
+        let outcome = match checkpoint::check_size_zero_root(&checkpoint) {
+            Ok(()) => {
+                assert_eq!(*checkpoint.root(), merkle::EMPTY_ROOT, "{name}");
+                "valid".to_string()
+            }
+            Err(error) => error.code().unwrap().to_string(),
+        };
+        assert_eq!(case["expected"], outcome, "{name}");
+        outcomes.insert(outcome);
+    }
+    assert_eq!(
+        outcomes,
+        ["valid".to_string(), "WIST3-E02".to_string()]
+            .into_iter()
+            .collect()
+    );
 }
 
 #[test]
