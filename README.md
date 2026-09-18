@@ -41,7 +41,8 @@ exercise both Unicode 16 additions and Unicode 17 exclusions.
 `merkle_root` over leaf hashes at any size with `EMPTY_ROOT` =
 `SHA-256("")` for the empty tree, `inclusion_proof`/`verify_inclusion` with
 every §4 rejection, and `consistency_proof`/`verify_consistency` under RFC
-9162 §2.1.4.2. The same roots and proofs are computed from stored hashes
+9162 §2.1.4.2, where a stated size of zero must carry `EMPTY_ROOT` on
+either side of the proof. The same roots and proofs are computed from stored hashes
 through the `HashReader` trait — `node(level, index)` is the root of the
 complete subtree over `[index·2^level, (index+1)·2^level)` — by
 `root_from`, `inclusion_proof_from` and `consistency_proof_from`, so a
@@ -69,7 +70,9 @@ equivocation forms, `check_sequence` §3.1's Block-to-Block rules
 (sequential number, a tree that never shrinks, a strictly increasing
 `sealed_at` on the cadence grid), `check_consistency` the Consistency
 Proof between two Checkpoints, and `archive_path`/`check_archive_path`
-§6's per-Block archive path.
+§6's per-Block archive path. A tree below the previous Checkpoint's size
+is the §5 divergence `WIST3-E02`, in `check_sequence` and in
+`block::verify_block`; the other sequence failures carry no code.
 
 `tiles` is the [tlog-tiles] surface (WIST-3 §6): `Tile` and `Bundle` with
 their paths, including the `x`-prefixed three-digit groups above index
@@ -102,8 +105,40 @@ Snapshot manifest that names another tree than the Checkpoint at its
 the `subject` shape, key fields, parameter identifier and bounds, and the
 withdrawal's Delta ID and Canonical Host, and the suffix-list snapshot's
 identifier and byte count; a violation is WIST4-E04.
-Authentication under a Log key valid at the act's Block, the grace period
-and the Delta a withdrawal names remain caller checks.
+`aggregator_keys::authenticate` verifies one act's Envelope against an
+explicit key set, naming its signer by `sig.key_id`; a failure is
+WIST4-E11. The grace period and the Delta a withdrawal names remain
+caller checks.
+
+## The Aggregator key registry
+
+`aggregator_keys::Registry` is WIST-3 §3.4's key validity by height,
+shared by every party that verifies a Checkpoint or a governance act. It
+holds every key the Log ever admitted — `key_id`, public key,
+`added_height` and `removed_height` — built by `from_genesis` from the
+Anchor's genesis key at height 0 or by `from_entries` from the WIST-3 §7
+`aggregator_key` tuples, retired keys included, which `entries` writes
+back. `valid_at` returns the keys a Checkpoint at a height may be signed
+under: admitted at or below it and retired above it, removal being
+permanent and the genesis key removable like any other;
+`public_key_at` resolves one `key_id` at a height for the other acts of
+that Block.
+
+`apply_block` replays a Block's `aggregator_key_add` and
+`aggregator_key_remove` acts in canonical Entry order and returns one
+outcome per act. Every act is authenticated under the keys valid at the
+Block before it — the genesis key alone for Block 0 — so a key admitted
+in the same Block never authenticates one, and a key retired in the same
+Block still does, which lets a key sign its own removal and makes the
+result independent of Entry order. An act that survives authentication is
+then read against every key ever admitted plus the acts already accepted
+in the Block: an add naming an admitted `key_id`, an add whose note key
+ID (`checkpoint::aggregator_key_id`) an admitted key already derives, and
+a remove of a `key_id` not valid at the Block before are all conflicts.
+An unauthenticated act is ignored as WIST4-E11 and a conflicting one
+as WIST4-E04 (`KEY_ACT_CONFLICT_CODE`); either way the registry is unchanged and
+the Block stays valid. Accepted acts take effect together at the Block's
+own height.
 
 ## Withdrawal replay
 
