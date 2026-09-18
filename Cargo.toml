@@ -1,3 +1,15 @@
 [workspace]
 resolver = "2"
 members = ["crates/wist-core"]
+
+[profile.test]
+opt-level = 2
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3

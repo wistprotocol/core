@@ -4,6 +4,8 @@ use std::path::PathBuf;
 mod declarations;
 #[path = "conformance/key_directory.rs"]
 mod key_directory;
+#[path = "conformance/logbook.rs"]
+mod logbook;
 #[path = "conformance/parameters.rs"]
 mod parameters;
 #[path = "conformance/recovery.rs"]
@@ -20,6 +22,50 @@ pub fn read_json(rel: &str) -> serde_json::Value {
     let bytes =
         std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     serde_json::from_slice(&bytes).expect("invalid JSON in spec repo")
+}
+
+pub fn read_text(rel: &str) -> String {
+    let path = spec_dir().join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+pub fn example_log() -> (String, wist_core::checkpoint::AggregatorKey) {
+    let anchor = read_json("examples/log-anchor.json");
+    let anchor = &anchor["anchor"];
+    let key = wist_core::checkpoint::AggregatorKey {
+        key_id: anchor["genesis_key"]["key_id"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        public_key: wist_core::crypto::PublicKey::from_b64u(
+            anchor["genesis_key"]["public_key"].as_str().unwrap(),
+        )
+        .unwrap(),
+    };
+    (anchor["log_id"].as_str().unwrap().to_string(), key)
+}
+
+pub fn entry_leaf_hashes(entries: &serde_json::Value) -> Vec<[u8; 32]> {
+    entries
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|entry| wist_core::merkle::leaf_hash(&wist_core::jcs::canonicalize(entry).unwrap()))
+        .collect()
+}
+
+pub fn hash_list(value: &serde_json::Value) -> Vec<[u8; 32]> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hash| {
+            wist_core::crypto::hex_decode(hash.as_str().unwrap().trim_start_matches("sha256:"))
+                .unwrap()
+                .try_into()
+                .unwrap()
+        })
+        .collect()
 }
 
 #[test]
@@ -74,7 +120,6 @@ fn example_envelopes_verify() {
         ("delta.json", "delta"),
         ("publisher.json", "publisher"),
         ("feed.json", "feed"),
-        ("checkpoint.json", "checkpoint"),
         ("snapshot-manifest.json", "manifest"),
         ("snapshot-index.json", "index"),
         ("snapshot-state.json", "state"),
@@ -136,109 +181,93 @@ fn payload_commitment_recomputes_and_tamper_fails() {
 #[test]
 fn wist3_merkle_vectors() {
     let block = read_json("vectors/wist3/block.json");
-    let leaves: Vec<[u8; 32]> = block["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| wist_core::merkle::leaf_hash(&wist_core::jcs::canonicalize(e).unwrap()))
-        .collect();
-    let root = wist_core::merkle::merkle_root(&leaves).unwrap();
+    let leaves = entry_leaf_hashes(&block["entries"]);
+    let root = wist_core::merkle::merkle_root(&leaves);
     assert_eq!(
         format!("sha256:{}", wist_core::crypto::hex_encode(&root)),
-        block["header"]["merkle_root"].as_str().unwrap()
+        block["root"].as_str().unwrap()
     );
+    assert_eq!(leaves, hash_list(&block["leaf_hashes"]));
+
+    let checkpoint =
+        wist_core::checkpoint::Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
+    assert_eq!(checkpoint.tree_size(), block["tree_size"].as_u64().unwrap());
+    assert_eq!(*checkpoint.root(), root);
 
     let proof = read_json("vectors/wist3/inclusion-proof.json");
-    let idx = proof["index"].as_u64().unwrap() as usize;
-    let n = proof["entry_count"].as_u64().unwrap() as usize;
-    assert_eq!(n, block["header"]["entry_count"].as_u64().unwrap() as usize);
-    let path: Vec<[u8; 32]> = proof["path"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|h| {
-            wist_core::crypto::hex_decode(h.as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap()
-        })
-        .collect();
-    let leaf = wist_core::merkle::leaf_hash(
-        &wist_core::jcs::canonicalize(&block["entries"][idx]).unwrap(),
-    );
-    wist_core::merkle::verify_inclusion(&leaf, idx, n, &path, &root).unwrap();
-    assert_eq!(wist_core::merkle::audit_path(idx, &leaves).unwrap(), path);
-}
-
-#[test]
-fn example_block_and_checkpoint() {
-    let keys = read_json("vectors/wist1/keypair.json");
-    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
-    let block = read_json("examples/block.json");
-    let cp = read_json("examples/checkpoint.json");
-
-    wist_core::block::verify_block(&block, &pk).unwrap();
-    wist_core::block::verify_checkpoint_binding(&cp, &block).unwrap();
-
-    let mut bad = block.clone();
-    bad["header"]["entry_count"] = 99.into();
-    assert!(wist_core::block::verify_block(&bad, &pk).is_err());
-
-    let mut swapped = block.clone();
-    let e0 = swapped["entries"][0].clone();
-    swapped["entries"][0] = swapped["entries"][1].clone();
-    swapped["entries"][1] = e0;
-    assert!(wist_core::block::verify_block(&swapped, &pk).is_err());
-}
-
-#[test]
-fn entry_count_mismatch_survives_resign() {
-    let keys = read_json("vectors/wist1/keypair.json");
-    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
-    let seed: [u8; 32] = wist_core::crypto::hex_decode(keys["seed_hex"].as_str().unwrap())
-        .unwrap()
-        .try_into()
+    let index = proof["index"].as_u64().unwrap();
+    let tree_size = proof["tree_size"].as_u64().unwrap();
+    assert_eq!(tree_size, block["tree_size"].as_u64().unwrap());
+    let path = hash_list(&proof["path"]);
+    checkpoint
+        .verify_inclusion(&leaves[index as usize], index, tree_size, &path)
         .unwrap();
-    let sk = wist_core::crypto::SigningKey::from_seed(&seed);
-    let block = read_json("examples/block.json");
-
-    let mut control = block.clone();
-    let control_sig = sk.sign(&wist_core::jcs::canonicalize(&control["header"]).unwrap());
-    control["sig"]["value"] = control_sig.into();
-    wist_core::block::verify_block(&control, &pk).unwrap();
-
-    let mut mutated = block.clone();
-    let real_count = mutated["header"]["entry_count"].as_u64().unwrap();
-    mutated["header"]["entry_count"] = (real_count + 1).into();
-    let mutated_sig = sk.sign(&wist_core::jcs::canonicalize(&mutated["header"]).unwrap());
-    mutated["sig"]["value"] = mutated_sig.into();
-
-    let err = wist_core::block::verify_block(&mutated, &pk).unwrap_err();
-    assert!(
-        err.to_string().contains("entry_count"),
-        "expected entry_count mismatch past a passing signature check, got: {err}"
+    assert_eq!(
+        wist_core::merkle::inclusion_proof(index, &leaves).unwrap(),
+        path
     );
+    assert!(checkpoint
+        .verify_inclusion(&leaves[index as usize], index, tree_size + 1, &path)
+        .is_err());
 }
 
 #[test]
-fn genesis_chain_link() {
+fn the_example_checkpoint_states_the_example_blocks_tree() {
+    let (log_id, key) = example_log();
+    let note = read_text("examples/checkpoint.txt");
     let block = read_json("vectors/wist3/block.json");
-    assert_eq!(block["header"]["block_number"], 0);
-    wist_core::block::verify_chain_link(&block["header"], "sha256:genesis").unwrap();
-    assert!(wist_core::block::verify_chain_link(&block["header"], "sha256:0000").is_err());
+    assert_eq!(note, block["checkpoint"].as_str().unwrap());
+
+    let checkpoint = wist_core::checkpoint::Checkpoint::parse(&note).unwrap();
+    assert_eq!(checkpoint.encode(), note);
+    let verification =
+        wist_core::checkpoint::verify(&checkpoint, &log_id, std::slice::from_ref(&key), &[])
+            .unwrap();
+    assert_eq!(verification.signers, [key.key_id.clone()].into());
+    assert!(verification.cosigners.is_empty());
+    assert_eq!(checkpoint.block_number(), 0);
+
+    let entries: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
+    let summary = wist_core::block::verify_block(
+        0,
+        &checkpoint,
+        &entries,
+        &wist_core::merkle::LeafHashes(&[]),
+        268_435_456,
+    )
+    .unwrap();
+    assert_eq!(summary.leaf_hashes, entry_leaf_hashes(&block["entries"]));
 }
 
 #[test]
-fn chain_link_rejects_non_genesis_block_zero_even_when_prev_matches() {
+fn a_blocks_entries_must_fill_the_leaf_range_its_checkpoint_states() {
+    let (_, _) = example_log();
     let block = read_json("vectors/wist3/block.json");
-    let mut header = block["header"].clone();
-    assert_eq!(header["block_number"], 0);
-    header["prev_block_hash"] = "sha256:notgenesis".into();
-    let err = wist_core::block::verify_chain_link(&header, "sha256:notgenesis").unwrap_err();
-    assert!(
-        err.to_string().contains("genesis"),
-        "expected the block-0-must-carry-genesis branch, got: {err}"
-    );
+    let checkpoint =
+        wist_core::checkpoint::Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
+    let mut entries: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
+    entries.pop();
+    let err = wist_core::block::verify_block(
+        0,
+        &checkpoint,
+        &entries,
+        &wist_core::merkle::LeafHashes(&[]),
+        268_435_456,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("WIST3-E03"));
+
+    let mut swapped: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
+    swapped.swap(0, 1);
+    let err = wist_core::block::verify_block(
+        0,
+        &checkpoint,
+        &swapped,
+        &wist_core::merkle::LeafHashes(&[]),
+        268_435_456,
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), Some("WIST3-E03"));
 }
 
 #[test]
@@ -288,8 +317,6 @@ fn every_example_parses_typed() {
     let _: o::DeltaEnvelope = p("delta.json");
     let _: o::PublisherEnvelope = p("publisher.json");
     let _: o::FeedEnvelope = p("feed.json");
-    let _: o::Block = p("block.json");
-    let _: o::CheckpointEnvelope = p("checkpoint.json");
     let _: o::LogAnchorEnvelope = p("log-anchor.json");
     let _: o::SnapshotIndexEnvelope = p("snapshot-index.json");
     let _: o::SnapshotManifestEnvelope = p("snapshot-manifest.json");
@@ -366,12 +393,20 @@ fn wist2_text_extraction_vector() {
 }
 
 #[test]
-fn manifest_anchored_to_block() {
-    let manifest = read_json("examples/snapshot-manifest.json");
-    let block = read_json("examples/block.json");
+fn manifest_anchored_to_the_checkpoint_at_its_block() {
+    let manifest: wist_core::objects::SnapshotManifestEnvelope =
+        serde_json::from_value(read_json("examples/snapshot-manifest.json")).unwrap();
+    let checkpoint =
+        wist_core::checkpoint::Checkpoint::parse(&read_text("examples/checkpoint.txt")).unwrap();
+    wist_core::snapshot::check_manifest_anchor(&manifest.manifest, &checkpoint).unwrap();
+
+    let mut moved = manifest.manifest.clone();
+    moved.log_position += 1;
     assert_eq!(
-        manifest["manifest"]["anchor_block_hash"].as_str().unwrap(),
-        wist_core::block::block_hash(&block["header"]).unwrap()
+        wist_core::snapshot::check_manifest_anchor(&moved, &checkpoint)
+            .unwrap_err()
+            .code(),
+        Some("WIST3-E02")
     );
 }
 
@@ -455,29 +490,46 @@ fn wist1_ed25519_verification_profile() {
 }
 
 #[test]
-fn wist3_empty_block_verifies() {
+fn wist3_empty_block_restates_the_tree_before_it() {
+    use wist_core::checkpoint::Checkpoint;
     let v = read_json("vectors/wist3/empty-block.json");
-    let block = &v["block"];
-    let keys = read_json("vectors/wist1/keypair.json");
-    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    let (log_id, key) = example_log();
 
+    assert_eq!(v["empty_tree_size"].as_u64().unwrap(), 0);
     assert_eq!(
-        wist_core::block::block_hash(&block["header"]).unwrap(),
-        v["block_hash"].as_str().unwrap()
+        hash_list(&serde_json::json!([v["empty_tree_root"]]))[0],
+        wist_core::merkle::EMPTY_ROOT,
+        "the empty tree's root is RFC 6962's MTH of the empty sequence"
     );
-    wist_core::block::verify_block(block, &pk).unwrap();
-    let entries: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
-    assert!(entries.is_empty());
-    let root = wist_core::merkle::leaf_hash(&[]);
     assert_eq!(
-        format!("sha256:{}", wist_core::crypto::hex_encode(&root)),
-        block["header"]["merkle_root"].as_str().unwrap(),
-        "the empty tree is SHA-256(0x00), not RFC 6962's SHA-256(\"\")"
+        wist_core::merkle::merkle_root(&[]),
+        wist_core::merkle::EMPTY_ROOT
     );
-    assert_ne!(
-        block["header"]["merkle_root"].as_str().unwrap(),
-        v["rfc6962_empty_root"].as_str().unwrap()
-    );
+
+    let block0 = read_json("vectors/wist3/block.json");
+    let previous = Checkpoint::parse(block0["checkpoint"].as_str().unwrap()).unwrap();
+    let empty = Checkpoint::parse(v["block_1"]["checkpoint"].as_str().unwrap()).unwrap();
+    for checkpoint in [&previous, &empty] {
+        wist_core::checkpoint::verify(checkpoint, &log_id, std::slice::from_ref(&key), &[])
+            .unwrap();
+    }
+    assert!(v["block_1"]["entries"].as_array().unwrap().is_empty());
+    assert_eq!(empty.tree_size(), previous.tree_size());
+    assert_eq!(empty.root(), previous.root());
+    assert_eq!(empty.root_token(), v["block_0_root"].as_str().unwrap());
+    wist_core::checkpoint::check_sequence(Some(&previous), &empty, 3600).unwrap();
+
+    let leaves = entry_leaf_hashes(&block0["entries"]);
+    wist_core::block::verify_block(
+        previous.tree_size(),
+        &empty,
+        &[],
+        &wist_core::merkle::LeafHashes(&leaves),
+        268_435_456,
+    )
+    .unwrap();
+    assert!(v["consistency_proof_4_to_4"].as_array().unwrap().is_empty());
+    wist_core::checkpoint::check_consistency(&previous, &empty, &[]).unwrap();
 }
 
 fn string_list(v: &serde_json::Value) -> Vec<String> {

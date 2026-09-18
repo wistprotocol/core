@@ -67,13 +67,14 @@ fn replay(vector: &Value, history: &Value) -> Vec<Declarations> {
     let mut state = Declarations::default();
     let mut prefix = Vec::new();
     for block in history["blocks"].as_array().unwrap() {
-        let header = &block["header"];
+        let checkpoint =
+            wist_core::checkpoint::Checkpoint::parse(block["checkpoint"].as_str().unwrap())
+                .unwrap();
         state
             .apply_block(
-                header["block_number"].as_u64().unwrap(),
-                header["prev_block_hash"].as_str().unwrap(),
-                &wist_core::block::block_hash(header).unwrap(),
-                header["sealed_at"].as_str().unwrap(),
+                checkpoint.block_number(),
+                &checkpoint.root_token(),
+                checkpoint.sealed_at(),
                 days,
                 activation,
                 block["entries"].as_array().unwrap(),

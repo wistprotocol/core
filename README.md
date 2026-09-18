@@ -1,16 +1,19 @@
 # wist-core
 
-The signed Delta format targets [WIST specification revision `5eccdedc156c8e13e6784b690a08d27da414faec`](https://github.com/wistprotocol/spec/tree/5eccdedc156c8e13e6784b690a08d27da414faec). Object version `1.0.0` alone does not identify a compatible draft.
+The signed Delta format targets [WIST specification revision `1f37876a2792b042ddd2b782edebb56560f51c9d`](https://github.com/wistprotocol/spec/tree/1f37876a2792b042ddd2b782edebb56560f51c9d). Object version `1.0.0` alone does not identify a compatible draft.
 
 Delta Envelopes require a canonical `publisher` inside the signed and hashed object. The typed object and `delta::publisher` reject missing or noncanonical identities without rewriting signed bytes. Signature/key-history and `(publisher, url)` chain validation remain caller obligations.
 
 Rust implementation of the WIST Protocol's primitives: JCS canonicalization,
-Ed25519 envelopes, delta identity, Key Set resolution, chain tips, Merkle
-trees/proofs, block/checkpoint verification, snapshot digests and state
-tuples, WIST-2 link/text extraction, the WIST-1 §5.2 Declaration and
-recovery-window replay, and the WIST-4 Parameter Registry with its schedule
-replay. The [specification](../spec/README.md) defines conformance;
-`crates/wist-core/tests/conformance.rs` exercises its vectors.
+Ed25519 envelopes, delta identity, Key Set resolution, chain tips, the
+Logbook's RFC 6962 Merkle tree with its Inclusion and Consistency Proofs,
+C2SP Checkpoints with their Witness Cosignatures, the tiles and entry
+bundles the tree is served as, Block verification against a Checkpoint,
+snapshot digests and state tuples, WIST-2 link/text extraction, the WIST-1
+§5.2 Declaration and recovery-window replay, and the WIST-4 Parameter
+Registry with its schedule replay. The [specification](../spec/README.md)
+defines conformance; `crates/wist-core/tests/conformance.rs` exercises its
+vectors.
 
 ## Build & test
 
@@ -31,6 +34,66 @@ and ICU normalizer/property dependency constraints keep a dependency update
 from admitting names assigned only in a later Unicode version. The `zerovec`
 allocation feature supports these ICU data providers. Signed host vectors
 exercise both Unicode 16 additions and Unicode 17 exclusions.
+
+## The Logbook's tree, Checkpoints and tiles
+
+`merkle` is RFC 6962 over SHA-256 (WIST-3 §4): `leaf_hash`, `node_hash`,
+`merkle_root` over leaf hashes at any size with `EMPTY_ROOT` =
+`SHA-256("")` for the empty tree, `inclusion_proof`/`verify_inclusion` with
+every §4 rejection, and `consistency_proof`/`verify_consistency` under RFC
+9162 §2.1.4.2. The same roots and proofs are computed from stored hashes
+through the `HashReader` trait — `node(level, index)` is the root of the
+complete subtree over `[index·2^level, (index+1)·2^level)` — by
+`root_from`, `inclusion_proof_from` and `consistency_proof_from`, so a
+party holding tiles rather than every leaf gets identical values;
+`LeafHashes` reads a leaf-hash slice, `Extended` and `root_after_appending`
+read a prior tree plus the leaves a Block appends.
+
+`checkpoint::Checkpoint` is the five-line signed note of WIST-3 §5.
+`parse` rejects every octet-level departure as `WIST3-E03`; `note_text`
+and `encode` re-emit it byte for byte; `new`, `sign` and `add_signature`
+build one and append further signature lines — a rotation's second key, or
+a Cosignature a Witness returned — without changing the note text.
+`aggregator_key_id`, `witness_key_id` and `verifier_key` derive the
+[signed-note] key IDs of §3.4 and the verifier-key string a Witness is
+configured with; `cosignature_line` and `verify_cosignature` are
+[tlog-cosignature] v1. `verify` takes the Aggregator keys valid at the
+Checkpoint's height and the Consumer's trusted Witness roster, ignores
+every line naming neither, rejects the Checkpoint when a line naming a
+known key fails, requires at least one Aggregator signature, and returns
+the `key_id`s that signed with the distinct Witness names that cosigned;
+`adoption` applies `checkpoint_witness_quorum` to those names and reports
+an acceptance with no trusted Cosignature as unwitnessed. `progression`
+is §5's rollback rule, `equivocation` and `prefix_equivocation` its three
+equivocation forms, `check_sequence` §3.1's Block-to-Block rules
+(sequential number, a tree that never shrinks, a strictly increasing
+`sealed_at` on the cadence grid), `check_consistency` the Consistency
+Proof between two Checkpoints, and `archive_path`/`check_archive_path`
+§6's per-Block archive path.
+
+`tiles` is the [tlog-tiles] surface (WIST-3 §6): `Tile` and `Bundle` with
+their paths, including the `x`-prefixed three-digit groups above index
+999 and the `.p/<W>` partial widths; `required_tiles`/`required_bundles`
+for a tree size and `tiles_for_range`/`bundles_for_range` for a Block's
+leaves; `encode_tile`/`decode_tile` and
+`encode_entry_bundle`/`decode_entry_bundle`, which reject a truncated
+Entry or octets left over; `TileSet`, which builds and serves a tree's
+tiles and reads them back as a `HashReader`; `check_tree` and
+`check_bundle`, which verify served octets by recomputation against a
+verified Checkpoint's root; and the `TILE_MAX_BYTES`,
+`ENTRY_BUNDLE_MAX_BYTES` and `ENTRY_MAX_BYTES` bounds a Consumer stops
+reading at, equality permitted.
+
+`block::verify_block` checks a Block's Entries against Checkpoint N: the
+five Entry types, the canonical order, each Entry's JCS within 65 535
+octets, the Block's entry-bundle octets against the cap in force, and that
+the leaf hashes occupy `[size(N-1), size(N))` in the tree whose root the
+Checkpoint states, recomputed from the prefix already verified.
+`sort_entries` puts Entries in that canonical order, `block_octets` sizes a
+Block and `parse_entries` reads an entry bundle's leaf data back into
+Entries. `snapshot::check_manifest_anchor` is WIST-3 §8 step 5, where a
+Snapshot manifest that names another tree than the Checkpoint at its
+`block_number` is `WIST3-E02`.
 
 ## Registry Updates
 
@@ -149,7 +212,8 @@ admission and durable queue/status effects remain service responsibilities.
 The settlement conformance fixtures restrict timestamp comparisons to
 whole-second literal-Z values; their callback is not a general RFC 3339 parser.
 
-`declarations::Declarations` replays Declarations Block by Block: the
+`declarations::Declarations` replays Declarations Block by Block, each
+Block named by its number and the root hash its Checkpoint states: the
 accepted Declaration and sequence floor per domain, recovery windows with
 their owner, chain head, pre-recovery source and competitors, settlement at
 the frozen window end, identity resets and per-Block installation effects.

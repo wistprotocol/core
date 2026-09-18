@@ -1,8 +1,9 @@
-use super::read_json;
+use super::{entry_leaf_hashes, read_json};
 use serde_json::{json, Value};
-use wist_core::block::block_hash;
+use wist_core::checkpoint::Checkpoint;
 use wist_core::declaration::Decision;
 use wist_core::declarations::{Declarations, Domain, Effects};
+use wist_core::merkle;
 use wist_core::Error;
 
 /// The recovery window length and the fresh-identity activation delay a
@@ -22,16 +23,31 @@ fn params(vector: &Value) -> Params {
     }
 }
 
-fn apply(state: &mut Declarations, block: &Value, params: Params) -> Result<Effects, Error> {
-    let header = &block["header"];
+struct Sealed {
+    block_number: u64,
+    root_token: String,
+    sealed_at: String,
+    entries: Vec<Value>,
+}
+
+fn sealed(block: &Value) -> Sealed {
+    let checkpoint = Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
+    Sealed {
+        block_number: checkpoint.block_number(),
+        root_token: checkpoint.root_token(),
+        sealed_at: checkpoint.sealed_at().to_string(),
+        entries: block["entries"].as_array().map_or(Vec::new(), Vec::clone),
+    }
+}
+
+fn apply(state: &mut Declarations, block: &Sealed, params: Params) -> Result<Effects, Error> {
     state.apply_block(
-        header["block_number"].as_u64().unwrap(),
-        header["prev_block_hash"].as_str().unwrap(),
-        &block_hash(header).unwrap(),
-        header["sealed_at"].as_str().unwrap(),
+        block.block_number,
+        &block.root_token,
+        &block.sealed_at,
         params.days,
         params.activation_blocks,
-        block["entries"].as_array().map_or(&[][..], Vec::as_slice),
+        &block.entries,
     )
 }
 
@@ -74,21 +90,21 @@ fn outcome(effects: &Effects) -> &'static str {
         })
 }
 
-fn candidate_block(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Value {
-    let prev = prefix.last().map_or("sha256:genesis".to_string(), |b| {
-        block_hash(&b["header"]).unwrap()
-    });
-    json!({
-        "header": {
-            "wist_version": "1.0.0",
-            "block_number": prefix.len(),
-            "prev_block_hash": prev,
-            "sealed_at": sealed_at,
-            "merkle_root": format!("sha256:{}", "0".repeat(64)),
-            "entry_count": entries.len(),
-        },
-        "entries": entries,
-    })
+fn candidate_block(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Sealed {
+    let mut leaves: Vec<[u8; 32]> = prefix
+        .iter()
+        .flat_map(|block| entry_leaf_hashes(&block["entries"]))
+        .collect();
+    leaves.extend(entry_leaf_hashes(&json!(entries)));
+    Sealed {
+        block_number: prefix.len() as u64,
+        root_token: format!(
+            "sha256:{}",
+            wist_core::crypto::hex_encode(&merkle::merkle_root(&leaves))
+        ),
+        sealed_at: sealed_at.to_string(),
+        entries,
+    }
 }
 
 /// Replays the prefix, then applies the probe's candidate Block, checking
@@ -117,7 +133,7 @@ fn probe(
     let mut state = Declarations::default();
     let mut windows = 0;
     for block in &blocks[..=height] {
-        windows += windows_opened(&apply(&mut state, block, days).unwrap());
+        windows += windows_opened(&apply(&mut state, &sealed(block), days).unwrap());
     }
     let candidate = candidate_block(
         &blocks[..=height],
@@ -126,10 +142,10 @@ fn probe(
     );
     let before = format!("{state:?}");
     let projection = state.project(
-        candidate["header"]["sealed_at"].as_str().unwrap(),
+        &candidate.sealed_at,
         days.days,
         days.activation_blocks,
-        candidate["entries"].as_array().unwrap(),
+        &candidate.entries,
     );
     assert_eq!(format!("{state:?}"), before);
     let result = apply(&mut state, &candidate, days).map_err(|e| e.to_string());
@@ -177,13 +193,14 @@ fn recovery_heads_sequence_floors_and_named_predecessors() {
         let mut state = Declarations::default();
         let mut windows = 0;
         for block in blocks {
-            windows += windows_opened(&apply(&mut state, block, days).unwrap());
+            let block = sealed(block);
+            windows += windows_opened(&apply(&mut state, &block, days).unwrap());
             for expected in branch["expected_prefix_states"]
                 .as_array()
                 .into_iter()
                 .flatten()
             {
-                if expected["height"] == block["header"]["block_number"] {
+                if expected["height"].as_u64() == Some(block.block_number) {
                     assert_eq!(
                         summary(&state.domains()["example.com"], windows),
                         expected["state"]
@@ -227,7 +244,10 @@ fn recovery_ownership_uses_sequence_with_original_canonical_positions() {
         let mut sequences = Vec::new();
         let mut windows = 0;
         for block in blocks {
-            for installation in apply(&mut state, block, days).unwrap().installations {
+            for installation in apply(&mut state, &sealed(block), days)
+                .unwrap()
+                .installations
+            {
                 let position = installation.declaration.position();
                 assert_eq!(
                     &blocks[position.block_number as usize]["entries"][position.entry_index]
@@ -265,7 +285,7 @@ fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
         let last = blocks.len() - 1;
         for (index, block) in blocks.iter().enumerate() {
             let before = format!("{state:?}");
-            match apply(&mut state, block, days) {
+            match apply(&mut state, &sealed(block), days) {
                 Ok(effects) => {
                     for installation in effects.installations {
                         let domain = installation.declaration.envelope()["publisher"]["domain"]
@@ -319,8 +339,12 @@ fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
             "{}",
             case["name"]
         );
+        let before_any_block = format!(
+            "sha256:{}",
+            wist_core::crypto::hex_encode(&merkle::EMPTY_ROOT)
+        );
         assert_eq!(
-            state.head().map_or("sha256:genesis", |h| h.1),
+            state.head().map_or(before_any_block.as_str(), |h| h.1),
             case["expected_accepted_head"]
         );
     }
@@ -335,7 +359,7 @@ fn settlement_restores_authenticated_chain_and_reports_competitors() {
         let mut state = Declarations::default();
         let mut superseded = Vec::new();
         for block in blocks {
-            for settlement in apply(&mut state, block, days).unwrap().settlements {
+            for settlement in apply(&mut state, &sealed(block), days).unwrap().settlements {
                 superseded.extend(settlement.superseded.iter().map(|d| d.hash().to_string()));
             }
         }
@@ -347,11 +371,9 @@ fn settlement_restores_authenticated_chain_and_reports_competitors() {
         for candidate in case["probes"].as_array().unwrap() {
             let mut candidate = candidate.clone();
             let height = candidate["prefix_height"].as_u64().unwrap() as usize;
-            let sealed = wist_core::timestamp::log_seconds(
-                blocks[height]["header"]["sealed_at"].as_str().unwrap(),
-            )
-            .unwrap();
-            candidate["candidate_sealed_at"] = timestamp(i128::from(sealed) + 3600).into();
+            let previous =
+                wist_core::timestamp::log_seconds(&sealed(&blocks[height]).sealed_at).unwrap();
+            candidate["candidate_sealed_at"] = timestamp(i128::from(previous) + 3600).into();
             assert!(probe(blocks, days, &candidate).1.is_err());
         }
     }

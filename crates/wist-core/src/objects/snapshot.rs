@@ -60,6 +60,7 @@ pub struct SnapshotFile {
 pub struct SnapshotManifest {
     pub wist_version: String,
     pub snapshot_date: String,
+    pub block_number: u64,
     pub log_position: u64,
     pub anchor_block_hash: String,
     pub content_digest: String,

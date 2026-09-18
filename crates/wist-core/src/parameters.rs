@@ -27,9 +27,10 @@ pub const PARAMS: &[ParamSpec] = &[
     p(
         "block_decompressed_cap_bytes",
         Some(268_435_456),
-        Some(1024),
+        Some(65_537),
         None,
     ),
+    p("checkpoint_witness_quorum", Some(0), Some(0), None),
     p("extract_cap_bytes", Some(32768), Some(2), None),
     p("links_cap_bytes", Some(4096), Some(21), None),
     p("link_url_cap_bytes", Some(2048), Some(14), None),

@@ -127,8 +127,14 @@ fn signed_parameter_wire_bounds() {
 #[test]
 fn block_size_schedules() {
     let v = vector();
+    let floor = parameters::spec("block_decompressed_cap_bytes")
+        .unwrap()
+        .min
+        .unwrap();
+    let grace = parameter_default("param_grace_days") * 86_400;
     for case in v["block_size_cases"].as_array().unwrap() {
         let mut schedule = Schedule::new(0);
+        let mut registry = Schedule::new(0);
         let mut largest = 0;
         let mut previous = None;
         for (height, block) in case["blocks"].as_array().unwrap().iter().enumerate() {
@@ -145,10 +151,14 @@ fn block_size_schedules() {
             let at = block["sealed_at_s"].as_i64().unwrap();
             let proposed_max = largest.max(block["jcs_bytes"].as_u64().unwrap());
             let mut tentative = schedule.clone();
+            let mut under_registry = registry.clone();
             let mut rejected = Vec::new();
+            let mut rejected_under_registry = std::collections::BTreeSet::new();
+            let mut below_floor = std::collections::BTreeSet::new();
             for (index, change) in block["amendments"].as_array().unwrap().iter().enumerate() {
                 let Some(value) = change["value"].as_i64() else {
                     rejected.push(index);
+                    rejected_under_registry.insert(index);
                     continue;
                 };
                 let amendment = Amendment {
@@ -159,16 +169,40 @@ fn block_size_schedules() {
                     sealed_at_s: at,
                     effective_at_s: change["effective_at_s"].as_i64().unwrap(),
                 };
-                if tentative
-                    .try_accept_with_block_size(amendment, proposed_max)
+                assert_eq!(
+                    parameters::validate_value(&amendment.parameter, value).is_ok(),
+                    value >= floor,
+                    "{}",
+                    case["label"]
+                );
+                if value < floor {
+                    below_floor.insert(index);
+                }
+                if under_registry
+                    .try_accept_with_block_size(amendment.clone(), proposed_max)
                     .is_err()
                 {
+                    rejected_under_registry.insert(index);
+                }
+                let within_grace = amendment.effective_at_s - amendment.sealed_at_s >= grace;
+                let mut candidate = tentative.clone();
+                candidate.adopt(amendment);
+                if within_grace && candidate.block_size_bounds(at).0 >= proposed_max {
+                    tentative = candidate;
+                } else {
                     rejected.push(index);
                 }
             }
             assert_eq!(
                 serde_json::json!(rejected),
                 expected["rejected_indices"],
+                "{}",
+                case["label"]
+            );
+            let expected_under_registry: std::collections::BTreeSet<usize> =
+                rejected.iter().copied().chain(below_floor).collect();
+            assert_eq!(
+                rejected_under_registry, expected_under_registry,
                 "{}",
                 case["label"]
             );
@@ -188,6 +222,7 @@ fn block_size_schedules() {
             );
             if valid {
                 schedule = tentative;
+                registry = under_registry;
                 largest = proposed_max;
                 previous = Some(at);
             }

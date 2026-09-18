@@ -1,5 +1,3 @@
-pub mod block;
-pub mod checkpoint;
 pub mod delta;
 pub mod feed;
 pub mod label;
@@ -10,8 +8,6 @@ pub mod registry_update;
 pub mod snapshot;
 pub mod status;
 
-pub use block::{Block, BlockHeader};
-pub use checkpoint::{Checkpoint, CheckpointEnvelope};
 pub use delta::{ChangeType, Delta, DeltaEnvelope, DeltaMeta, DeltaPayloadCommitment};
 pub use feed::{Feed, FeedEnvelope};
 pub use label::{

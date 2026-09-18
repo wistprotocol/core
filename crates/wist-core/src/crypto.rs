@@ -31,7 +31,7 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
         .collect())
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicKey(VerifyingKey);
 
 /// WIST-1 §4: the encoded `y` must be below `p = 2^255 - 19`. Decoders that
@@ -79,6 +79,14 @@ impl PublicKey {
     pub fn to_b64u(&self) -> String {
         b64u_encode(self.0.as_bytes())
     }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    pub fn from_bytes(raw: &[u8; 32]) -> Result<Self, Error> {
+        Self::from_b64u(&b64u_encode(raw))
+    }
 }
 
 pub fn verify(key: &PublicKey, msg: &[u8], sig_b64u: &str) -> Result<(), Error> {
@@ -86,12 +94,16 @@ pub fn verify(key: &PublicKey, msg: &[u8], sig_b64u: &str) -> Result<(), Error> 
     let arr: [u8; 64] = raw
         .try_into()
         .map_err(|_| Error::Encoding("signature must be 64 octets".into()))?;
-    let r: [u8; 32] = arr[..32].try_into().unwrap();
+    verify_bytes(key, msg, &arr)
+}
+
+pub fn verify_bytes(key: &PublicKey, msg: &[u8], sig: &[u8; 64]) -> Result<(), Error> {
+    let r: [u8; 32] = sig[..32].try_into().unwrap();
     if !canonically_encoded(&r) {
         return Err(Error::Signature);
     }
     key.0
-        .verify_strict(msg, &Signature::from_bytes(&arr))
+        .verify_strict(msg, &Signature::from_bytes(sig))
         .map_err(|_| Error::Signature)
 }
 
@@ -102,7 +114,10 @@ impl SigningKey {
         SigningKey(ed25519_dalek::SigningKey::from_bytes(seed))
     }
     pub fn sign(&self, msg: &[u8]) -> String {
-        b64u_encode(&self.0.sign(msg).to_bytes())
+        b64u_encode(&self.sign_bytes(msg))
+    }
+    pub fn sign_bytes(&self, msg: &[u8]) -> [u8; 64] {
+        self.0.sign(msg).to_bytes()
     }
     pub fn public(&self) -> PublicKey {
         PublicKey(self.0.verifying_key())

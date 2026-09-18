@@ -1,6 +1,8 @@
+use crate::checkpoint::Checkpoint;
 use crate::crypto::hex_encode;
 use crate::error::Error;
 use crate::jcs;
+use crate::objects::SnapshotManifest;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -44,6 +46,27 @@ pub fn content_digest(records: &[Value]) -> Result<String, Error> {
     let hash = Sha256::digest(&concatenated);
 
     Ok(format!("sha256:{}", hex_encode(&hash)))
+}
+
+pub fn check_manifest_anchor(
+    manifest: &SnapshotManifest,
+    checkpoint: &Checkpoint,
+) -> Result<(), Error> {
+    let divergence = |message: &str| Error::Snapshot(format!("WIST3-E02 {message}"));
+    if manifest.block_number != checkpoint.block_number() {
+        return Err(divergence("the Checkpoint is not the Snapshot's Block"));
+    }
+    if manifest.log_position != checkpoint.tree_size() {
+        return Err(divergence(
+            "the Checkpoint states another tree size than log_position",
+        ));
+    }
+    if manifest.anchor_block_hash != checkpoint.root_token() {
+        return Err(divergence(
+            "the Checkpoint states another root than anchor_block_hash",
+        ));
+    }
+    Ok(())
 }
 
 pub fn state_digest(entries: &[Value]) -> Result<String, Error> {

@@ -215,13 +215,11 @@ impl Declarations {
             .map(|(height, hash)| (*height, hash.as_str()))
     }
 
-    /// Applies the next Block of the accepted prefix.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_block(
         &mut self,
         block_number: u64,
-        prev_block_hash: &str,
-        block_hash: &str,
+        block_root: &str,
         sealed_at: &str,
         recovery_window_days: i64,
         declaration_activation_blocks: i64,
@@ -229,9 +227,7 @@ impl Declarations {
     ) -> Result<Effects> {
         let continues = match &self.head {
             None => block_number == 0,
-            Some((height, hash)) => {
-                height.checked_add(1) == Some(block_number) && hash == prev_block_hash
-            }
+            Some((height, _)) => height.checked_add(1) == Some(block_number),
         };
         if !continues {
             return Err(Error::History(
@@ -245,16 +241,15 @@ impl Declarations {
             entries,
         )?;
         self.domains = projection.domains;
-        self.head = Some((block_number, block_hash.to_owned()));
+        self.head = Some((block_number, block_root.to_owned()));
         self.sealed_at_s = Some(projection.sealed_at_s);
         Ok(projection.effects)
     }
 
     /// Seeds the accepted prefix's head for a party that starts at a
-    /// Snapshot's `log_position` rather than at Block 0; the next applied
     /// Block must be the following height.
-    pub fn seed_head(&mut self, block_number: u64, block_hash: &str, sealed_at_s: Option<i64>) {
-        self.head = Some((block_number, block_hash.to_owned()));
+    pub fn seed_head(&mut self, block_number: u64, block_root: &str, sealed_at_s: Option<i64>) {
+        self.head = Some((block_number, block_root.to_owned()));
         self.sealed_at_s = sealed_at_s;
     }
 
