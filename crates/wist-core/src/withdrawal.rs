@@ -1,7 +1,7 @@
 //! WIST-4 §5.1 replay of `payload_withdrawal` acts: JSON eligibility, the
 //! field partition between `WIST4-E11` and `WIST4-E04`, authentication
-//! under a Log key valid at the act's Block, the sealed-Delta contract and
-//! the earliest-Block rule every withdrawn Delta reads.
+//! under a Log key valid at the act's Epoch, the sealed-Delta contract and
+//! the earliest-Epoch rule every withdrawn Delta reads.
 use crate::crypto::PublicKey;
 use crate::error::Error;
 use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope, WithdrawalEntry};
@@ -24,7 +24,7 @@ pub enum SealedDelta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disposition {
     /// The act is a valid withdrawal; `withdrawn_height` is the earliest
-    /// accepted withdrawal's Block, this act's own when `changed`.
+    /// accepted withdrawal's Epoch, this act's own when `changed`.
     Accepted {
         delta_id: String,
         publisher: String,

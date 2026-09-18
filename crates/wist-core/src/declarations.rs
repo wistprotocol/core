@@ -14,7 +14,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Position {
-    pub block_number: u64,
+    pub epoch_number: u64,
     pub entry_index: usize,
 }
 
@@ -72,7 +72,7 @@ impl RecoveryWindow {
 }
 
 /// WIST-1 §5.2: a fresh identity accepted outside a recovery window, held
-/// without authority until the Block at its activation height.
+/// without authority until the Epoch at its activation height.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
     head: Arc<Declaration>,
@@ -175,7 +175,7 @@ pub struct Effects {
 pub struct Projection {
     domains: BTreeMap<String, Domain>,
     effects: Effects,
-    block_number: u64,
+    epoch_number: u64,
     sealed_at_s: i64,
 }
 
@@ -188,8 +188,8 @@ impl Projection {
         &self.effects
     }
 
-    pub fn block_number(&self) -> u64 {
-        self.block_number
+    pub fn epoch_number(&self) -> u64 {
+        self.epoch_number
     }
 
     pub fn sealed_at_s(&self) -> i64 {
@@ -216,40 +216,40 @@ impl Declarations {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_block(
+    pub fn apply_epoch(
         &mut self,
-        block_number: u64,
-        block_root: &str,
+        epoch_number: u64,
+        epoch_root: &str,
         sealed_at: &str,
         recovery_window_days: i64,
-        declaration_activation_blocks: i64,
+        declaration_activation_epochs: i64,
         entries: &[Value],
     ) -> Result<Effects> {
         let continues = match &self.head {
-            None => block_number == 0,
-            Some((height, _)) => height.checked_add(1) == Some(block_number),
+            None => epoch_number == 0,
+            Some((height, _)) => height.checked_add(1) == Some(epoch_number),
         };
         if !continues {
             return Err(Error::History(
-                "Declaration replay requires the next Block of its accepted prefix".into(),
+                "Declaration replay requires the next Epoch of its accepted prefix".into(),
             ));
         }
         let projection = self.project(
             sealed_at,
             recovery_window_days,
-            declaration_activation_blocks,
+            declaration_activation_epochs,
             entries,
         )?;
         self.domains = projection.domains;
-        self.head = Some((block_number, block_root.to_owned()));
+        self.head = Some((epoch_number, epoch_root.to_owned()));
         self.sealed_at_s = Some(projection.sealed_at_s);
         Ok(projection.effects)
     }
 
-    /// Seeds the accepted prefix's head for a party that starts at a
-    /// Block must be the following height.
-    pub fn seed_head(&mut self, block_number: u64, block_root: &str, sealed_at_s: Option<i64>) {
-        self.head = Some((block_number, block_root.to_owned()));
+    /// Seeds the accepted prefix's head for a party that starts at an
+    /// Epoch must be the following height.
+    pub fn seed_head(&mut self, epoch_number: u64, epoch_root: &str, sealed_at_s: Option<i64>) {
+        self.head = Some((epoch_number, epoch_root.to_owned()));
         self.sealed_at_s = sealed_at_s;
     }
 
@@ -328,7 +328,7 @@ impl Declarations {
         &self,
         sealed_at: &str,
         recovery_window_days: i64,
-        declaration_activation_blocks: i64,
+        declaration_activation_epochs: i64,
         entries: &[Value],
     ) -> Result<Projection> {
         let sealed_at_s = crate::timestamp::log_seconds(sealed_at)?;
@@ -342,14 +342,14 @@ impl Declarations {
         }
         crate::parameters::validate_value("recovery_window_days", recovery_window_days)?;
         crate::parameters::validate_value(
-            "declaration_activation_blocks",
-            declaration_activation_blocks,
+            "declaration_activation_epochs",
+            declaration_activation_epochs,
         )?;
-        crate::block::validate_entry_order(entries)?;
-        let block_number = self.head.as_ref().map_or(Ok(0), |(height, _)| {
+        crate::epoch::validate_entry_order(entries)?;
+        let epoch_number = self.head.as_ref().map_or(Ok(0), |(height, _)| {
             height
                 .checked_add(1)
-                .ok_or_else(|| failure("Block height overflow"))
+                .ok_or_else(|| failure("Epoch number overflow"))
         })?;
         let mut staged = self.domains.clone();
         let mut effects = Effects::default();
@@ -370,12 +370,12 @@ impl Declarations {
             if state
                 .pending
                 .as_ref()
-                .is_some_and(|pending| block_number >= pending.activation_height)
+                .is_some_and(|pending| epoch_number >= pending.activation_height)
             {
                 let pending = state.pending.take().unwrap();
                 state.current = pending.head.clone();
                 state.reset = Some(Position {
-                    block_number,
+                    epoch_number,
                     entry_index: 0,
                 });
                 effects.activations.push(Activation {
@@ -418,7 +418,7 @@ impl Declarations {
                 envelope: incoming.clone(),
                 hash: inner_hash(incoming).map_err(failure)?,
                 position: Position {
-                    block_number,
+                    epoch_number,
                     entry_index: index,
                 },
                 sealed_at_s,
@@ -462,12 +462,12 @@ impl Declarations {
                             "WIST1-E08 fresh identity names the current Declaration beside a pending head",
                         ));
                     }
-                    let activation_height = block_number
-                        .checked_add(declaration_activation_blocks as u64)
+                    let activation_height = epoch_number
+                        .checked_add(declaration_activation_epochs as u64)
                         .ok_or_else(|| failure("activation height overflow"))?;
                     state.highest_accepted_seq = seq;
                     installation.decision = Some(decision);
-                    if activation_height > block_number {
+                    if activation_height > epoch_number {
                         state.pending = Some(Pending {
                             head: declaration,
                             activation_height,
@@ -530,7 +530,7 @@ impl Declarations {
         Ok(Projection {
             domains: staged,
             effects,
-            block_number,
+            epoch_number,
             sealed_at_s,
         })
     }

@@ -12,8 +12,8 @@ pub enum Error {
     Commitment(String),
     #[error("merkle: {0}")]
     Merkle(String),
-    #[error("block: {0}")]
-    Block(String),
+    #[error("epoch: {0}")]
+    Epoch(String),
     #[error("checkpoint: {0}")]
     Checkpoint(String),
     #[error("tile: {0}")]
@@ -38,7 +38,7 @@ impl Error {
             | Error::Envelope(m)
             | Error::Commitment(m)
             | Error::Merkle(m)
-            | Error::Block(m)
+            | Error::Epoch(m)
             | Error::Checkpoint(m)
             | Error::Tile(m)
             | Error::Snapshot(m)
@@ -71,7 +71,7 @@ mod tests {
             Error::Checkpoint("WIST3-E03 malformed note".into()).code(),
             Some("WIST3-E03")
         );
-        assert_eq!(Error::Block("Entries out of order".into()).code(), None);
+        assert_eq!(Error::Epoch("Entries out of order".into()).code(), None);
         assert_eq!(Error::Signature.code(), None);
     }
 }

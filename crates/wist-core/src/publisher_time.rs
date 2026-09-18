@@ -118,7 +118,7 @@ pub fn at_or_after(value: &str, bound_s: i128) -> Option<bool> {
     )
 }
 
-/// WIST-1 §3.4's clock check against a whole-second clock such as a Block's
+/// WIST-1 §3.4's clock check against a whole-second clock such as an Epoch's
 /// `sealed_at`: `value <= clock + allowance`, endpoint included, with a
 /// signed allowance and no clamping to the spelling range.
 pub fn within_clock_bound(value: &str, clock_s: i64, allowance_s: i64) -> Option<bool> {

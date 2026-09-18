@@ -14,16 +14,16 @@ pub const ENTRY_TYPES: [&str; 5] = [
 ];
 
 fn invalid(message: &str) -> Error {
-    Error::Block(format!("WIST3-E03 {message}"))
+    Error::Epoch(format!("WIST3-E03 {message}"))
 }
 
 pub fn entry_group(entry: &Value) -> Result<usize, Error> {
     let kind = entry["type"]
         .as_str()
         .and_then(|kind| ENTRY_TYPES.iter().position(|known| *known == kind))
-        .ok_or_else(|| invalid("unknown Block Entry type"))?;
+        .ok_or_else(|| invalid("unknown Epoch Entry type"))?;
     if entry.as_object().is_none_or(|object| object.len() != 2) || !entry["body"].is_object() {
-        return Err(invalid("malformed Block Entry envelope"));
+        return Err(invalid("malformed Epoch Entry envelope"));
     }
     Ok(kind)
 }
@@ -36,7 +36,7 @@ pub fn entry_leaf(entry: &Value) -> Result<(Vec<u8>, [u8; 32]), Error> {
 }
 
 /// WIST-3 §3.3: Entries are grouped by type in the fixed order and, within
-/// a group, in ascending octet order of their Merkle leaf hashes; a Block
+/// a group, in ascending octet order of their Merkle leaf hashes; an Epoch
 /// ordered otherwise is rejected by every replaying party.
 pub fn validate_entry_order(entries: &[Value]) -> Result<(), Error> {
     leaf_hashes(entries).map(|_| ())
@@ -50,7 +50,7 @@ pub fn leaf_hashes(entries: &[Value]) -> Result<Vec<[u8; 32]>, Error> {
         let (_, hash) = entry_leaf(entry)?;
         let order = (group, hash);
         if previous.is_some_and(|previous| previous > order) {
-            return Err(invalid("Block Entries are not in canonical order"));
+            return Err(invalid("Epoch Entries are not in canonical order"));
         }
         previous = Some(order);
         hashes.push(hash);
@@ -74,7 +74,7 @@ pub fn sort_entries(entries: &mut [Value]) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn block_octets(entries: &[Value]) -> Result<u64, Error> {
+pub fn epoch_octets(entries: &[Value]) -> Result<u64, Error> {
     let mut octets: u64 = 0;
     for entry in entries {
         let (bytes, _) = entry_leaf(entry)?;
@@ -84,25 +84,25 @@ pub fn block_octets(entries: &[Value]) -> Result<u64, Error> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockSummary {
+pub struct EpochSummary {
     pub leaf_hashes: Vec<[u8; 32]>,
     pub octets: u64,
 }
 
-pub fn verify_block(
+pub fn verify_epoch(
     previous_size: u64,
     checkpoint: &Checkpoint,
     entries: &[Value],
     prior_tree: &dyn HashReader,
-    block_cap_bytes: u64,
-) -> Result<BlockSummary, Error> {
+    epoch_cap_bytes: u64,
+) -> Result<EpochSummary, Error> {
     if checkpoint.tree_size() < previous_size {
-        return Err(Error::Block(
-            "WIST3-E02 a Block's tree size is not below the Block before it".into(),
+        return Err(Error::Epoch(
+            "WIST3-E02 an Epoch's tree size is not below the Epoch before it".into(),
         ));
     }
     if checkpoint.tree_size() - previous_size != entries.len() as u64 {
-        return Err(invalid("the Block's Entries do not fill its leaf range"));
+        return Err(invalid("the Epoch's Entries do not fill its leaf range"));
     }
     let mut octets: u64 = 0;
     let mut hashes = Vec::with_capacity(entries.len());
@@ -112,21 +112,21 @@ pub fn verify_block(
         let (bytes, hash) = entry_leaf(entry)?;
         let order = (group, hash);
         if previous.is_some_and(|previous| previous > order) {
-            return Err(invalid("Block Entries are not in canonical order"));
+            return Err(invalid("Epoch Entries are not in canonical order"));
         }
         previous = Some(order);
         octets += bytes.len() as u64 + 2;
         hashes.push(hash);
     }
-    if octets > block_cap_bytes {
-        return Err(invalid("a Block over the size cap in force"));
+    if octets > epoch_cap_bytes {
+        return Err(invalid("an Epoch over the size cap in force"));
     }
     if merkle::root_after_appending(prior_tree, previous_size, &hashes)? != *checkpoint.root() {
         return Err(invalid(
-            "the Block's Entries do not reproduce the root the Checkpoint states",
+            "the Epoch's Entries do not reproduce the root the Checkpoint states",
         ));
     }
-    Ok(BlockSummary {
+    Ok(EpochSummary {
         leaf_hashes: hashes,
         octets,
     })
@@ -157,14 +157,14 @@ mod tests {
         json!({"type": kind, "body": {"n": value}})
     }
 
-    fn sealed(previous: &[[u8; 32]], entries: &[Value], block_number: u64) -> Checkpoint {
+    fn sealed(previous: &[[u8; 32]], entries: &[Value], epoch_number: u64) -> Checkpoint {
         let mut leaves = previous.to_vec();
         leaves.extend(leaf_hashes(entries).unwrap());
         let mut checkpoint = Checkpoint::new(
             "log.example.org",
             leaves.len() as u64,
             merkle::merkle_root(&leaves),
-            block_number,
+            epoch_number,
             "2026-08-02T13:00:00Z",
         )
         .unwrap();
@@ -178,25 +178,25 @@ mod tests {
     }
 
     #[test]
-    fn a_blocks_entries_reproduce_the_root_the_checkpoint_states() {
+    fn an_epochs_entries_reproduce_the_root_the_checkpoint_states() {
         let entries = canonical(vec![
             entry("publisher_delta", 1),
             entry("publisher_delta", 2),
             entry("label", 3),
         ]);
         let checkpoint = sealed(&[], &entries, 0);
-        let summary = verify_block(0, &checkpoint, &entries, &LeafHashes(&[]), 1 << 20).unwrap();
+        let summary = verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), 1 << 20).unwrap();
         assert_eq!(summary.leaf_hashes.len(), 3);
-        assert_eq!(summary.octets, block_octets(&entries).unwrap());
+        assert_eq!(summary.octets, epoch_octets(&entries).unwrap());
     }
 
     #[test]
-    fn a_later_block_extends_the_tree_of_the_block_before_it() {
+    fn a_later_epoch_extends_the_tree_of_the_epoch_before_it() {
         let first = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
         let first_hashes = leaf_hashes(&first).unwrap();
         let second = canonical(vec![entry("dispute", 3)]);
         let checkpoint = sealed(&first_hashes, &second, 1);
-        verify_block(
+        verify_epoch(
             first_hashes.len() as u64,
             &checkpoint,
             &second,
@@ -207,18 +207,18 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_block_restates_the_previous_tree() {
+    fn an_empty_epoch_restates_the_previous_tree() {
         let first = canonical(vec![entry("publisher_delta", 1)]);
         let hashes = leaf_hashes(&first).unwrap();
         let checkpoint = sealed(&hashes, &[], 1);
         assert_eq!(checkpoint.tree_size(), 1);
-        let summary = verify_block(1, &checkpoint, &[], &LeafHashes(&hashes), 1 << 20).unwrap();
+        let summary = verify_epoch(1, &checkpoint, &[], &LeafHashes(&hashes), 1 << 20).unwrap();
         assert_eq!(summary.octets, 0);
         assert!(summary.leaf_hashes.is_empty());
     }
 
     #[test]
-    fn sorting_puts_entries_in_the_order_a_block_seals_them() {
+    fn sorting_puts_entries_in_the_order_an_epoch_seals_them() {
         let mut entries = vec![
             entry("dispute", 1),
             entry("publisher_delta", 2),
@@ -252,11 +252,11 @@ mod tests {
     }
 
     #[test]
-    fn a_block_whose_checkpoint_shrinks_the_tree_is_reported_as_divergence() {
+    fn an_epoch_whose_checkpoint_shrinks_the_tree_is_reported_as_divergence() {
         let entries = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
         let hashes = leaf_hashes(&entries).unwrap();
         let checkpoint = sealed(&hashes, &[], 1);
-        let err = verify_block(
+        let err = verify_epoch(
             hashes.len() as u64 + 1,
             &checkpoint,
             &[],
@@ -268,12 +268,12 @@ mod tests {
     }
 
     #[test]
-    fn a_block_over_the_cap_in_force_is_rejected() {
+    fn an_epoch_over_the_cap_in_force_is_rejected() {
         let entries = canonical(vec![entry("publisher_delta", 1)]);
         let checkpoint = sealed(&[], &entries, 0);
-        let octets = block_octets(&entries).unwrap();
-        verify_block(0, &checkpoint, &entries, &LeafHashes(&[]), octets).unwrap();
-        let err = verify_block(0, &checkpoint, &entries, &LeafHashes(&[]), octets - 1).unwrap_err();
+        let octets = epoch_octets(&entries).unwrap();
+        verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), octets).unwrap();
+        let err = verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), octets - 1).unwrap_err();
         assert_eq!(err.code(), Some("WIST3-E03"));
     }
 

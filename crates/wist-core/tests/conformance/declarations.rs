@@ -11,43 +11,43 @@ use wist_core::Error;
 #[derive(Clone, Copy)]
 struct Params {
     days: i64,
-    activation_blocks: i64,
+    activation_epochs: i64,
 }
 
 fn params(vector: &Value) -> Params {
     Params {
         days: vector["recovery_window_days"].as_i64().unwrap(),
-        activation_blocks: vector["declaration_activation_blocks"]
+        activation_epochs: vector["declaration_activation_epochs"]
             .as_i64()
             .unwrap_or(24),
     }
 }
 
 struct Sealed {
-    block_number: u64,
+    epoch_number: u64,
     root_token: String,
     sealed_at: String,
     entries: Vec<Value>,
 }
 
-fn sealed(block: &Value) -> Sealed {
-    let checkpoint = Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
+fn sealed(epoch: &Value) -> Sealed {
+    let checkpoint = Checkpoint::parse(epoch["checkpoint"].as_str().unwrap()).unwrap();
     Sealed {
-        block_number: checkpoint.block_number(),
+        epoch_number: checkpoint.epoch_number(),
         root_token: checkpoint.root_token(),
         sealed_at: checkpoint.sealed_at().to_string(),
-        entries: block["entries"].as_array().map_or(Vec::new(), Vec::clone),
+        entries: epoch["entries"].as_array().map_or(Vec::new(), Vec::clone),
     }
 }
 
-fn apply(state: &mut Declarations, block: &Sealed, params: Params) -> Result<Effects, Error> {
-    state.apply_block(
-        block.block_number,
-        &block.root_token,
-        &block.sealed_at,
+fn apply(state: &mut Declarations, epoch: &Sealed, params: Params) -> Result<Effects, Error> {
+    state.apply_epoch(
+        epoch.epoch_number,
+        &epoch.root_token,
+        &epoch.sealed_at,
         params.days,
-        params.activation_blocks,
-        &block.entries,
+        params.activation_epochs,
+        &epoch.entries,
     )
 }
 
@@ -90,14 +90,14 @@ fn outcome(effects: &Effects) -> &'static str {
         })
 }
 
-fn candidate_block(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Sealed {
+fn candidate_epoch(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Sealed {
     let mut leaves: Vec<[u8; 32]> = prefix
         .iter()
-        .flat_map(|block| entry_leaf_hashes(&block["entries"]))
+        .flat_map(|epoch| entry_leaf_hashes(&epoch["entries"]))
         .collect();
     leaves.extend(entry_leaf_hashes(&json!(entries)));
     Sealed {
-        block_number: prefix.len() as u64,
+        epoch_number: prefix.len() as u64,
         root_token: format!(
             "sha256:{}",
             wist_core::crypto::hex_encode(&merkle::merkle_root(&leaves))
@@ -107,11 +107,11 @@ fn candidate_block(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Se
     }
 }
 
-/// Replays the prefix, then applies the probe's candidate Block, checking
+/// Replays the prefix, then applies the probe's candidate Epoch, checking
 /// that the projection agrees with the application and that a rejected
 /// candidate leaves the state untouched.
 fn probe(
-    blocks: &[Value],
+    epochs: &[Value],
     days: Params,
     probe: &Value,
 ) -> (Declarations, Result<Effects, String>, u64) {
@@ -132,11 +132,11 @@ fn probe(
     });
     let mut state = Declarations::default();
     let mut windows = 0;
-    for block in &blocks[..=height] {
-        windows += windows_opened(&apply(&mut state, &sealed(block), days).unwrap());
+    for epoch in &epochs[..=height] {
+        windows += windows_opened(&apply(&mut state, &sealed(epoch), days).unwrap());
     }
-    let candidate = candidate_block(
-        &blocks[..=height],
+    let candidate = candidate_epoch(
+        &epochs[..=height],
         probe["candidate_sealed_at"].as_str().unwrap(),
         entries,
     );
@@ -144,7 +144,7 @@ fn probe(
     let projection = state.project(
         &candidate.sealed_at,
         days.days,
-        days.activation_blocks,
+        days.activation_epochs,
         &candidate.entries,
     );
     assert_eq!(format!("{state:?}"), before);
@@ -189,18 +189,18 @@ fn recovery_heads_sequence_floors_and_named_predecessors() {
     let vector = read_json("vectors/wist1/recovery-heads.json");
     let days = params(&vector);
     for branch in std::iter::once(&vector).chain(vector["branches"].as_array().unwrap()) {
-        let blocks = branch["blocks"].as_array().unwrap();
+        let epochs = branch["epochs"].as_array().unwrap();
         let mut state = Declarations::default();
         let mut windows = 0;
-        for block in blocks {
-            let block = sealed(block);
-            windows += windows_opened(&apply(&mut state, &block, days).unwrap());
+        for epoch in epochs {
+            let epoch = sealed(epoch);
+            windows += windows_opened(&apply(&mut state, &epoch, days).unwrap());
             for expected in branch["expected_prefix_states"]
                 .as_array()
                 .into_iter()
                 .flatten()
             {
-                if expected["height"].as_u64() == Some(block.block_number) {
+                if expected["height"].as_u64() == Some(epoch.epoch_number) {
                     assert_eq!(
                         summary(&state.domains()["example.com"], windows),
                         expected["state"]
@@ -209,8 +209,8 @@ fn recovery_heads_sequence_floors_and_named_predecessors() {
             }
         }
         for candidate in branch["probes"].as_array().into_iter().flatten() {
-            let selected = candidate["branch"].as_u64().map_or(blocks, |index| {
-                vector["branches"][index as usize]["blocks"]
+            let selected = candidate["branch"].as_u64().map_or(epochs, |index| {
+                vector["branches"][index as usize]["epochs"]
                     .as_array()
                     .unwrap()
             });
@@ -239,18 +239,18 @@ fn recovery_ownership_uses_sequence_with_original_canonical_positions() {
     let vector = read_json("vectors/wist1/recovery-order.json");
     let days = params(&vector);
     for case in vector["cases"].as_array().unwrap() {
-        let blocks = case["blocks"].as_array().unwrap();
+        let epochs = case["epochs"].as_array().unwrap();
         let mut state = Declarations::default();
         let mut sequences = Vec::new();
         let mut windows = 0;
-        for block in blocks {
-            for installation in apply(&mut state, &sealed(block), days)
+        for epoch in epochs {
+            for installation in apply(&mut state, &sealed(epoch), days)
                 .unwrap()
                 .installations
             {
                 let position = installation.declaration.position();
                 assert_eq!(
-                    &blocks[position.block_number as usize]["entries"][position.entry_index]
+                    &epochs[position.epoch_number as usize]["entries"][position.entry_index]
                         ["body"],
                     installation.declaration.envelope()
                 );
@@ -263,7 +263,7 @@ fn recovery_ownership_uses_sequence_with_original_canonical_positions() {
         let window = state.domains()["example.com"].window().unwrap();
         assert_eq!(window.owner().hash(), case["expected"]["owner_declaration"]);
         assert_eq!(
-            window.owner().position().block_number,
+            window.owner().position().epoch_number,
             case["expected"]["owner_height"]
         );
         assert_eq!(state.head().unwrap().1, case["pinned_head"]);
@@ -271,21 +271,21 @@ fn recovery_ownership_uses_sequence_with_original_canonical_positions() {
 }
 
 #[test]
-fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
+fn conflicting_groups_and_failed_authors_reject_epochs_atomically() {
     let vector = read_json("vectors/wist1/declaration-conflicts.json");
     let days = params(&vector);
     for case in vector["cases"].as_array().unwrap() {
-        let mut blocks = vector["prefixes"][case["prefix"].as_str().unwrap()]
+        let mut epochs = vector["prefixes"][case["prefix"].as_str().unwrap()]
             .as_array()
             .unwrap()
             .clone();
-        blocks.push(case["block"].clone());
+        epochs.push(case["epoch"].clone());
         let mut state = Declarations::default();
         let mut windows = std::collections::BTreeMap::<String, u64>::new();
-        let last = blocks.len() - 1;
-        for (index, block) in blocks.iter().enumerate() {
+        let last = epochs.len() - 1;
+        for (index, epoch) in epochs.iter().enumerate() {
             let before = format!("{state:?}");
-            match apply(&mut state, &sealed(block), days) {
+            match apply(&mut state, &sealed(epoch), days) {
                 Ok(effects) => {
                     for installation in effects.installations {
                         let domain = installation.declaration.envelope()["publisher"]["domain"]
@@ -328,7 +328,7 @@ fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
                         "highest_accepted_seq": domain.highest_accepted_seq(),
                         "window_end": domain.window().map(|w| timestamp(w.end_s())),
                         "windows_opened": windows[name],
-                        "reset_height": domain.reset().map(|p| p.block_number),
+                        "reset_height": domain.reset().map(|p| p.epoch_number),
                     }),
                 )
             })
@@ -339,12 +339,12 @@ fn conflicting_groups_and_failed_authors_reject_blocks_atomically() {
             "{}",
             case["name"]
         );
-        let before_any_block = format!(
+        let before_any_epoch = format!(
             "sha256:{}",
             wist_core::crypto::hex_encode(&merkle::EMPTY_ROOT)
         );
         assert_eq!(
-            state.head().map_or(before_any_block.as_str(), |h| h.1),
+            state.head().map_or(before_any_epoch.as_str(), |h| h.1),
             case["expected_accepted_head"]
         );
     }
@@ -355,11 +355,11 @@ fn settlement_restores_authenticated_chain_and_reports_competitors() {
     let vector = read_json("vectors/wist1/recovery-settlement.json");
     let days = params(&vector);
     for case in vector["cases"].as_array().unwrap() {
-        let blocks = case["blocks"].as_array().unwrap();
+        let epochs = case["epochs"].as_array().unwrap();
         let mut state = Declarations::default();
         let mut superseded = Vec::new();
-        for block in blocks {
-            for settlement in apply(&mut state, &sealed(block), days).unwrap().settlements {
+        for epoch in epochs {
+            for settlement in apply(&mut state, &sealed(epoch), days).unwrap().settlements {
                 superseded.extend(settlement.superseded.iter().map(|d| d.hash().to_string()));
             }
         }
@@ -372,9 +372,9 @@ fn settlement_restores_authenticated_chain_and_reports_competitors() {
             let mut candidate = candidate.clone();
             let height = candidate["prefix_height"].as_u64().unwrap() as usize;
             let previous =
-                wist_core::timestamp::log_seconds(&sealed(&blocks[height]).sealed_at).unwrap();
+                wist_core::timestamp::log_seconds(&sealed(&epochs[height]).sealed_at).unwrap();
             candidate["candidate_sealed_at"] = timestamp(i128::from(previous) + 3600).into();
-            assert!(probe(blocks, days, &candidate).1.is_err());
+            assert!(probe(epochs, days, &candidate).1.is_err());
         }
     }
 }

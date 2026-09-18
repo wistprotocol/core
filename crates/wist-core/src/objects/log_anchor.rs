@@ -13,8 +13,8 @@ pub struct GenesisKey {
 #[serde(deny_unknown_fields)]
 pub struct Predecessor {
     pub log_id: String,
-    pub final_block_number: u64,
-    pub final_block_hash: String,
+    pub final_epoch_number: u64,
+    pub final_root_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

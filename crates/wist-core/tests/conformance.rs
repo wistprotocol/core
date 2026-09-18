@@ -182,24 +182,24 @@ fn payload_commitment_recomputes_and_tamper_fails() {
 
 #[test]
 fn wist3_merkle_vectors() {
-    let block = read_json("vectors/wist3/block.json");
-    let leaves = entry_leaf_hashes(&block["entries"]);
+    let epoch = read_json("vectors/wist3/epoch.json");
+    let leaves = entry_leaf_hashes(&epoch["entries"]);
     let root = wist_core::merkle::merkle_root(&leaves);
     assert_eq!(
         format!("sha256:{}", wist_core::crypto::hex_encode(&root)),
-        block["root"].as_str().unwrap()
+        epoch["root"].as_str().unwrap()
     );
-    assert_eq!(leaves, hash_list(&block["leaf_hashes"]));
+    assert_eq!(leaves, hash_list(&epoch["leaf_hashes"]));
 
     let checkpoint =
-        wist_core::checkpoint::Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
-    assert_eq!(checkpoint.tree_size(), block["tree_size"].as_u64().unwrap());
+        wist_core::checkpoint::Checkpoint::parse(epoch["checkpoint"].as_str().unwrap()).unwrap();
+    assert_eq!(checkpoint.tree_size(), epoch["tree_size"].as_u64().unwrap());
     assert_eq!(*checkpoint.root(), root);
 
     let proof = read_json("vectors/wist3/inclusion-proof.json");
     let index = proof["index"].as_u64().unwrap();
     let tree_size = proof["tree_size"].as_u64().unwrap();
-    assert_eq!(tree_size, block["tree_size"].as_u64().unwrap());
+    assert_eq!(tree_size, epoch["tree_size"].as_u64().unwrap());
     let path = hash_list(&proof["path"]);
     checkpoint
         .verify_inclusion(&leaves[index as usize], index, tree_size, &path)
@@ -214,11 +214,11 @@ fn wist3_merkle_vectors() {
 }
 
 #[test]
-fn the_example_checkpoint_states_the_example_blocks_tree() {
+fn the_example_checkpoint_states_the_example_epochs_tree() {
     let (log_id, key) = example_log();
     let note = read_text("examples/checkpoint.txt");
-    let block = read_json("vectors/wist3/block.json");
-    assert_eq!(note, block["checkpoint"].as_str().unwrap());
+    let epoch = read_json("vectors/wist3/epoch.json");
+    assert_eq!(note, epoch["checkpoint"].as_str().unwrap());
 
     let checkpoint = wist_core::checkpoint::Checkpoint::parse(&note).unwrap();
     assert_eq!(checkpoint.encode(), note);
@@ -227,10 +227,10 @@ fn the_example_checkpoint_states_the_example_blocks_tree() {
             .unwrap();
     assert_eq!(verification.signers, [key.key_id.clone()].into());
     assert!(verification.cosigners.is_empty());
-    assert_eq!(checkpoint.block_number(), 0);
+    assert_eq!(checkpoint.epoch_number(), 0);
 
-    let entries: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
-    let summary = wist_core::block::verify_block(
+    let entries: Vec<serde_json::Value> = epoch["entries"].as_array().unwrap().clone();
+    let summary = wist_core::epoch::verify_epoch(
         0,
         &checkpoint,
         &entries,
@@ -238,18 +238,18 @@ fn the_example_checkpoint_states_the_example_blocks_tree() {
         268_435_456,
     )
     .unwrap();
-    assert_eq!(summary.leaf_hashes, entry_leaf_hashes(&block["entries"]));
+    assert_eq!(summary.leaf_hashes, entry_leaf_hashes(&epoch["entries"]));
 }
 
 #[test]
-fn a_blocks_entries_must_fill_the_leaf_range_its_checkpoint_states() {
+fn an_epochs_entries_must_fill_the_leaf_range_its_checkpoint_states() {
     let (_, _) = example_log();
-    let block = read_json("vectors/wist3/block.json");
+    let epoch = read_json("vectors/wist3/epoch.json");
     let checkpoint =
-        wist_core::checkpoint::Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
-    let mut entries: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
+        wist_core::checkpoint::Checkpoint::parse(epoch["checkpoint"].as_str().unwrap()).unwrap();
+    let mut entries: Vec<serde_json::Value> = epoch["entries"].as_array().unwrap().clone();
     entries.pop();
-    let err = wist_core::block::verify_block(
+    let err = wist_core::epoch::verify_epoch(
         0,
         &checkpoint,
         &entries,
@@ -259,9 +259,9 @@ fn a_blocks_entries_must_fill_the_leaf_range_its_checkpoint_states() {
     .unwrap_err();
     assert_eq!(err.code(), Some("WIST3-E03"));
 
-    let mut swapped: Vec<serde_json::Value> = block["entries"].as_array().unwrap().clone();
+    let mut swapped: Vec<serde_json::Value> = epoch["entries"].as_array().unwrap().clone();
     swapped.swap(0, 1);
-    let err = wist_core::block::verify_block(
+    let err = wist_core::epoch::verify_epoch(
         0,
         &checkpoint,
         &swapped,
@@ -395,7 +395,7 @@ fn wist2_text_extraction_vector() {
 }
 
 #[test]
-fn manifest_anchored_to_the_checkpoint_at_its_block() {
+fn manifest_anchored_to_the_checkpoint_at_its_epoch() {
     let manifest: wist_core::objects::SnapshotManifestEnvelope =
         serde_json::from_value(read_json("examples/snapshot-manifest.json")).unwrap();
     let checkpoint =
@@ -403,7 +403,7 @@ fn manifest_anchored_to_the_checkpoint_at_its_block() {
     wist_core::snapshot::check_manifest_anchor(&manifest.manifest, &checkpoint).unwrap();
 
     let mut moved = manifest.manifest.clone();
-    moved.log_position += 1;
+    moved.tree_size += 1;
     assert_eq!(
         wist_core::snapshot::check_manifest_anchor(&moved, &checkpoint)
             .unwrap_err()
@@ -492,9 +492,9 @@ fn wist1_ed25519_verification_profile() {
 }
 
 #[test]
-fn wist3_empty_block_restates_the_tree_before_it() {
+fn wist3_empty_epoch_restates_the_tree_before_it() {
     use wist_core::checkpoint::Checkpoint;
-    let v = read_json("vectors/wist3/empty-block.json");
+    let v = read_json("vectors/wist3/empty-epoch.json");
     let (log_id, key) = example_log();
 
     assert_eq!(v["empty_tree_size"].as_u64().unwrap(), 0);
@@ -508,21 +508,21 @@ fn wist3_empty_block_restates_the_tree_before_it() {
         wist_core::merkle::EMPTY_ROOT
     );
 
-    let block0 = read_json("vectors/wist3/block.json");
-    let previous = Checkpoint::parse(block0["checkpoint"].as_str().unwrap()).unwrap();
-    let empty = Checkpoint::parse(v["block_1"]["checkpoint"].as_str().unwrap()).unwrap();
+    let epoch0 = read_json("vectors/wist3/epoch.json");
+    let previous = Checkpoint::parse(epoch0["checkpoint"].as_str().unwrap()).unwrap();
+    let empty = Checkpoint::parse(v["epoch_1"]["checkpoint"].as_str().unwrap()).unwrap();
     for checkpoint in [&previous, &empty] {
         wist_core::checkpoint::verify(checkpoint, &log_id, std::slice::from_ref(&key), &[])
             .unwrap();
     }
-    assert!(v["block_1"]["entries"].as_array().unwrap().is_empty());
+    assert!(v["epoch_1"]["entries"].as_array().unwrap().is_empty());
     assert_eq!(empty.tree_size(), previous.tree_size());
     assert_eq!(empty.root(), previous.root());
-    assert_eq!(empty.root_token(), v["block_0_root"].as_str().unwrap());
+    assert_eq!(empty.root_token(), v["epoch_0_root"].as_str().unwrap());
     wist_core::checkpoint::check_sequence(Some(&previous), &empty, 3600).unwrap();
 
-    let leaves = entry_leaf_hashes(&block0["entries"]);
-    wist_core::block::verify_block(
+    let leaves = entry_leaf_hashes(&epoch0["entries"]);
+    wist_core::epoch::verify_epoch(
         previous.tree_size(),
         &empty,
         &[],
@@ -862,7 +862,7 @@ fn wist4_parameter_in_force_vectors() {
             .unwrap()
             .iter()
             .map(|c| ParameterChange {
-                block_number: c["block_number"].as_u64().unwrap(),
+                epoch_number: c["epoch_number"].as_u64().unwrap(),
                 entry_index: c["entry_index"].as_u64().unwrap(),
                 effective_at_s: c["effective_at_s"].as_i64().unwrap(),
                 value: c["value"].as_i64().unwrap(),
@@ -1030,7 +1030,7 @@ fn signed_delta_publisher_fields_and_ids() {
 fn wist4_registrable_domain_vectors() {
     use std::collections::BTreeMap;
     use wist_core::suffix_list::{
-        check_block_capacity, registrable_domain, BlockCaps, Disposition, HeldFile, SuffixList,
+        check_epoch_capacity, registrable_domain, Disposition, EpochCaps, HeldFile, SuffixList,
         SuffixListReplay,
     };
     let vector = read_json("vectors/wist4/registrable-domain.json");
@@ -1125,28 +1125,28 @@ fn wist4_registrable_domain_vectors() {
     for row in vector["in_force"].as_array().unwrap() {
         let height = row["height"].as_u64().unwrap();
         assert_eq!(
-            name_of(replay.in_force_at_block(height)).as_deref(),
+            name_of(replay.in_force_at_epoch(height)).as_deref(),
             row["list"].as_str(),
             "height {height}"
         );
     }
-    let list_at_block =
-        |height: u64| list_named(name_of(replay.in_force_at_block(height)).as_deref());
+    let list_at_epoch =
+        |height: u64| list_named(name_of(replay.in_force_at_epoch(height)).as_deref());
     for case in vector["capacity_cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
-        let cap = case["domain_block_entries_max"].as_u64().unwrap();
+        let cap = case["domain_epoch_entries_max"].as_u64().unwrap();
         let entries: Vec<(&str, &str)> = case["entries"]
             .as_array()
             .unwrap()
             .iter()
             .map(|e| (e["type"].as_str().unwrap(), e["domain"].as_str().unwrap()))
             .collect();
-        let outcome = check_block_capacity(
+        let outcome = check_epoch_capacity(
             entries,
-            list_at_block(case["height"].as_u64().unwrap()),
-            BlockCaps {
-                domain_block_entries_max: cap,
-                labeler_block_entries_max: cap,
+            list_at_epoch(case["height"].as_u64().unwrap()),
+            EpochCaps {
+                domain_epoch_entries_max: cap,
+                labeler_epoch_entries_max: cap,
             },
         );
         match case["expected"].as_str() {
@@ -1167,7 +1167,7 @@ fn wist4_registrable_domain_vectors() {
             let at = ping["height"]
                 .as_u64()
                 .unwrap_or_else(|| case["height"].as_u64().unwrap());
-            let unit = registrable_domain(ping["host"].as_str().unwrap(), list_at_block(at)).domain;
+            let unit = registrable_domain(ping["host"].as_str().unwrap(), list_at_epoch(at)).domain;
             let count = noise.entry(unit).or_default();
             let status = if *count >= base {
                 429
@@ -1181,14 +1181,14 @@ fn wist4_registrable_domain_vectors() {
         }
     }
     for row in vector["state_tuples"].as_array().unwrap() {
-        let log_position = row["log_position"].as_u64().unwrap();
-        let entry = replay.entry_at(log_position).unwrap();
+        let tree_size = row["tree_size"].as_u64().unwrap();
+        let entry = replay.entry_at(tree_size).unwrap();
         let tuple =
             serde_json::to_value(wist_core::objects::StateEntry::SuffixList(entry)).unwrap();
         assert_eq!(
             vec![tuple],
             *row["entries"].as_array().unwrap(),
-            "{log_position}"
+            "{tree_size}"
         );
     }
 }
@@ -1426,7 +1426,7 @@ fn wist2_label_definition_vectors() {
 #[test]
 fn wist3_label_table_vectors() {
     use wist_core::label::{self, LabelEvent, SealedLabelCount};
-    use wist_core::suffix_list::{check_block_capacity, BlockCaps};
+    use wist_core::suffix_list::{check_epoch_capacity, EpochCaps};
     let vector = read_json("vectors/wist3/label-tables.json");
     for case in vector["statistics_cases"].as_array().unwrap() {
         let rows = label::labeler_rows(case["sealed"].as_array().unwrap().iter().map(|e| {
@@ -1458,12 +1458,12 @@ fn wist3_label_table_vectors() {
             .iter()
             .map(|e| (e["type"].as_str().unwrap(), e["domain"].as_str().unwrap()))
             .collect();
-        let outcome = check_block_capacity(
+        let outcome = check_epoch_capacity(
             entries,
             None,
-            BlockCaps {
-                domain_block_entries_max: case["domain_block_entries_max"].as_u64().unwrap(),
-                labeler_block_entries_max: case["labeler_block_entries_max"].as_u64().unwrap(),
+            EpochCaps {
+                domain_epoch_entries_max: case["domain_epoch_entries_max"].as_u64().unwrap(),
+                labeler_epoch_entries_max: case["labeler_epoch_entries_max"].as_u64().unwrap(),
             },
         );
         match case["expected"].as_str() {
@@ -1502,7 +1502,7 @@ fn wist3_label_table_vectors() {
         assert_eq!(
             label::labeler_active(
                 case["last_sealed_height"].as_u64().unwrap(),
-                case["inactivity_blocks"].as_u64().unwrap(),
+                case["inactivity_epochs"].as_u64().unwrap(),
                 case["height"].as_u64().unwrap()
             ),
             case["applies"].as_bool().unwrap(),

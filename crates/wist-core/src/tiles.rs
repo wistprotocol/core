@@ -67,12 +67,12 @@ impl Tile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Bundle {
+pub struct EntryBundle {
     pub index: u64,
     pub width: u32,
 }
 
-impl Bundle {
+impl EntryBundle {
     pub fn path(&self) -> String {
         format!(
             "/tile/entries/{}{}",
@@ -116,17 +116,17 @@ pub fn required_tiles(tree_size: u64) -> Vec<Tile> {
     tiles
 }
 
-pub fn required_bundles(tree_size: u64) -> Vec<Bundle> {
+pub fn required_entry_bundles(tree_size: u64) -> Vec<EntryBundle> {
     let full = tree_size / u64::from(TILE_WIDTH);
     let remainder = (tree_size % u64::from(TILE_WIDTH)) as u32;
-    let mut bundles: Vec<Bundle> = (0..full)
-        .map(|index| Bundle {
+    let mut bundles: Vec<EntryBundle> = (0..full)
+        .map(|index| EntryBundle {
             index,
             width: TILE_WIDTH,
         })
         .collect();
     if remainder > 0 {
-        bundles.push(Bundle {
+        bundles.push(EntryBundle {
             index: full,
             width: remainder,
         });
@@ -145,8 +145,8 @@ pub fn tiles_for_range(from: u64, to: u64, tree_size: u64) -> Vec<Tile> {
         .collect()
 }
 
-pub fn bundles_for_range(from: u64, to: u64, tree_size: u64) -> Vec<Bundle> {
-    required_bundles(tree_size)
+pub fn entry_bundles_for_range(from: u64, to: u64, tree_size: u64) -> Vec<EntryBundle> {
+    required_entry_bundles(tree_size)
         .into_iter()
         .filter(|bundle| meets(bundle.leaf_range(), from, to))
         .collect()
@@ -229,7 +229,7 @@ pub fn check_entry_bytes(octets: u64) -> Result<(), Error> {
 
 pub fn check_transport_bound(octets: u64, bound: u64) -> Result<(), Error> {
     if octets > bound {
-        return Err(invalid("a Block over its transport bound"));
+        return Err(invalid("an Epoch over its transport bound"));
     }
     Ok(())
 }
@@ -312,7 +312,11 @@ pub fn check_tree(tiles: &TileSet, tree_size: u64, root: &[u8; 32]) -> Result<()
     Ok(())
 }
 
-pub fn check_bundle(entries: &[Vec<u8>], first_leaf: u64, tiles: &TileSet) -> Result<(), Error> {
+pub fn check_entry_bundle(
+    entries: &[Vec<u8>],
+    first_leaf: u64,
+    tiles: &TileSet,
+) -> Result<(), Error> {
     for (offset, entry) in entries.iter().enumerate() {
         let index = first_leaf + offset as u64;
         let stored = tiles
@@ -353,7 +357,7 @@ mod tests {
             "/tile/1/x001/000.p/3"
         );
         assert_eq!(
-            Bundle {
+            EntryBundle {
                 index: 1000,
                 width: 256
             }
@@ -372,9 +376,9 @@ mod tests {
             ["/tile/0/000", "/tile/0/001.p/44", "/tile/1/000.p/1"]
         );
         assert_eq!(
-            required_bundles(300)
+            required_entry_bundles(300)
                 .iter()
-                .map(Bundle::path)
+                .map(EntryBundle::path)
                 .collect::<Vec<_>>(),
             ["/tile/entries/000", "/tile/entries/001.p/44"]
         );
@@ -390,9 +394,9 @@ mod tests {
         assert_eq!(paths, ["/tile/0/001.p/44"]);
         let early: Vec<String> = tiles_for_range(0, 4, 300).iter().map(Tile::path).collect();
         assert_eq!(early, ["/tile/0/000", "/tile/1/000.p/1"]);
-        let bundles: Vec<String> = bundles_for_range(255, 257, 300)
+        let bundles: Vec<String> = entry_bundles_for_range(255, 257, 300)
             .iter()
-            .map(Bundle::path)
+            .map(EntryBundle::path)
             .collect();
         assert_eq!(bundles, ["/tile/entries/000", "/tile/entries/001.p/44"]);
     }
@@ -433,10 +437,10 @@ mod tests {
         let entries: Vec<Vec<u8>> = (0..4u8).map(|i| vec![b'{', b'}', i]).collect();
         let hashes: Vec<[u8; 32]> = entries.iter().map(|e| merkle::leaf_hash(e)).collect();
         let tiles = TileSet::build(&hashes);
-        check_bundle(&entries, 0, &tiles).unwrap();
+        check_entry_bundle(&entries, 0, &tiles).unwrap();
         let mut tampered = entries.clone();
         tampered[2].push(b' ');
-        let err = check_bundle(&tampered, 0, &tiles).unwrap_err();
+        let err = check_entry_bundle(&tampered, 0, &tiles).unwrap_err();
         assert_eq!(err.code(), Some("WIST3-E03"));
     }
 
@@ -540,7 +544,7 @@ mod props {
                 format!("/tile/0/{encoded}")
             );
             prop_assert_eq!(
-                Bundle { index, width: 3 }.path(),
+                EntryBundle { index, width: 3 }.path(),
                 format!("/tile/entries/{encoded}.p/3")
             );
         }
@@ -552,12 +556,12 @@ mod props {
                 prop_assert!(start < end && end <= tree_size);
                 prop_assert!(tiles_for_range(start, end, tree_size).contains(&tile));
             }
-            for bundle in required_bundles(tree_size) {
+            for bundle in required_entry_bundles(tree_size) {
                 let (start, end) = bundle.leaf_range();
                 prop_assert!(start < end && end <= tree_size);
             }
             prop_assert_eq!(
-                required_bundles(tree_size).iter().map(|b| u64::from(b.width)).sum::<u64>(),
+                required_entry_bundles(tree_size).iter().map(|b| u64::from(b.width)).sum::<u64>(),
                 tree_size
             );
         }

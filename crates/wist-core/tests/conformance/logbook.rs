@@ -2,7 +2,7 @@ use super::{entry_leaf_hashes, example_log, hash_list, read_json, read_text};
 use serde_json::Value;
 use wist_core::checkpoint::{self, Adoption, Checkpoint, Equivocation, Progression, WitnessKey};
 use wist_core::merkle::{self, LeafHashes};
-use wist_core::tiles::{self, Bundle, Tile, TileSet};
+use wist_core::tiles::{self, EntryBundle, Tile, TileSet};
 
 fn vector() -> Value {
     read_json("vectors/wist3/checkpoints.json")
@@ -60,20 +60,20 @@ fn note_form_and_signature_rules_select_the_documented_outcome() {
 }
 
 #[test]
-fn each_block_of_the_vector_log_states_its_cumulative_tree() {
+fn each_epoch_of_the_vector_log_states_its_cumulative_tree() {
     let vector = vector();
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut previous: Option<Checkpoint> = None;
-    for block in vector["blocks"].as_array().unwrap() {
-        let checkpoint = verified(block["checkpoint"].as_str().unwrap(), &[]).unwrap();
+    for epoch in vector["epochs"].as_array().unwrap() {
+        let checkpoint = verified(epoch["checkpoint"].as_str().unwrap(), &[]).unwrap();
         assert_eq!(
-            checkpoint.block_number(),
-            block["block_number"].as_u64().unwrap()
+            checkpoint.epoch_number(),
+            epoch["epoch_number"].as_u64().unwrap()
         );
         let previous_size = leaves.len() as u64;
-        let entries: Vec<Value> = block["entries"].as_array().unwrap().clone();
+        let entries: Vec<Value> = epoch["entries"].as_array().unwrap().clone();
         let prior = leaves.clone();
-        let summary = wist_core::block::verify_block(
+        let summary = wist_core::epoch::verify_epoch(
             previous_size,
             &checkpoint,
             &entries,
@@ -83,7 +83,7 @@ fn each_block_of_the_vector_log_states_its_cumulative_tree() {
         .unwrap();
         leaves.extend(summary.leaf_hashes);
         assert_eq!(checkpoint.tree_size(), leaves.len() as u64);
-        assert_eq!(leaves, hash_list(&block["leaf_hashes"]));
+        assert_eq!(leaves, hash_list(&epoch["leaf_hashes"]));
         assert_eq!(*checkpoint.root(), merkle::merkle_root(&leaves));
         if let Some(previous) = &previous {
             checkpoint::check_sequence(Some(previous), &checkpoint, 3600).unwrap();
@@ -154,8 +154,8 @@ fn a_lower_checkpoint_is_stale_unless_its_note_text_differs_from_the_retained_on
     for case in vector()["rollback_cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let offered = verified(case["offered_checkpoint"].as_str().unwrap(), &[]).unwrap();
-        let head = case["verified_head_block_number"].as_u64().unwrap();
-        assert!(offered.block_number() < head, "{name}");
+        let head = case["verified_head_epoch_number"].as_u64().unwrap();
+        assert!(offered.epoch_number() < head, "{name}");
         let retained = case["verified_checkpoint"]
             .as_str()
             .map(|note| verified(note, &[]).unwrap());
@@ -192,7 +192,7 @@ fn the_three_equivocation_forms_are_detected_from_their_evidence() {
         forms,
         [
             Equivocation::SameSizeDifferentRoot,
-            Equivocation::SameBlockDifferentStatement,
+            Equivocation::SameEpochDifferentStatement,
             Equivocation::NoConsistentPrefix
         ]
         .into_iter()
@@ -201,7 +201,7 @@ fn the_three_equivocation_forms_are_detected_from_their_evidence() {
 }
 
 #[test]
-fn an_archived_checkpoint_must_sit_at_its_own_block_path() {
+fn an_archived_checkpoint_must_sit_at_its_own_epoch_path() {
     for case in vector()["archive_cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let checkpoint = verified(case["checkpoint"].as_str().unwrap(), &[]).unwrap();
@@ -257,13 +257,13 @@ fn the_witness_quorum_counts_distinct_trusted_names() {
 }
 
 #[test]
-fn a_snapshot_manifest_must_match_the_checkpoint_at_its_block() {
+fn a_snapshot_manifest_must_match_the_checkpoint_at_its_epoch() {
     let manifest_template: Value = read_json("examples/snapshot-manifest.json")["manifest"].clone();
     for case in vector()["cold_start_cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let checkpoint = verified(case["checkpoint"].as_str().unwrap(), &[]).unwrap();
         let mut value = manifest_template.clone();
-        for field in ["block_number", "log_position", "anchor_block_hash"] {
+        for field in ["epoch_number", "tree_size", "root_hash"] {
             value[field] = case["manifest"][field].clone();
         }
         let manifest: wist_core::objects::SnapshotManifest = serde_json::from_value(value).unwrap();
@@ -276,35 +276,35 @@ fn a_snapshot_manifest_must_match_the_checkpoint_at_its_block() {
 
 #[test]
 fn the_static_surface_of_the_example_tree_is_the_octets_the_vector_fixes() {
-    let block = read_json("vectors/wist3/block.json");
-    let checkpoint = Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
-    let leaves = entry_leaf_hashes(&block["entries"]);
-    let tree_size = block["tree_size"].as_u64().unwrap();
+    let epoch = read_json("vectors/wist3/epoch.json");
+    let checkpoint = Checkpoint::parse(epoch["checkpoint"].as_str().unwrap()).unwrap();
+    let leaves = entry_leaf_hashes(&epoch["entries"]);
+    let tree_size = epoch["tree_size"].as_u64().unwrap();
 
     let tile = Tile {
         level: 0,
         index: 0,
         width: leaves.len() as u32,
     };
-    assert_eq!(tile.path(), block["tile_0_000_p_4_path"].as_str().unwrap());
+    assert_eq!(tile.path(), epoch["tile_0_000_p_4_path"].as_str().unwrap());
     assert_eq!(tiles::required_tiles(tree_size), vec![tile]);
     let tile_bytes =
-        wist_core::crypto::hex_decode(block["tile_0_000_p_4"].as_str().unwrap()).unwrap();
+        wist_core::crypto::hex_decode(epoch["tile_0_000_p_4"].as_str().unwrap()).unwrap();
     assert_eq!(tiles::encode_tile(&leaves), tile_bytes);
     assert_eq!(tiles::decode_tile(&tile_bytes).unwrap(), leaves);
 
-    let bundle = Bundle {
+    let bundle = EntryBundle {
         index: 0,
         width: leaves.len() as u32,
     };
     assert_eq!(
         bundle.path(),
-        block["entry_bundle_000_p_4_path"].as_str().unwrap()
+        epoch["entry_bundle_000_p_4_path"].as_str().unwrap()
     );
-    assert_eq!(tiles::required_bundles(tree_size), vec![bundle]);
+    assert_eq!(tiles::required_entry_bundles(tree_size), vec![bundle]);
     let bundle_bytes =
-        wist_core::crypto::hex_decode(block["entry_bundle_000_p_4"].as_str().unwrap()).unwrap();
-    let leaf_data: Vec<Vec<u8>> = block["entries"]
+        wist_core::crypto::hex_decode(epoch["entry_bundle_000_p_4"].as_str().unwrap()).unwrap();
+    let leaf_data: Vec<Vec<u8>> = epoch["entries"]
         .as_array()
         .unwrap()
         .iter()
@@ -319,20 +319,20 @@ fn the_static_surface_of_the_example_tree_is_the_octets_the_vector_fixes() {
         leaf_data
     );
     assert_eq!(
-        wist_core::block::parse_entries(&leaf_data).unwrap(),
-        *block["entries"].as_array().unwrap()
+        wist_core::epoch::parse_entries(&leaf_data).unwrap(),
+        *epoch["entries"].as_array().unwrap()
     );
 
     let mut served = TileSet::new();
     served.insert_bytes(0, 0, &tile_bytes).unwrap();
     tiles::check_tree(&served, tree_size, checkpoint.root()).unwrap();
-    tiles::check_bundle(&leaf_data, 0, &served).unwrap();
+    tiles::check_entry_bundle(&leaf_data, 0, &served).unwrap();
     assert_eq!(
         TileSet::build(&leaves).serve(tree_size),
         [(tile.path(), tile_bytes.clone())].into_iter().collect()
     );
 
-    assert!(block["consistency_proof_0_to_4"]
+    assert!(epoch["consistency_proof_0_to_4"]
         .as_array()
         .unwrap()
         .is_empty());
@@ -422,7 +422,7 @@ fn the_static_file_octet_bounds_admit_equality_and_reject_excess() {
         ),
     ] {
         let octets = wist_core::jcs::canonicalize(&entry[field]).unwrap().len() as u64;
-        let outcome = match wist_core::block::entry_leaf(&entry[field]) {
+        let outcome = match wist_core::epoch::entry_leaf(&entry[field]) {
             Ok(_) => "valid".to_string(),
             Err(error) => error.code().unwrap().to_string(),
         };
@@ -469,11 +469,11 @@ fn aggregator_key(key_id: &str, public_key: &str) -> wist_core::checkpoint::Aggr
     }
 }
 
-fn walk_history(label: &str, blocks: &[Value], key: &wist_core::checkpoint::AggregatorKey) {
+fn walk_history(label: &str, epochs: &[Value], key: &wist_core::checkpoint::AggregatorKey) {
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut previous: Option<Checkpoint> = None;
-    for block in blocks {
-        let checkpoint = Checkpoint::parse(block["checkpoint"].as_str().unwrap()).unwrap();
+    for epoch in epochs {
+        let checkpoint = Checkpoint::parse(epoch["checkpoint"].as_str().unwrap()).unwrap();
         let verification = checkpoint::verify(
             &checkpoint,
             checkpoint.origin(),
@@ -482,11 +482,11 @@ fn walk_history(label: &str, blocks: &[Value], key: &wist_core::checkpoint::Aggr
         )
         .unwrap_or_else(|e| panic!("{label}: {e}"));
         assert_eq!(verification.signers, [key.key_id.clone()].into());
-        leaves.extend(entry_leaf_hashes(&block["entries"]));
+        leaves.extend(entry_leaf_hashes(&epoch["entries"]));
         assert_eq!(checkpoint.tree_size(), leaves.len() as u64, "{label}");
         assert_eq!(*checkpoint.root(), merkle::merkle_root(&leaves), "{label}");
         if let Some(previous) = &previous {
-            assert_eq!(checkpoint.block_number(), previous.block_number() + 1);
+            assert_eq!(checkpoint.epoch_number(), previous.epoch_number() + 1);
             let proof =
                 merkle::consistency_proof(previous.tree_size(), checkpoint.tree_size(), &leaves)
                     .unwrap();
@@ -512,9 +512,9 @@ fn histories_that_carry_checkpoints_bind_their_cumulative_trees() {
         );
         let mut histories = Vec::new();
         collect_histories(&vector, &mut histories);
-        assert!(!histories.is_empty(), "{path}: no history of Blocks");
-        for blocks in histories {
-            walk_history(path, &blocks, &key);
+        assert!(!histories.is_empty(), "{path}: no history of Epochs");
+        for epochs in histories {
+            walk_history(path, &epochs, &key);
         }
     }
 }
@@ -529,10 +529,10 @@ fn each_log_of_the_deduplication_vector_seals_the_shared_delta_under_its_own_key
             anchor["genesis_key"]["key_id"].as_str().unwrap(),
             anchor["genesis_key"]["public_key"].as_str().unwrap(),
         );
-        let blocks = log["blocks"].as_array().unwrap();
-        walk_history(log["log_id"].as_str().unwrap(), blocks, &key);
-        let sealed = blocks.iter().any(|block| {
-            block["entries"].as_array().unwrap().iter().any(|entry| {
+        let epochs = log["epochs"].as_array().unwrap();
+        walk_history(log["log_id"].as_str().unwrap(), epochs, &key);
+        let sealed = epochs.iter().any(|epoch| {
+            epoch["entries"].as_array().unwrap().iter().any(|entry| {
                 entry["type"] == "publisher_delta"
                     && wist_core::delta::delta_id(&entry["body"]["delta"]).unwrap() == delta_id
             })

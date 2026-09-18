@@ -231,7 +231,7 @@ pub fn validate_label(
     Ok(envelope)
 }
 
-/// A Label the Log sealed, at its Block and Entry index.
+/// A Label the Log sealed, at its Epoch and Entry index.
 #[derive(Debug, Clone)]
 pub struct SealedLabel {
     pub label: Label,
@@ -274,7 +274,7 @@ pub fn current_label<'a>(
         })
 }
 
-/// Whether a Label applies nothing at a Block sealed at `sealed_at`
+/// Whether a Label applies nothing at an Epoch sealed at `sealed_at`
 /// because its `expires_at` is at or before that instant.
 pub fn expired_at(label: &Label, sealed_at: &str) -> bool {
     label.expires_at.as_deref().is_some_and(|expires_at| {
@@ -283,7 +283,7 @@ pub fn expired_at(label: &Label, sealed_at: &str) -> bool {
 }
 
 /// WIST-3 §7: the `label` tuple the current Label leaves at a Snapshot
-/// whose Block is sealed at `sealed_at`; none when retracted or expired.
+/// whose Epoch is sealed at `sealed_at`; none when retracted or expired.
 pub fn label_tuple(current: &SealedLabel, sealed_at: &str) -> Option<LabelEntry> {
     let label = &current.label;
     if label.retracted == Some(true) || expired_at(label, sealed_at) {
@@ -361,7 +361,7 @@ pub fn validate_dispute(
     Ok(envelope)
 }
 
-/// A dispute the Log sealed, at its Block and Entry index.
+/// A dispute the Log sealed, at its Epoch and Entry index.
 #[derive(Debug, Clone)]
 pub struct SealedDispute {
     pub dispute: crate::objects::Dispute,
@@ -490,7 +490,7 @@ pub struct LabelEvent<'a> {
 
 /// WIST-4 §6's recommended default profile: whether the triple's Label is
 /// live at `height` — current, unretracted and not yet at
-/// `expires_at_height`, the first height whose Block instant reaches the
+/// `expires_at_height`, the first height whose Epoch instant reaches the
 /// expiry. `events` are in ascending Log order, which WIST-2 §3.3 uses to
 /// break equal `asserted_at` instants.
 pub fn live_at(events: &[LabelEvent<'_>], expires_at_height: Option<u64>, height: u64) -> bool {
@@ -521,8 +521,8 @@ pub fn counted_at(events: &[LabelEvent<'_>], expires_at_height: Option<u64>, hei
         && live_at(events, expires_at_height, height - 1)
 }
 
-/// WIST-4 §6: a Labeler with no sealed Entry within `inactivity_blocks`
+/// WIST-4 §6: a Labeler with no sealed Entry within `inactivity_epochs`
 /// of `height` is ignored.
-pub fn labeler_active(last_sealed_height: u64, inactivity_blocks: u64, height: u64) -> bool {
-    height.saturating_sub(last_sealed_height) <= inactivity_blocks
+pub fn labeler_active(last_sealed_height: u64, inactivity_epochs: u64, height: u64) -> bool {
+    height.saturating_sub(last_sealed_height) <= inactivity_epochs
 }

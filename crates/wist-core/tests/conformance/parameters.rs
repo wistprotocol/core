@@ -18,7 +18,7 @@ fn prospective_schedule() {
             .map(|c| Amendment {
                 parameter: c["parameter"].as_str().unwrap().into(),
                 value: c["value"].as_i64().unwrap(),
-                block_number: c["block_height"].as_u64().unwrap(),
+                epoch_number: c["epoch_height"].as_u64().unwrap(),
                 entry_index: c["entry_index"].as_u64().unwrap(),
                 sealed_at_s: c["sealed_at_s"].as_i64().unwrap(),
                 effective_at_s: c["effective_at_s"].as_i64().unwrap(),
@@ -112,7 +112,7 @@ fn signed_parameter_wire_bounds() {
                 .try_accept(Amendment {
                     parameter: name.into(),
                     value,
-                    block_number: 0,
+                    epoch_number: 0,
                     entry_index: 0,
                     sealed_at_s: 0,
                     effective_at_s: 7 * 86400,
@@ -126,16 +126,16 @@ fn signed_parameter_wire_bounds() {
 }
 
 #[test]
-fn block_size_schedules() {
+fn epoch_size_schedules() {
     let v = vector();
-    for case in v["block_size_cases"].as_array().unwrap() {
+    for case in v["epoch_size_cases"].as_array().unwrap() {
         let mut schedule = Schedule::new(0);
         let mut largest = 0;
         let mut previous = None;
-        for (height, block) in case["blocks"].as_array().unwrap().iter().enumerate() {
+        for (height, epoch) in case["epochs"].as_array().unwrap().iter().enumerate() {
             let expected = &case["expected"][height];
-            let transport = previous.map_or(v["block_cap_default"].as_u64().unwrap(), |at| {
-                schedule.block_size_bounds(at).1
+            let transport = previous.map_or(v["epoch_cap_default"].as_u64().unwrap(), |at| {
+                schedule.epoch_size_bounds(at).1
             });
             assert_eq!(
                 transport,
@@ -143,25 +143,25 @@ fn block_size_schedules() {
                 "{}",
                 case["label"]
             );
-            let at = block["sealed_at_s"].as_i64().unwrap();
-            let proposed_max = largest.max(block["jcs_bytes"].as_u64().unwrap());
+            let at = epoch["sealed_at_s"].as_i64().unwrap();
+            let proposed_max = largest.max(epoch["jcs_bytes"].as_u64().unwrap());
             let mut tentative = schedule.clone();
             let mut rejected = Vec::new();
-            for (index, change) in block["amendments"].as_array().unwrap().iter().enumerate() {
+            for (index, change) in epoch["amendments"].as_array().unwrap().iter().enumerate() {
                 let Some(value) = change["value"].as_i64() else {
                     rejected.push(index);
                     continue;
                 };
                 let amendment = Amendment {
-                    parameter: "block_decompressed_cap_bytes".into(),
+                    parameter: "epoch_cap_bytes".into(),
                     value,
-                    block_number: height as u64,
+                    epoch_number: height as u64,
                     entry_index: index as u64,
                     sealed_at_s: at,
                     effective_at_s: change["effective_at_s"].as_i64().unwrap(),
                 };
                 if tentative
-                    .try_accept_with_block_size(amendment, proposed_max)
+                    .try_accept_with_epoch_size(amendment, proposed_max)
                     .is_err()
                 {
                     rejected.push(index);
@@ -173,7 +173,7 @@ fn block_size_schedules() {
                 "{}",
                 case["label"]
             );
-            let cap = tentative.block_size_bounds(at).0;
+            let cap = tentative.epoch_size_bounds(at).0;
             assert_eq!(
                 cap,
                 expected["sealing_cap"].as_u64().unwrap(),
@@ -183,7 +183,7 @@ fn block_size_schedules() {
             let valid = proposed_max <= cap;
             assert_eq!(
                 valid,
-                expected["block_valid"].as_bool().unwrap(),
+                expected["epoch_valid"].as_bool().unwrap(),
                 "{}",
                 case["label"]
             );
@@ -203,39 +203,36 @@ fn block_size_schedules() {
 }
 
 #[test]
-fn block_size_candidate_at_the_registry_floor_is_accepted_below_it_rejected() {
-    let floor = parameters::spec("block_decompressed_cap_bytes")
-        .unwrap()
-        .min
-        .unwrap();
+fn epoch_size_candidate_at_the_registry_floor_is_accepted_below_it_rejected() {
+    let floor = parameters::spec("epoch_cap_bytes").unwrap().min.unwrap();
     assert_eq!(floor, 65_537);
     let below = Amendment {
-        parameter: "block_decompressed_cap_bytes".into(),
+        parameter: "epoch_cap_bytes".into(),
         value: floor - 1,
-        block_number: 0,
+        epoch_number: 0,
         entry_index: 0,
         sealed_at_s: 0,
         effective_at_s: 604_800,
     };
     let at_floor = Amendment {
-        parameter: "block_decompressed_cap_bytes".into(),
+        parameter: "epoch_cap_bytes".into(),
         value: floor,
-        block_number: 0,
+        epoch_number: 0,
         entry_index: 1,
         sealed_at_s: 0,
         effective_at_s: 604_800,
     };
     let mut rejecting = Schedule::new(0);
-    assert!(rejecting.try_accept_with_block_size(below, 0).is_err());
+    assert!(rejecting.try_accept_with_epoch_size(below, 0).is_err());
     let mut accepting = Schedule::new(0);
-    assert!(accepting.try_accept_with_block_size(at_floor, 0).is_ok());
+    assert!(accepting.try_accept_with_epoch_size(at_floor, 0).is_ok());
 }
 
 #[test]
-fn block_transport_bound_from_verified_prefix() {
+fn epoch_transport_bound_from_verified_prefix() {
     let v = vector();
-    let default = v["block_cap_default"].as_u64().unwrap();
-    for case in v["block_transport_cases"].as_array().unwrap() {
+    let default = v["epoch_cap_default"].as_u64().unwrap();
+    for case in v["epoch_transport_cases"].as_array().unwrap() {
         let snapshot_bootstrap = case["snapshot_bootstrap"].as_bool().unwrap_or(false);
         let bound = if snapshot_bootstrap {
             case["accepted_caps"]
@@ -248,15 +245,15 @@ fn block_transport_bound_from_verified_prefix() {
             let mut schedule = Schedule::new(0);
             for cap in case["accepted_caps"].as_array().unwrap() {
                 schedule.adopt(Amendment {
-                    parameter: "block_decompressed_cap_bytes".into(),
+                    parameter: "epoch_cap_bytes".into(),
                     value: cap["value"].as_i64().unwrap(),
-                    block_number: cap["block_height"].as_u64().unwrap(),
+                    epoch_number: cap["epoch_height"].as_u64().unwrap(),
                     entry_index: cap["entry_index"].as_u64().unwrap(),
                     sealed_at_s: 0,
                     effective_at_s: cap["effective_at_s"].as_i64().unwrap(),
                 });
             }
-            schedule.block_size_bounds(prefix_sealed_at_s).1
+            schedule.epoch_size_bounds(prefix_sealed_at_s).1
         } else {
             default
         };

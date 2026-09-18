@@ -23,13 +23,8 @@ const fn p(
 }
 
 pub const PARAMS: &[ParamSpec] = &[
-    p("block_cadence_seconds", Some(3600), Some(1), Some(86400)),
-    p(
-        "block_decompressed_cap_bytes",
-        Some(268_435_456),
-        Some(65_537),
-        None,
-    ),
+    p("epoch_cadence_seconds", Some(3600), Some(1), Some(86400)),
+    p("epoch_cap_bytes", Some(268_435_456), Some(65_537), None),
     p("checkpoint_witness_quorum", Some(0), Some(0), None),
     p("extract_cap_bytes", Some(32768), Some(2), None),
     p("links_cap_bytes", Some(4096), Some(21), None),
@@ -38,10 +33,10 @@ pub const PARAMS: &[ParamSpec] = &[
     p("url_cap_bytes", Some(2048), Some(14), None),
     p("payload_window_days", Some(180), Some(30), None),
     p("mirror_retention_days", Some(90), Some(30), None),
-    p("record_seal_blocks", Some(24), Some(1), None),
-    p("domain_block_entries_max", Some(10000), Some(1), None),
-    p("labeler_block_entries_max", Some(1000), Some(1), None),
-    p("max_inclusion_blocks", Some(4), Some(1), None),
+    p("record_seal_epochs", Some(24), Some(1), None),
+    p("domain_epoch_entries_max", Some(10000), Some(1), None),
+    p("labeler_epoch_entries_max", Some(1000), Some(1), None),
+    p("max_inclusion_epochs", Some(4), Some(1), None),
     p(
         "ingest_budget_bytes_day",
         Some(1_073_741_824),
@@ -55,7 +50,7 @@ pub const PARAMS: &[ParamSpec] = &[
     p("quota_base", Some(1000), Some(1), None),
     p("recovery_window_days", Some(7), Some(1), None),
     p("param_grace_days", Some(7), Some(1), None),
-    p("declaration_activation_blocks", Some(24), Some(0), None),
+    p("declaration_activation_epochs", Some(24), Some(0), None),
 ];
 
 pub fn spec(name: &str) -> Option<&'static ParamSpec> {
@@ -84,9 +79,9 @@ const COMBO_RULES: &[ComboRule] = &[
         holds: |eff| eff("mirror_retention_days") * 6 >= eff("payload_window_days"),
     },
     ComboRule {
-        participants: &["labeler_block_entries_max", "domain_block_entries_max"],
-        description: "labeler_block_entries_max must not exceed domain_block_entries_max",
-        holds: |eff| eff("labeler_block_entries_max") <= eff("domain_block_entries_max"),
+        participants: &["labeler_epoch_entries_max", "domain_epoch_entries_max"],
+        description: "labeler_epoch_entries_max must not exceed domain_epoch_entries_max",
+        holds: |eff| eff("labeler_epoch_entries_max") <= eff("domain_epoch_entries_max"),
     },
 ];
 
@@ -129,7 +124,7 @@ pub fn validate(name: &str, value: i64, lookup: impl Fn(&str) -> i64) -> Result<
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParameterChange {
-    pub block_number: u64,
+    pub epoch_number: u64,
     pub entry_index: u64,
     pub effective_at_s: i64,
     pub value: i64,
@@ -140,7 +135,7 @@ pub fn value_in_force(default: i64, changes: &[ParameterChange], t_s: i64) -> (i
         .iter()
         .enumerate()
         .filter(|(_, c)| c.effective_at_s <= t_s)
-        .max_by_key(|(_, c)| (c.effective_at_s, c.block_number, c.entry_index))
+        .max_by_key(|(_, c)| (c.effective_at_s, c.epoch_number, c.entry_index))
         .map(|(i, c)| (c.value, Some(i)))
         .unwrap_or((default, None))
 }
@@ -163,10 +158,10 @@ mod tests {
         validate("payload_window_days", 540, defaults).unwrap();
         assert!(validate("mirror_retention_days", 29, defaults).is_err());
         validate("mirror_retention_days", 30, defaults).unwrap();
-        assert!(validate("labeler_block_entries_max", 10001, defaults).is_err());
-        validate("labeler_block_entries_max", 10000, defaults).unwrap();
-        assert!(validate("domain_block_entries_max", 999, defaults).is_err());
-        validate("domain_block_entries_max", 1000, defaults).unwrap();
+        assert!(validate("labeler_epoch_entries_max", 10001, defaults).is_err());
+        validate("labeler_epoch_entries_max", 10000, defaults).unwrap();
+        assert!(validate("domain_epoch_entries_max", 999, defaults).is_err());
+        validate("domain_epoch_entries_max", 1000, defaults).unwrap();
         assert!(validate("mirror_retention_days", 30, |name| {
             if name == "payload_window_days" {
                 181
@@ -197,13 +192,13 @@ mod tests {
     }
 
     fn change(
-        block_number: u64,
+        epoch_number: u64,
         entry_index: u64,
         effective_at_s: i64,
         value: i64,
     ) -> ParameterChange {
         ParameterChange {
-            block_number,
+            epoch_number,
             entry_index,
             effective_at_s,
             value,
@@ -226,11 +221,11 @@ mod tests {
     }
 
     #[test]
-    fn entry_index_breaks_ties_only_inside_a_block() {
+    fn entry_index_breaks_ties_only_inside_an_epoch() {
         let changes = [change(10, 7, 500, 900), change(11, 0, 500, 1800)];
         assert_eq!(value_in_force(3600, &changes, 600), (1800, Some(1)));
-        let same_block = [change(10, 7, 500, 900), change(10, 2, 500, 1800)];
-        assert_eq!(value_in_force(3600, &same_block, 600), (900, Some(0)));
+        let same_epoch = [change(10, 7, 500, 900), change(10, 2, 500, 1800)];
+        assert_eq!(value_in_force(3600, &same_epoch, 600), (900, Some(0)));
     }
 
     #[test]

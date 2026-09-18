@@ -7,7 +7,7 @@ use wist_core::crypto::PublicKey;
 use wist_core::merkle::{self, LeafHashes};
 use wist_core::objects::{AggregatorKeyEntry, GenesisKey, StateEntry};
 
-const BLOCK_CAP_BYTES: u64 = 268_435_456;
+const EPOCH_CAP_BYTES: u64 = 268_435_456;
 const CADENCE_SECONDS: i64 = 3600;
 
 fn vector() -> Value {
@@ -67,8 +67,8 @@ fn stated_key_ids(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-struct BlockReplay {
-    block_number: u64,
+struct EpochReplay {
+    epoch_number: u64,
     codes: Vec<Option<String>>,
     valid_at: BTreeSet<String>,
     tuples: BTreeSet<String>,
@@ -79,7 +79,7 @@ struct BlockReplay {
 
 struct Replay {
     log_id: String,
-    blocks: Vec<BlockReplay>,
+    epochs: Vec<EpochReplay>,
     adopted: Registry,
     head: Option<u64>,
 }
@@ -87,27 +87,27 @@ struct Replay {
 fn replay(history: &Value) -> Replay {
     let log_id = history["log_id"].as_str().unwrap().to_string();
     let mut adopted = genesis_registry(history);
-    let mut blocks = Vec::new();
+    let mut epochs = Vec::new();
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut head: Option<u64> = None;
     let mut verified: Option<Checkpoint> = None;
 
-    for block in history["blocks"].as_array().unwrap() {
-        let where_ = format!("{} block {}", history["name"], block["block_number"]);
-        let height = block["block_number"].as_u64().unwrap();
-        let entries = block["entries"].as_array().unwrap();
+    for epoch in history["epochs"].as_array().unwrap() {
+        let where_ = format!("{} epoch {}", history["name"], epoch["epoch_number"]);
+        let height = epoch["epoch_number"].as_u64().unwrap();
+        let entries = epoch["entries"].as_array().unwrap();
         let verified_size = verified.as_ref().map_or(0, Checkpoint::tree_size);
         let prior = leaves.clone();
-        leaves.extend(entry_leaf_hashes(&block["entries"]));
-        assert_eq!(leaves, hash_list(&block["leaf_hashes"]), "{where_}");
+        leaves.extend(entry_leaf_hashes(&epoch["entries"]));
+        assert_eq!(leaves, hash_list(&epoch["leaf_hashes"]), "{where_}");
         assert_eq!(
-            block["tree_size"].as_u64().unwrap(),
+            epoch["tree_size"].as_u64().unwrap(),
             leaves.len() as u64,
             "{where_}"
         );
 
         let mut sealed = adopted.clone();
-        let outcomes = sealed.apply_block(height, entries.iter().map(|entry| &entry["body"]));
+        let outcomes = sealed.apply_epoch(height, entries.iter().map(|entry| &entry["body"]));
         let authenticators = sealed.valid_at(height);
         let codes: Vec<Option<String>> = outcomes
             .iter()
@@ -122,22 +122,22 @@ fn replay(history: &Value) -> Replay {
             })
             .collect();
 
-        let checkpoint = block["checkpoint"]
+        let checkpoint = epoch["checkpoint"]
             .as_str()
             .map(|note| Checkpoint::parse(note).unwrap());
         if let Some(checkpoint) = &checkpoint {
             checkpoint::verify(checkpoint, &log_id, &sealed.valid_at(height), &[])
                 .unwrap_or_else(|e| panic!("{where_}: the published Checkpoint verifies: {e}"));
-            assert_eq!(checkpoint.block_number(), height, "{where_}");
-            assert_eq!(checkpoint.sealed_at(), block["sealed_at"], "{where_}");
-            let summary = wist_core::block::verify_block(
+            assert_eq!(checkpoint.epoch_number(), height, "{where_}");
+            assert_eq!(checkpoint.sealed_at(), epoch["sealed_at"], "{where_}");
+            let summary = wist_core::epoch::verify_epoch(
                 verified_size,
                 checkpoint,
                 entries,
                 &LeafHashes(&prior),
-                BLOCK_CAP_BYTES,
+                EPOCH_CAP_BYTES,
             )
-            .unwrap_or_else(|e| panic!("{where_}: the Block fills the tree it states: {e}"));
+            .unwrap_or_else(|e| panic!("{where_}: the Epoch fills the tree it states: {e}"));
             assert_eq!(summary.leaf_hashes, leaves[prior.len()..], "{where_}");
             assert_eq!(*checkpoint.root(), merkle::merkle_root(&leaves), "{where_}");
             checkpoint::check_sequence(verified.as_ref(), checkpoint, CADENCE_SECONDS)
@@ -157,8 +157,8 @@ fn replay(history: &Value) -> Replay {
             verified = Some(checkpoint.clone());
         }
 
-        blocks.push(BlockReplay {
-            block_number: height,
+        epochs.push(EpochReplay {
+            epoch_number: height,
             codes,
             valid_at: key_ids(&sealed.valid_at(height)),
             tuples: tuple_set(&adopted),
@@ -170,7 +170,7 @@ fn replay(history: &Value) -> Replay {
 
     Replay {
         log_id,
-        blocks,
+        epochs,
         adopted,
         head,
     }
@@ -182,17 +182,17 @@ fn every_key_act_is_dispositioned_as_its_authentication_height_and_the_admitted_
     let mut ties = 0;
     for history in histories() {
         let replayed = replay(&history);
-        for (block, replayed) in history["blocks"]
+        for (epoch, replayed) in history["epochs"]
             .as_array()
             .unwrap()
             .iter()
-            .zip(&replayed.blocks)
+            .zip(&replayed.epochs)
         {
-            let where_ = format!("{} block {}", history["name"], replayed.block_number);
-            let acts = block["acts"].as_array().unwrap();
+            let where_ = format!("{} epoch {}", history["name"], replayed.epoch_number);
+            let acts = epoch["acts"].as_array().unwrap();
             assert_eq!(acts.len(), replayed.codes.len(), "{where_}");
             for (index, (act, code)) in acts.iter().zip(&replayed.codes).enumerate() {
-                let update = &block["entries"][index]["body"]["update"];
+                let update = &epoch["entries"][index]["body"]["update"];
                 assert_eq!(
                     act["entry_index"].as_u64().unwrap() as usize,
                     index,
@@ -201,7 +201,7 @@ fn every_key_act_is_dispositioned_as_its_authentication_height_and_the_admitted_
                 assert_eq!(act["action"], update["action"], "{where_}");
                 assert_eq!(act["subject"], update["subject"], "{where_}");
                 assert_eq!(
-                    act["signer_key_id"], block["entries"][index]["body"]["sig"]["key_id"],
+                    act["signer_key_id"], epoch["entries"][index]["body"]["sig"]["key_id"],
                     "{where_}"
                 );
                 assert_eq!(
@@ -212,7 +212,7 @@ fn every_key_act_is_dispositioned_as_its_authentication_height_and_the_admitted_
                 );
                 seen.insert(code.clone());
             }
-            for tie in block["tie_breaks"].as_array().unwrap_or(&Vec::new()) {
+            for tie in epoch["tie_breaks"].as_array().unwrap_or(&Vec::new()) {
                 ties += 1;
                 let accepted = tie["accepted_entry_index"].as_u64().unwrap() as usize;
                 let failed = tie["failed_entry_index"].as_u64().unwrap() as usize;
@@ -241,27 +241,27 @@ fn every_key_act_is_dispositioned_as_its_authentication_height_and_the_admitted_
 }
 
 #[test]
-fn each_block_leaves_the_aggregator_key_tuples_the_vector_records() {
+fn each_epoch_leaves_the_aggregator_key_tuples_the_vector_records() {
     let mut unapplied = 0;
     for history in histories() {
         let replayed = replay(&history);
-        for (block, replayed) in history["blocks"]
+        for (epoch, replayed) in history["epochs"]
             .as_array()
             .unwrap()
             .iter()
-            .zip(&replayed.blocks)
+            .zip(&replayed.epochs)
         {
-            let where_ = format!("{} block {}", history["name"], replayed.block_number);
+            let where_ = format!("{} epoch {}", history["name"], replayed.epoch_number);
             assert_eq!(
                 replayed.applied,
-                block["applied"].as_bool().unwrap(),
+                epoch["applied"].as_bool().unwrap(),
                 "{where_}"
             );
             assert_eq!(
                 replayed.tuples,
-                stated_tuples(&block["expected_state"]),
+                stated_tuples(&epoch["expected_state"]),
                 "{where_}: {}",
-                block["why"]
+                epoch["why"]
             );
             if !replayed.applied {
                 unapplied += 1;
@@ -276,31 +276,31 @@ fn each_block_leaves_the_aggregator_key_tuples_the_vector_records() {
     }
     assert!(
         unapplied >= 1,
-        "no Block the Consumer refuses to apply was exercised"
+        "no Epoch the Consumer refuses to apply was exercised"
     );
 }
 
 #[test]
-fn a_block_no_checkpoint_verifies_leaves_the_head_and_the_key_registry_where_they_were() {
+fn an_epoch_no_checkpoint_verifies_leaves_the_head_and_the_key_registry_where_they_were() {
     let history = history_named("keys exhausted");
     let replayed = replay(&history);
     let refused = replayed
-        .blocks
+        .epochs
         .iter()
-        .find(|block| !block.applied)
-        .expect("the history carries a Block no Checkpoint verifies");
+        .find(|epoch| !epoch.applied)
+        .expect("the history carries an Epoch no Checkpoint verifies");
     let kept = replayed
-        .blocks
+        .epochs
         .iter()
-        .find(|block| block.block_number + 1 == refused.block_number)
+        .find(|epoch| epoch.epoch_number + 1 == refused.epoch_number)
         .unwrap();
     assert!(refused.checkpoint.is_none());
     assert!(
-        refused.sealed.valid_at(refused.block_number).is_empty(),
-        "the Block's accepted removals leave no key valid at its height"
+        refused.sealed.valid_at(refused.epoch_number).is_empty(),
+        "the Epoch's accepted removals leave no key valid at its height"
     );
     assert_eq!(refused.tuples, kept.tuples);
-    assert_eq!(replayed.head, Some(kept.block_number));
+    assert_eq!(replayed.head, Some(kept.epoch_number));
     assert_eq!(tuple_set(&replayed.adopted), kept.tuples);
 }
 
@@ -331,21 +331,21 @@ fn the_key_set_at_every_height_is_the_one_the_vector_records() {
             "{}",
             history["name"]
         );
-        for block in &replayed.blocks {
+        for epoch in &replayed.epochs {
             assert_eq!(
-                block.valid_at,
-                expected[&(block.block_number as i64)],
-                "{} block {}",
+                epoch.valid_at,
+                expected[&(epoch.epoch_number as i64)],
+                "{} epoch {}",
                 history["name"],
-                block.block_number
+                epoch.epoch_number
             );
-            if block.block_number > 0 {
+            if epoch.epoch_number > 0 {
                 assert_eq!(
-                    key_ids(&block.sealed.key_act_authenticators(block.block_number)),
-                    expected[&(block.block_number as i64 - 1)],
-                    "{} block {}: the set its key acts authenticate under",
+                    key_ids(&epoch.sealed.key_act_authenticators(epoch.epoch_number)),
+                    expected[&(epoch.epoch_number as i64 - 1)],
+                    "{} epoch {}: the set its key acts authenticate under",
                     history["name"],
-                    block.block_number
+                    epoch.epoch_number
                 );
             }
         }
@@ -353,20 +353,20 @@ fn the_key_set_at_every_height_is_the_one_the_vector_records() {
 }
 
 #[test]
-fn a_checkpoint_candidate_is_judged_under_the_keys_valid_at_its_own_block() {
+fn a_checkpoint_candidate_is_judged_under_the_keys_valid_at_its_own_epoch() {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut rotations = 0;
     let mut ignored_lines = 0;
     for history in histories() {
         let replayed = replay(&history);
-        for (block, sealed) in history["blocks"]
+        for (epoch, sealed) in history["epochs"]
             .as_array()
             .unwrap()
             .iter()
-            .zip(&replayed.blocks)
+            .zip(&replayed.epochs)
         {
-            let where_ = format!("{} block {}", history["name"], sealed.block_number);
-            let valid = sealed.sealed.valid_at(sealed.block_number);
+            let where_ = format!("{} epoch {}", history["name"], sealed.epoch_number);
+            let valid = sealed.sealed.valid_at(sealed.epoch_number);
             if let Some(checkpoint) = &sealed.checkpoint {
                 let verification =
                     checkpoint::verify(checkpoint, &replayed.log_id, &valid, &[]).unwrap();
@@ -374,10 +374,10 @@ fn a_checkpoint_candidate_is_judged_under_the_keys_valid_at_its_own_block() {
                     rotations += 1;
                 }
             }
-            for case in block["checkpoint_cases"].as_array().unwrap() {
+            for case in epoch["checkpoint_cases"].as_array().unwrap() {
                 let name = case["name"].as_str().unwrap();
                 let candidate = Checkpoint::parse(case["checkpoint"].as_str().unwrap()).unwrap();
-                assert_eq!(candidate.block_number(), sealed.block_number, "{where_}");
+                assert_eq!(candidate.epoch_number(), sealed.epoch_number, "{where_}");
                 let outcome = match checkpoint::verify(&candidate, &replayed.log_id, &valid, &[]) {
                     Ok(verification) => {
                         assert_eq!(
@@ -425,18 +425,18 @@ fn a_checkpoint_at_or_below_the_head_is_evidence_only_under_the_keys_valid_at_it
             .unwrap_or(&Vec::new())
         {
             let name = case["name"].as_str().unwrap();
-            let height = case["block_number"].as_u64().unwrap();
+            let height = case["epoch_number"].as_u64().unwrap();
             assert!(height <= head, "{name}");
-            let block = replayed
-                .blocks
+            let epoch = replayed
+                .epochs
                 .iter()
-                .find(|block| block.block_number == height)
+                .find(|epoch| epoch.epoch_number == height)
                 .unwrap();
             let offered = Checkpoint::parse(case["checkpoint"].as_str().unwrap()).unwrap();
-            let valid = block.sealed.valid_at(height);
+            let valid = epoch.sealed.valid_at(height);
             let outcome = match checkpoint::verify(&offered, &replayed.log_id, &valid, &[]) {
                 Err(error) => error.code().unwrap().to_string(),
-                Ok(_) => match checkpoint::progression(&offered, head, block.checkpoint.as_ref()) {
+                Ok(_) => match checkpoint::progression(&offered, head, epoch.checkpoint.as_ref()) {
                     Ok(_) => "valid".to_string(),
                     Err(error) => error.code().unwrap().to_string(),
                 },
@@ -462,15 +462,15 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
         };
         let replayed = replay(&history);
         let head = replayed.head.unwrap();
-        assert_eq!(snapshot["block_number"].as_u64(), Some(head));
-        let block = replayed
-            .blocks
+        assert_eq!(snapshot["epoch_number"].as_u64(), Some(head));
+        let epoch = replayed
+            .epochs
             .iter()
-            .find(|block| block.block_number == head)
+            .find(|epoch| epoch.epoch_number == head)
             .unwrap();
         assert_eq!(
-            snapshot["log_position"].as_u64(),
-            block.checkpoint.as_ref().map(Checkpoint::tree_size)
+            snapshot["tree_size"].as_u64(),
+            epoch.checkpoint.as_ref().map(Checkpoint::tree_size)
         );
         for case in snapshot["cases"].as_array().unwrap() {
             let name = case["name"].as_str().unwrap();
@@ -481,7 +481,7 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
                 .filter(|tuple| tuple[0] == "aggregator_key")
                 .map(|tuple| serde_json::to_string(tuple).unwrap())
                 .collect();
-            let complete = carried == block.tuples;
+            let complete = carried == epoch.tuples;
             assert_eq!(
                 complete,
                 case["verifies"].as_bool().unwrap(),
@@ -502,12 +502,12 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
                 .collect();
             let restored = Registry::from_entries(&replayed.log_id, &entries).unwrap();
             assert_eq!(
-                tuple_set(&restored) == block.tuples,
+                tuple_set(&restored) == epoch.tuples,
                 complete,
                 "{name}: the resumed registry"
             );
             if !complete {
-                let missing: BTreeSet<&String> = block.tuples.difference(&carried).collect();
+                let missing: BTreeSet<&String> = epoch.tuples.difference(&carried).collect();
                 assert!(
                     !missing.is_empty() && missing.iter().all(|tuple| !tuple.ends_with(",null]")),
                     "{name}: what the file omits is a removed key's tuple"
@@ -520,7 +520,7 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
 }
 
 #[test]
-fn the_two_entry_orders_of_one_blocks_add_and_remove_leave_one_registry() {
+fn the_two_entry_orders_of_one_epochs_add_and_remove_leave_one_registry() {
     let names = vector()["same_registry_histories"].clone();
     let names = names.as_array().unwrap();
     assert_eq!(names.len(), 2);
@@ -535,13 +535,13 @@ fn the_two_entry_orders_of_one_blocks_add_and_remove_leave_one_registry() {
 
     let action_order = |name: &str| {
         let history = history_named(name);
-        let block = history["blocks"]
+        let epoch = history["epochs"]
             .as_array()
             .unwrap()
             .last()
             .unwrap()
             .clone();
-        let actions: Vec<String> = block["entries"]
+        let actions: Vec<String> = epoch["entries"]
             .as_array()
             .unwrap()
             .iter()

@@ -201,7 +201,7 @@ pub fn commitment_cap(extract_cap: i64, links_cap: i64, summary_cap: i64) -> i12
 }
 
 /// §3.4's clock check against a whole-second clock: a sealed Delta uses its
-/// committing Block's `sealed_at` and the `clock_skew_seconds` accepted at
+/// committing Epoch's `sealed_at` and the `clock_skew_seconds` accepted at
 /// that instant (`WIST1-E06`; a malformed `observed_at` is `WIST1-E14`).
 pub fn verify_clock(doc: &Value, clock_s: i64, allowance_s: i64) -> Result<(), &'static str> {
     let observed_at = doc["delta"]["observed_at"].as_str().ok_or("WIST1-E14")?;

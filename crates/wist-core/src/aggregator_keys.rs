@@ -145,8 +145,8 @@ impl Registry {
             .collect()
     }
 
-    pub fn key_act_authenticators(&self, block_number: u64) -> Vec<AggregatorKey> {
-        match block_number.checked_sub(1) {
+    pub fn key_act_authenticators(&self, epoch_number: u64) -> Vec<AggregatorKey> {
+        match epoch_number.checked_sub(1) {
             Some(height) => self.valid_at(height),
             None => self
                 .genesis_key_id
@@ -180,7 +180,7 @@ impl Registry {
             .collect()
     }
 
-    pub fn apply_block<'a>(
+    pub fn apply_epoch<'a>(
         &mut self,
         height: u64,
         acts: impl IntoIterator<Item = &'a Value>,
@@ -228,7 +228,7 @@ impl Registry {
         if authenticate(act, authenticators).is_err() {
             return Outcome::Ignored {
                 code: "WIST4-E11",
-                reason: "no key valid at the Block before this one signed the act",
+                reason: "no key valid at the Epoch before this one signed the act",
             };
         }
         match details {
@@ -278,7 +278,7 @@ impl Registry {
     fn retire(&mut self, height: u64, key_id: &str, authenticators: &[AggregatorKey]) -> Outcome {
         if !authenticators.iter().any(|key| key.key_id == key_id) {
             return Outcome::Conflict {
-                reason: "the key_id is not valid at the Block before this one",
+                reason: "the key_id is not valid at the Epoch before this one",
             };
         }
         if let Some(record) = self.keys.get_mut(key_id) {
@@ -356,9 +356,9 @@ mod tests {
         crate::envelope::sign_envelope(&update, "update", signer_id, signer).unwrap()
     }
 
-    fn checkpoint_signed_by(block_number: u64, key: &SigningKey) -> checkpoint::Checkpoint {
+    fn checkpoint_signed_by(epoch_number: u64, key: &SigningKey) -> checkpoint::Checkpoint {
         let mut note =
-            checkpoint::Checkpoint::new(LOG_ID, 4, [7u8; 32], block_number, SEALED_AT).unwrap();
+            checkpoint::Checkpoint::new(LOG_ID, 4, [7u8; 32], epoch_number, SEALED_AT).unwrap();
         note.sign(key);
         note
     }
@@ -377,11 +377,11 @@ mod tests {
     }
 
     #[test]
-    fn a_key_added_at_a_height_signs_that_checkpoint_but_not_a_key_act_in_its_block() {
+    fn a_key_added_at_a_height_signs_that_checkpoint_but_not_a_key_act_in_its_epoch() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
         let third = signing_key(3);
-        let outcomes = registry.apply_block(
+        let outcomes = registry.apply_epoch(
             1,
             &[
                 add_act("genesis", &genesis, "k2", &second),
@@ -399,8 +399,8 @@ mod tests {
     fn a_key_removed_at_a_height_does_not_sign_the_checkpoint_of_that_height() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        let outcomes = registry.apply_block(2, &[remove_act("genesis", &genesis, "k2")]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let outcomes = registry.apply_epoch(2, &[remove_act("genesis", &genesis, "k2")]);
         assert!(outcomes[0].is_accepted());
         assert!(signs_checkpoint(&registry, 1, &second));
         assert!(!signs_checkpoint(&registry, 2, &second));
@@ -411,8 +411,8 @@ mod tests {
     fn a_key_signs_its_own_removal() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        let outcomes = registry.apply_block(2, &[remove_act("k2", &second, "k2")]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let outcomes = registry.apply_epoch(2, &[remove_act("k2", &second, "k2")]);
         assert_eq!(
             outcomes[0],
             Outcome::Accepted {
@@ -428,8 +428,8 @@ mod tests {
     fn a_removed_genesis_key_stays_removed_across_a_state_round_trip() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        let outcomes = registry.apply_block(2, &[remove_act("genesis", &genesis, "genesis")]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let outcomes = registry.apply_epoch(2, &[remove_act("genesis", &genesis, "genesis")]);
         assert!(outcomes[0].is_accepted());
 
         let restored_entries: Vec<AggregatorKeyEntry> = tuples(&registry)
@@ -450,23 +450,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["k2".to_string()]
         );
-        let readmission = restored.apply_block(5, &[add_act("k2", &second, "genesis", &genesis)]);
+        let readmission = restored.apply_epoch(5, &[add_act("k2", &second, "genesis", &genesis)]);
         assert_eq!(readmission[0].code(), Some(KEY_ACT_CONFLICT_CODE));
         assert!(!signs_checkpoint(&restored, 5, &genesis));
     }
 
     #[test]
-    fn an_add_and_a_remove_in_one_block_give_the_same_registry_in_either_entry_order() {
+    fn an_add_and_a_remove_in_one_epoch_give_the_same_registry_in_either_entry_order() {
         let (mut first, genesis) = genesis_registry();
         let second = signing_key(2);
         let third = signing_key(3);
-        first.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        first.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
         let mut reversed = first.clone();
 
         let add = add_act("genesis", &genesis, "k3", &third);
         let remove = remove_act("k2", &second, "k2");
-        let forward = first.apply_block(2, &[add.clone(), remove.clone()]);
-        let backward = reversed.apply_block(2, &[remove, add]);
+        let forward = first.apply_epoch(2, &[add.clone(), remove.clone()]);
+        let backward = reversed.apply_epoch(2, &[remove, add]);
         assert!(forward.iter().all(Outcome::is_accepted));
         assert!(backward.iter().all(Outcome::is_accepted));
         assert_eq!(tuples(&first), tuples(&reversed));
@@ -478,10 +478,10 @@ mod tests {
     fn a_re_add_of_a_removed_key_id_is_ignored() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        registry.apply_block(2, &[remove_act("genesis", &genesis, "k2")]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        registry.apply_epoch(2, &[remove_act("genesis", &genesis, "k2")]);
         let fresh = signing_key(4);
-        let outcomes = registry.apply_block(3, &[add_act("genesis", &genesis, "k2", &fresh)]);
+        let outcomes = registry.apply_epoch(3, &[add_act("genesis", &genesis, "k2", &fresh)]);
         assert_eq!(outcomes[0].code(), Some(KEY_ACT_CONFLICT_CODE));
         assert_eq!(registry.record("k2").unwrap().public_key, second.public());
         assert!(!signs_checkpoint(&registry, 3, &fresh));
@@ -491,19 +491,19 @@ mod tests {
     fn an_add_whose_note_key_id_collides_with_a_removed_key_is_ignored() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        registry.apply_block(2, &[remove_act("genesis", &genesis, "k2")]);
-        let outcomes = registry.apply_block(3, &[add_act("genesis", &genesis, "k9", &second)]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        registry.apply_epoch(2, &[remove_act("genesis", &genesis, "k2")]);
+        let outcomes = registry.apply_epoch(3, &[add_act("genesis", &genesis, "k9", &second)]);
         assert_eq!(outcomes[0].code(), Some(KEY_ACT_CONFLICT_CODE));
         assert!(registry.record("k9").is_none());
     }
 
     #[test]
-    fn a_duplicate_add_in_one_block_keeps_the_act_at_the_lower_entry_index() {
+    fn a_duplicate_add_in_one_epoch_keeps_the_act_at_the_lower_entry_index() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
         let third = signing_key(3);
-        let outcomes = registry.apply_block(
+        let outcomes = registry.apply_epoch(
             1,
             &[
                 add_act("genesis", &genesis, "k2", &second),
@@ -524,11 +524,11 @@ mod tests {
     fn a_remove_of_an_unknown_or_already_removed_key_id_is_ignored() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        let unknown = registry.apply_block(2, &[remove_act("genesis", &genesis, "k7")]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let unknown = registry.apply_epoch(2, &[remove_act("genesis", &genesis, "k7")]);
         assert_eq!(unknown[0].code(), Some(KEY_ACT_CONFLICT_CODE));
-        registry.apply_block(3, &[remove_act("genesis", &genesis, "k2")]);
-        let again = registry.apply_block(4, &[remove_act("genesis", &genesis, "k2")]);
+        registry.apply_epoch(3, &[remove_act("genesis", &genesis, "k2")]);
+        let again = registry.apply_epoch(4, &[remove_act("genesis", &genesis, "k2")]);
         assert_eq!(again[0].code(), Some(KEY_ACT_CONFLICT_CODE));
         assert_eq!(registry.record("k2").unwrap().removed_height, Some(3));
     }
@@ -544,22 +544,22 @@ mod tests {
             act["sig"]["key_id"] = json!("genesis");
             act
         };
-        let outcomes = registry.apply_block(1, &[unknown_signer, forged]);
+        let outcomes = registry.apply_epoch(1, &[unknown_signer, forged]);
         assert_eq!(outcomes[0].code(), Some("WIST4-E11"));
         assert_eq!(outcomes[1].code(), Some("WIST4-E11"));
         assert!(registry.record("k2").is_none());
         assert!(
-            registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)])[0]
+            registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)])[0]
                 .is_accepted()
         );
     }
 
     #[test]
-    fn the_set_a_block_0_key_act_authenticates_under_is_the_genesis_key_alone() {
+    fn the_set_an_epoch_0_key_act_authenticates_under_is_the_genesis_key_alone() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(1, &[add_act("genesis", &genesis, "k2", &second)]);
-        registry.apply_block(2, &[remove_act("k2", &second, "genesis")]);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        registry.apply_epoch(2, &[remove_act("k2", &second, "genesis")]);
         assert_eq!(registry.record("genesis").unwrap().removed_height, Some(2));
         assert_eq!(registry.genesis_key_id(), Some("genesis"));
         let authenticators = registry.key_act_authenticators(0);
@@ -588,8 +588,8 @@ mod tests {
     fn valid_at_reports_a_key_before_at_and_after_its_add_and_remove() {
         let (mut registry, genesis) = genesis_registry();
         let second = signing_key(2);
-        registry.apply_block(3, &[add_act("genesis", &genesis, "k2", &second)]);
-        registry.apply_block(5, &[remove_act("genesis", &genesis, "k2")]);
+        registry.apply_epoch(3, &[add_act("genesis", &genesis, "k2", &second)]);
+        registry.apply_epoch(5, &[remove_act("genesis", &genesis, "k2")]);
         let valid = |height: u64| {
             registry
                 .valid_at(height)
@@ -617,7 +617,7 @@ mod tests {
             "effective_at": SEALED_AT,
         });
         let act = crate::envelope::sign_envelope(&update, "update", "genesis", &genesis).unwrap();
-        let outcomes = registry.apply_block(1, &[act]);
+        let outcomes = registry.apply_epoch(1, &[act]);
         assert_eq!(outcomes[0], Outcome::NotKeyAct);
         assert_eq!(registry.entries().len(), 1);
     }

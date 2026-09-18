@@ -65,7 +65,7 @@ pub struct Checkpoint {
     origin: String,
     tree_size: u64,
     root: [u8; 32],
-    block_number: u64,
+    epoch_number: u64,
     sealed_at: String,
     signatures: Vec<SignatureLine>,
 }
@@ -75,7 +75,7 @@ impl Checkpoint {
         origin: &str,
         tree_size: u64,
         root: [u8; 32],
-        block_number: u64,
+        epoch_number: u64,
         sealed_at: &str,
     ) -> Result<Self, Error> {
         if origin.is_empty() || origin.contains('\n') {
@@ -86,7 +86,7 @@ impl Checkpoint {
             origin: origin.to_owned(),
             tree_size,
             root,
-            block_number,
+            epoch_number,
             sealed_at: sealed_at.to_owned(),
             signatures: Vec::new(),
         })
@@ -108,8 +108,8 @@ impl Checkpoint {
         format!("sha256:{}", hex_encode(&self.root))
     }
 
-    pub fn block_number(&self) -> u64 {
-        self.block_number
+    pub fn epoch_number(&self) -> u64 {
+        self.epoch_number
     }
 
     pub fn sealed_at(&self) -> &str {
@@ -126,11 +126,11 @@ impl Checkpoint {
 
     pub fn note_text(&self) -> String {
         format!(
-            "{}\n{}\n{}\nblock_number {}\nsealed_at {}\n",
+            "{}\n{}\n{}\nepoch_number {}\nsealed_at {}\n",
             self.origin,
             self.tree_size,
             STANDARD.encode(self.root),
-            self.block_number,
+            self.epoch_number,
             self.sealed_at
         )
     }
@@ -164,10 +164,10 @@ impl Checkpoint {
         let root: [u8; 32] = root
             .try_into()
             .map_err(|_| invalid("the root hash is not 32 octets"))?;
-        let block_number = lines[3]
-            .strip_prefix("block_number ")
+        let epoch_number = lines[3]
+            .strip_prefix("epoch_number ")
             .and_then(parse_decimal)
-            .ok_or_else(|| invalid("malformed block_number line"))?;
+            .ok_or_else(|| invalid("malformed epoch_number line"))?;
         let sealed_at = lines[4]
             .strip_prefix("sealed_at ")
             .ok_or_else(|| invalid("malformed sealed_at line"))?;
@@ -191,7 +191,7 @@ impl Checkpoint {
             origin: lines[0].to_owned(),
             tree_size,
             root,
-            block_number,
+            epoch_number,
             sealed_at: sealed_at.to_owned(),
             signatures,
         })
@@ -389,22 +389,22 @@ pub enum Progression {
 
 pub fn progression(
     offered: &Checkpoint,
-    verified_head_block_number: u64,
+    verified_head_epoch_number: u64,
     retained_at_its_height: Option<&Checkpoint>,
 ) -> Result<Progression, Error> {
     if let Some(retained) = retained_at_its_height {
-        if retained.block_number() != offered.block_number() {
+        if retained.epoch_number() != offered.epoch_number() {
             return Err(Error::Checkpoint(
-                "the retained Checkpoint is not the offered Checkpoint's Block".into(),
+                "the retained Checkpoint is not the offered Checkpoint's Epoch".into(),
             ));
         }
         if retained.note_text() != offered.note_text() {
             return Err(divergence(
-                "two Checkpoints of one Block state different note text",
+                "two Checkpoints of one Epoch state different note text",
             ));
         }
     }
-    if offered.block_number() > verified_head_block_number {
+    if offered.epoch_number() > verified_head_epoch_number {
         return Ok(Progression::Above);
     }
     Ok(Progression::NotAdopted)
@@ -413,7 +413,7 @@ pub fn progression(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Equivocation {
     SameSizeDifferentRoot,
-    SameBlockDifferentStatement,
+    SameEpochDifferentStatement,
     NoConsistentPrefix,
 }
 
@@ -430,8 +430,8 @@ pub fn equivocation(first: &Checkpoint, second: &Checkpoint) -> Option<Equivocat
     if first.tree_size() == second.tree_size() && first.root() != second.root() {
         return Some(Equivocation::SameSizeDifferentRoot);
     }
-    if first.block_number() == second.block_number() {
-        return Some(Equivocation::SameBlockDifferentStatement);
+    if first.epoch_number() == second.epoch_number() {
+        return Some(Equivocation::SameEpochDifferentStatement);
     }
     None
 }
@@ -461,26 +461,26 @@ pub fn check_sequence(
     let sealed_at_s = next.sealed_at_s()?;
     match previous {
         None => {
-            if next.block_number() != 0 {
+            if next.epoch_number() != 0 {
                 return Err(Error::Checkpoint(
-                    "the first Block of the Log is Block 0".into(),
+                    "the first Epoch of the Log is Epoch 0".into(),
                 ));
             }
         }
         Some(previous) => {
-            if previous.block_number().checked_add(1) != Some(next.block_number()) {
+            if previous.epoch_number().checked_add(1) != Some(next.epoch_number()) {
                 return Err(Error::Checkpoint(
-                    "block_number is sequential from 0 without gaps".into(),
+                    "epoch_number is sequential from 0 without gaps".into(),
                 ));
             }
             if next.tree_size() < previous.tree_size() {
                 return Err(divergence(
-                    "a Block's tree size is not below the Block before it",
+                    "an Epoch's tree size is not below the Epoch before it",
                 ));
             }
             if sealed_at_s <= previous.sealed_at_s()? {
                 return Err(Error::Checkpoint(
-                    "sealed_at is not strictly increasing across Blocks".into(),
+                    "sealed_at is not strictly increasing across Epochs".into(),
                 ));
             }
         }
@@ -492,7 +492,7 @@ pub fn check_sequence(
     }
     if sealed_at_s.rem_euclid(cadence_seconds) != 0 {
         return Err(Error::Checkpoint(
-            "sealed_at is off the cadence grid in force at the previous Block".into(),
+            "sealed_at is off the cadence grid in force at the previous Epoch".into(),
         ));
     }
     Ok(())
@@ -522,13 +522,13 @@ pub fn check_consistency(
     .map_err(|e| divergence(&format!("the Consistency Proof fails: {e}")))
 }
 
-pub fn archive_path(block_number: u64) -> String {
-    format!("/log/checkpoints/{block_number:09}")
+pub fn archive_path(epoch_number: u64) -> String {
+    format!("/log/checkpoints/{epoch_number:09}")
 }
 
 pub fn check_archive_path(checkpoint: &Checkpoint, path: &str) -> Result<(), Error> {
-    if path != archive_path(checkpoint.block_number()) {
-        return Err(invalid("the archived Checkpoint is not the path's Block"));
+    if path != archive_path(checkpoint.epoch_number()) {
+        return Err(invalid("the archived Checkpoint is not the path's Epoch"));
     }
     Ok(())
 }
@@ -539,10 +539,10 @@ mod tests {
 
     const ROOT: [u8; 32] = [7u8; 32];
 
-    fn signed(block_number: u64, sealed_at: &str, root: [u8; 32]) -> (Checkpoint, AggregatorKey) {
+    fn signed(epoch_number: u64, sealed_at: &str, root: [u8; 32]) -> (Checkpoint, AggregatorKey) {
         let key = SigningKey::from_seed(&[3u8; 32]);
         let mut checkpoint =
-            Checkpoint::new("log.example.org", 4, root, block_number, sealed_at).unwrap();
+            Checkpoint::new("log.example.org", 4, root, epoch_number, sealed_at).unwrap();
         checkpoint.sign(&key);
         (
             checkpoint,
@@ -607,41 +607,41 @@ mod tests {
 
     #[test]
     fn the_sequence_rules_reject_gaps_shrinking_trees_and_off_grid_instants() {
-        let (block0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
-        check_sequence(None, &block0, 3600).unwrap();
-        let (block2, _) = signed(2, "2026-08-02T14:00:00Z", ROOT);
+        let (epoch0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        check_sequence(None, &epoch0, 3600).unwrap();
+        let (epoch2, _) = signed(2, "2026-08-02T14:00:00Z", ROOT);
         assert_eq!(
-            check_sequence(Some(&block0), &block2, 3600)
+            check_sequence(Some(&epoch0), &epoch2, 3600)
                 .unwrap_err()
                 .code(),
             None
         );
         let (same_instant, _) = signed(1, "2026-08-02T13:00:00Z", ROOT);
         assert_eq!(
-            check_sequence(Some(&block0), &same_instant, 3600)
+            check_sequence(Some(&epoch0), &same_instant, 3600)
                 .unwrap_err()
                 .code(),
             None
         );
         let (off_grid, _) = signed(1, "2026-08-02T13:30:00Z", ROOT);
         assert_eq!(
-            check_sequence(Some(&block0), &off_grid, 3600)
+            check_sequence(Some(&epoch0), &off_grid, 3600)
                 .unwrap_err()
                 .code(),
             None
         );
-        check_sequence(Some(&block0), &off_grid, 1800).unwrap();
+        check_sequence(Some(&epoch0), &off_grid, 1800).unwrap();
     }
 
     #[test]
-    fn a_block_whose_tree_shrinks_is_reported_as_divergence() {
-        let (block0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
-        assert_eq!(block0.tree_size(), 4);
+    fn an_epoch_whose_tree_shrinks_is_reported_as_divergence() {
+        let (epoch0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        assert_eq!(epoch0.tree_size(), 4);
         let mut smaller =
             Checkpoint::new("log.example.org", 3, ROOT, 1, "2026-08-02T14:00:00Z").unwrap();
         smaller.sign(&SigningKey::from_seed(&[3u8; 32]));
         assert_eq!(
-            check_sequence(Some(&block0), &smaller, 3600)
+            check_sequence(Some(&epoch0), &smaller, 3600)
                 .unwrap_err()
                 .code(),
             Some("WIST3-E02")
@@ -702,25 +702,25 @@ mod tests {
         let (head, _) = signed(2, "2026-08-02T15:00:00Z", ROOT);
         let (lower, _) = signed(1, "2026-08-02T14:00:00Z", ROOT);
         assert_eq!(
-            progression(&lower, head.block_number(), None).unwrap(),
+            progression(&lower, head.epoch_number(), None).unwrap(),
             Progression::NotAdopted
         );
         assert_eq!(
-            progression(&lower, head.block_number(), Some(&lower)).unwrap(),
+            progression(&lower, head.epoch_number(), Some(&lower)).unwrap(),
             Progression::NotAdopted
         );
         let (differing, _) = signed(1, "2026-08-02T14:00:00Z", [8u8; 32]);
-        let err = progression(&lower, head.block_number(), Some(&differing)).unwrap_err();
+        let err = progression(&lower, head.epoch_number(), Some(&differing)).unwrap_err();
         assert_eq!(err.code(), Some("WIST3-E02"));
         let (above, _) = signed(3, "2026-08-02T16:00:00Z", ROOT);
         assert_eq!(
-            progression(&above, head.block_number(), None).unwrap(),
+            progression(&above, head.epoch_number(), None).unwrap(),
             Progression::Above
         );
     }
 
     #[test]
-    fn the_archive_path_is_the_block_number_in_nine_digits() {
+    fn the_archive_path_is_the_epoch_number_in_nine_digits() {
         let (checkpoint, _) = signed(2, "2026-08-02T15:00:00Z", ROOT);
         assert_eq!(archive_path(2), "/log/checkpoints/000000002");
         check_archive_path(&checkpoint, "/log/checkpoints/000000002").unwrap();

@@ -8,7 +8,7 @@ pub use crate::timestamp::LOG_TIMESTAMP_MAX_S;
 pub struct Amendment {
     pub parameter: String,
     pub value: i64,
-    pub block_number: u64,
+    pub epoch_number: u64,
     pub entry_index: u64,
     pub sealed_at_s: i64,
     pub effective_at_s: i64,
@@ -16,7 +16,7 @@ pub struct Amendment {
 
 #[derive(Debug, Clone)]
 pub struct Schedule {
-    first_block_s: i64,
+    first_epoch_s: i64,
     accepted: Vec<Amendment>,
     last_position: Option<(u64, u64)>,
 }
@@ -34,18 +34,18 @@ impl ScheduleReplay {
 }
 
 impl Schedule {
-    pub fn new(first_block_s: i64) -> Self {
+    pub fn new(first_epoch_s: i64) -> Self {
         Self {
-            first_block_s,
+            first_epoch_s,
             accepted: Vec::new(),
             last_position: None,
         }
     }
 
-    pub fn replay(first_block_s: i64, amendments: &[Amendment]) -> ScheduleReplay {
+    pub fn replay(first_epoch_s: i64, amendments: &[Amendment]) -> ScheduleReplay {
         let mut order: Vec<usize> = (0..amendments.len()).collect();
-        order.sort_by_key(|&i| (amendments[i].block_number, amendments[i].entry_index));
-        let mut schedule = Self::new(first_block_s);
+        order.sort_by_key(|&i| (amendments[i].epoch_number, amendments[i].entry_index));
+        let mut schedule = Self::new(first_epoch_s);
         let mut rejected = Vec::new();
         for i in order {
             if schedule.try_accept(amendments[i].clone()).is_err() {
@@ -63,8 +63,8 @@ impl Schedule {
         self.accepted.push(amendment);
     }
 
-    pub fn first_block_s(&self) -> i64 {
-        self.first_block_s
+    pub fn first_epoch_s(&self) -> i64 {
+        self.first_epoch_s
     }
 
     pub fn accepted(&self) -> &[Amendment] {
@@ -77,12 +77,12 @@ impl Schedule {
             self.accepted
                 .iter()
                 .filter(|a| a.parameter == parameter && a.effective_at_s <= at_s)
-                .max_by_key(|a| (a.effective_at_s, a.block_number, a.entry_index))
+                .max_by_key(|a| (a.effective_at_s, a.epoch_number, a.entry_index))
                 .map_or(default, |a| a.value),
         )
     }
 
-    pub fn block_size_bounds(&self, at_s: i64) -> (u64, u64) {
+    pub fn epoch_size_bounds(&self, at_s: i64) -> (u64, u64) {
         let mut bounds = (u64::MAX, 0);
         for instant in std::iter::once(at_s).chain(
             self.accepted
@@ -90,9 +90,7 @@ impl Schedule {
                 .map(|a| a.effective_at_s)
                 .filter(|&t| t >= at_s),
         ) {
-            let cap = self
-                .value_at("block_decompressed_cap_bytes", instant)
-                .unwrap() as u64;
+            let cap = self.value_at("epoch_cap_bytes", instant).unwrap() as u64;
             bounds.0 = bounds.0.min(cap);
             bounds.1 = bounds.1.max(cap);
         }
@@ -100,15 +98,15 @@ impl Schedule {
     }
 
     pub fn try_accept(&mut self, amendment: Amendment) -> Result<(), Error> {
-        self.try_accept_with_block_size(amendment, 0)
+        self.try_accept_with_epoch_size(amendment, 0)
     }
 
-    pub fn try_accept_with_block_size(
+    pub fn try_accept_with_epoch_size(
         &mut self,
         amendment: Amendment,
-        largest_block_bytes: u64,
+        largest_epoch_bytes: u64,
     ) -> Result<(), Error> {
-        let position = (amendment.block_number, amendment.entry_index);
+        let position = (amendment.epoch_number, amendment.entry_index);
         if self.last_position.is_some_and(|last| position <= last) {
             return Err(Error::Parameter(
                 "amendments must arrive once in canonical Log order".into(),
@@ -137,9 +135,9 @@ impl Schedule {
         let sealed_at_s = amendment.sealed_at_s;
         self.accepted.push(amendment);
         let result = self.validate_from(sealed_at_s).and_then(|()| {
-            if self.block_size_bounds(sealed_at_s).0 < largest_block_bytes {
+            if self.epoch_size_bounds(sealed_at_s).0 < largest_epoch_bytes {
                 Err(Error::Parameter(
-                    "Block cap is below a sealed Block's size".into(),
+                    "Epoch cap is below a sealed Epoch's size".into(),
                 ))
             } else {
                 Ok(())
@@ -177,7 +175,7 @@ mod tests {
         Amendment {
             parameter: parameter.into(),
             value,
-            block_number: height,
+            epoch_number: height,
             entry_index: 0,
             sealed_at_s: sealed,
             effective_at_s: effective,

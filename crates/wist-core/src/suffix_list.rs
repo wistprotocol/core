@@ -1,6 +1,6 @@
 //! WIST-4 §3.1: Public Suffix List snapshots, the Registrable Domain of a
 //! Canonical Host under one, the replay of `suffix_list_update` acts with
-//! the snapshot in force at each Block, and WIST-3 §3.2's per-domain Block
+//! the snapshot in force at each Epoch, and WIST-3 §3.2's per-domain Epoch
 //! capacity counted per Registrable Domain.
 use crate::crypto::{hex_encode, PublicKey};
 use crate::error::Error;
@@ -165,7 +165,7 @@ pub enum Disposition {
     },
     /// The act is ignored: `WIST1-E05`, `WIST4-E11` or `WIST4-E04`; or
     /// the named file could not be obtained, `WIST3-E01`, which stops a
-    /// Consumer at the act's Block.
+    /// Consumer at the act's Epoch.
     Rejected(&'static str),
     /// The act is a governance act of another kind.
     NotSuffixList,
@@ -245,9 +245,9 @@ impl SuffixListReplay {
         }
     }
 
-    /// The snapshot in force at Block `height`, named by the most recent
+    /// The snapshot in force at Epoch `height`, named by the most recent
     /// accepted act sealed below it, with that act's height.
-    pub fn in_force_at_block(&self, height: u64) -> Option<(&str, u64)> {
+    pub fn in_force_at_epoch(&self, height: u64) -> Option<(&str, u64)> {
         self.accepted
             .iter()
             .rev()
@@ -255,8 +255,8 @@ impl SuffixListReplay {
             .map(|(sealed, id)| (id.as_str(), *sealed))
     }
 
-    /// The snapshot in force once Block `height` is sealed: at every
-    /// instant from its `sealed_at` to the next Block's, and at Block
+    /// The snapshot in force once Epoch `height` is sealed: at every
+    /// instant from its `sealed_at` to the next Epoch's, and at Epoch
     /// `height + 1`.
     pub fn in_force_after(&self, height: u64) -> Option<(&str, u64)> {
         self.accepted
@@ -266,9 +266,9 @@ impl SuffixListReplay {
             .map(|(sealed, id)| (id.as_str(), *sealed))
     }
 
-    /// The WIST-3 §7 `suffix_list` tuple of a Snapshot at `log_position`.
-    pub fn entry_at(&self, log_position: u64) -> Option<SuffixListEntry> {
-        self.in_force_after(log_position)
+    /// The WIST-3 §7 `suffix_list` tuple of a Snapshot at `tree_size`.
+    pub fn entry_at(&self, tree_size: u64) -> Option<SuffixListEntry> {
+        self.in_force_after(tree_size)
             .map(|(identifier, sealing_height)| SuffixListEntry {
                 identifier: identifier.to_string(),
                 sealing_height,
@@ -281,21 +281,21 @@ impl SuffixListReplay {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockCaps {
-    pub domain_block_entries_max: u64,
-    pub labeler_block_entries_max: u64,
+pub struct EpochCaps {
+    pub domain_epoch_entries_max: u64,
+    pub labeler_epoch_entries_max: u64,
 }
 
-/// WIST-3 §3.2: a Block carries at most `domain_block_entries_max`
+/// WIST-3 §3.2: an Epoch carries at most `domain_epoch_entries_max`
 /// `publisher_delta`, `label` and `dispute` Entries of one Registrable
 /// Domain under the snapshot in force at it, and inside that at most
-/// `labeler_block_entries_max` `label` and `dispute` Entries. `entries`
+/// `labeler_epoch_entries_max` `label` and `dispute` Entries. `entries`
 /// pairs each Entry type with the Canonical Host of its Publisher,
 /// Labeler or disputant; a breach is `WIST3-E03`.
-pub fn check_block_capacity<'a>(
+pub fn check_epoch_capacity<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a str)>,
     list: Option<&SuffixList>,
-    caps: BlockCaps,
+    caps: EpochCaps,
 ) -> Result<(), Error> {
     let mut per_domain: BTreeMap<String, u64> = BTreeMap::new();
     let mut per_labeler: BTreeMap<String, u64> = BTreeMap::new();
@@ -306,19 +306,19 @@ pub fn check_block_capacity<'a>(
         let unit = registrable_domain(host, list).domain;
         let count = per_domain.entry(unit.clone()).or_default();
         *count += 1;
-        if *count > caps.domain_block_entries_max {
-            return Err(Error::Block(format!(
-                "WIST3-E03 {unit} carries more than {} Entries in one Block",
-                caps.domain_block_entries_max
+        if *count > caps.domain_epoch_entries_max {
+            return Err(Error::Epoch(format!(
+                "WIST3-E03 {unit} carries more than {} Entries in one Epoch",
+                caps.domain_epoch_entries_max
             )));
         }
         if kind != "publisher_delta" {
             let count = per_labeler.entry(unit.clone()).or_default();
             *count += 1;
-            if *count > caps.labeler_block_entries_max {
-                return Err(Error::Block(format!(
-                    "WIST3-E03 {unit} carries more than {} label and dispute Entries in one Block",
-                    caps.labeler_block_entries_max
+            if *count > caps.labeler_epoch_entries_max {
+                return Err(Error::Epoch(format!(
+                    "WIST3-E03 {unit} carries more than {} label and dispute Entries in one Epoch",
+                    caps.labeler_epoch_entries_max
                 )));
             }
         }
@@ -355,34 +355,34 @@ mod tests {
     }
 
     #[test]
-    fn in_force_follows_the_block_after_sealing() {
+    fn in_force_follows_the_epoch_after_sealing() {
         let mut replay = SuffixListReplay::new();
         replay.adopt("sha256:a", 0);
         replay.adopt("sha256:b", 3);
-        assert_eq!(replay.in_force_at_block(0), None);
-        assert_eq!(replay.in_force_at_block(1), Some(("sha256:a", 0)));
-        assert_eq!(replay.in_force_at_block(3), Some(("sha256:a", 0)));
-        assert_eq!(replay.in_force_at_block(4), Some(("sha256:b", 3)));
+        assert_eq!(replay.in_force_at_epoch(0), None);
+        assert_eq!(replay.in_force_at_epoch(1), Some(("sha256:a", 0)));
+        assert_eq!(replay.in_force_at_epoch(3), Some(("sha256:a", 0)));
+        assert_eq!(replay.in_force_at_epoch(4), Some(("sha256:b", 3)));
         assert_eq!(replay.entry_at(3).unwrap().sealing_height, 3);
     }
 
     #[test]
     fn capacity_counts_per_registrable_domain() {
         let list = SuffixList::parse(LIST.as_bytes()).unwrap();
-        let caps = BlockCaps {
-            domain_block_entries_max: 2,
-            labeler_block_entries_max: 1,
+        let caps = EpochCaps {
+            domain_epoch_entries_max: 2,
+            labeler_epoch_entries_max: 1,
         };
         let shared = [
             ("publisher_delta", "a.example.com"),
             ("publisher_delta", "b.example.com"),
             ("publisher_delta", "c.example.com"),
         ];
-        assert!(check_block_capacity(shared, Some(&list), caps).is_err());
-        assert!(check_block_capacity(shared, None, caps).is_ok());
+        assert!(check_epoch_capacity(shared, Some(&list), caps).is_err());
+        assert!(check_epoch_capacity(shared, None, caps).is_ok());
         let labels = [("label", "a.github.io"), ("dispute", "a.github.io")];
-        assert!(check_block_capacity(labels, Some(&list), caps).is_err());
+        assert!(check_epoch_capacity(labels, Some(&list), caps).is_err());
         let separate = [("label", "a.github.io"), ("label", "b.github.io")];
-        assert!(check_block_capacity(separate, Some(&list), caps).is_ok());
+        assert!(check_epoch_capacity(separate, Some(&list), caps).is_ok());
     }
 }

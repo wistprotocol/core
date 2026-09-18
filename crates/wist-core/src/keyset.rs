@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn a_block_sealing_two_declarations_resolves_to_its_key_set_either_way() {
+    fn an_epoch_sealing_two_declarations_resolves_to_its_key_set_either_way() {
         let decls = [
             at(0, 100, &["k1"]),
             at(1, 200, &["k2"]),

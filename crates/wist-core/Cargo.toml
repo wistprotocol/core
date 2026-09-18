@@ -3,7 +3,7 @@ name = "wist-core"
 version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "WIST protocol primitives: JCS, Ed25519 envelopes, the Log's RFC 6962 tree, C2SP Checkpoints and tiles, Block verification, Declaration replay, parameter schedules"
+description = "WIST protocol primitives: JCS, Ed25519 envelopes, the Log's RFC 6962 tree, C2SP Checkpoints and tiles, Epoch verification, Declaration replay, parameter schedules"
 repository = "https://github.com/wistprotocol/core"
 
 [dependencies]

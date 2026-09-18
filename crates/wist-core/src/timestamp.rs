@@ -50,7 +50,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Parses a Log timestamp into seconds since the Unix epoch, rejecting
+/// Parses a Log timestamp into Unix seconds, rejecting
 /// fractions, offsets, leap seconds and calendar dates that do not exist.
 pub fn log_seconds(at: &str) -> Result<i64, Error> {
     let bytes = at.as_bytes();
@@ -88,14 +88,14 @@ pub fn log_seconds(at: &str) -> Result<i64, Error> {
 }
 
 /// The Log timestamp spelling of an instant inside the four-digit-year range.
-pub fn instant(epoch_s: i64) -> Result<String, Error> {
-    if !(LOG_TIMESTAMP_MIN_S..=LOG_TIMESTAMP_MAX_S).contains(&epoch_s) {
+pub fn instant(unix_s: i64) -> Result<String, Error> {
+    if !(LOG_TIMESTAMP_MIN_S..=LOG_TIMESTAMP_MAX_S).contains(&unix_s) {
         return Err(Error::Timestamp(
             "instant is outside the Log timestamp range".into(),
         ));
     }
-    let (year, month, day) = civil_from_days(epoch_s.div_euclid(86_400));
-    let seconds = epoch_s.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(unix_s.div_euclid(86_400));
+    let seconds = unix_s.rem_euclid(86_400);
     Ok(format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         seconds / 3_600,
@@ -125,10 +125,10 @@ mod tests {
             let at = case["value"].as_str().unwrap();
             assert_eq!(
                 log_seconds(at).ok(),
-                case["epoch_seconds"].as_i64(),
+                case["unix_seconds"].as_i64(),
                 "{at:?}"
             );
-            if let Some(seconds) = case["epoch_seconds"].as_i64() {
+            if let Some(seconds) = case["unix_seconds"].as_i64() {
                 assert_eq!(instant(seconds).unwrap(), at);
             }
         }

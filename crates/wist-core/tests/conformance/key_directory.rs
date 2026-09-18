@@ -26,7 +26,7 @@ fn summary(domain: &wist_core::declarations::Domain) -> Value {
         "pending_head": domain.pending().map(|pending| pending.head().hash()),
         "activation_height": domain.pending().map(|pending| pending.activation_height()),
         "highest_accepted_seq": domain.highest_accepted_seq(),
-        "reset_height": domain.reset().map(|position| position.block_number),
+        "reset_height": domain.reset().map(|position| position.epoch_number),
         "window_end": domain.window().map(|window| timestamp(window.end_s())),
     })
 }
@@ -58,26 +58,26 @@ fn delta_check(declaration: &Value, envelope: &Value) -> String {
     }
 }
 
-/// Replays one history and returns the state after each of its Blocks.
+/// Replays one history and returns the state after each of its Epochs.
 fn replay(vector: &Value, history: &Value) -> Vec<Declarations> {
     let days = vector["recovery_window_days"].as_i64().unwrap();
-    let activation = history["declaration_activation_blocks"]
+    let activation = history["declaration_activation_epochs"]
         .as_i64()
-        .unwrap_or_else(|| vector["declaration_activation_blocks"].as_i64().unwrap());
+        .unwrap_or_else(|| vector["declaration_activation_epochs"].as_i64().unwrap());
     let mut state = Declarations::default();
     let mut prefix = Vec::new();
-    for block in history["blocks"].as_array().unwrap() {
+    for epoch in history["epochs"].as_array().unwrap() {
         let checkpoint =
-            wist_core::checkpoint::Checkpoint::parse(block["checkpoint"].as_str().unwrap())
+            wist_core::checkpoint::Checkpoint::parse(epoch["checkpoint"].as_str().unwrap())
                 .unwrap();
         state
-            .apply_block(
-                checkpoint.block_number(),
+            .apply_epoch(
+                checkpoint.epoch_number(),
                 &checkpoint.root_token(),
                 checkpoint.sealed_at(),
                 days,
                 activation,
-                block["entries"].as_array().unwrap(),
+                epoch["entries"].as_array().unwrap(),
             )
             .unwrap();
         prefix.push(state.clone());
@@ -173,9 +173,9 @@ fn histories_activate_reverse_and_resume_as_the_vector_records() {
                 "{name} at height {height}"
             );
         }
-        let activation = history["declaration_activation_blocks"]
+        let activation = history["declaration_activation_epochs"]
             .as_i64()
-            .unwrap_or_else(|| vector["declaration_activation_blocks"].as_i64().unwrap());
+            .unwrap_or_else(|| vector["declaration_activation_epochs"].as_i64().unwrap());
         for case in vector["rejections"].as_array().unwrap() {
             if case["history"] != *name {
                 continue;
@@ -249,7 +249,7 @@ fn a_pending_declaration_tuple_restores_the_state_it_records() {
                 declaration[1].as_str().unwrap(),
                 declaration[2].clone(),
                 Position {
-                    block_number: declaration[3].as_u64().unwrap(),
+                    epoch_number: declaration[3].as_u64().unwrap(),
                     entry_index: 0,
                 },
                 0,
@@ -259,7 +259,7 @@ fn a_pending_declaration_tuple_restores_the_state_it_records() {
                     (
                         pending[2].clone(),
                         Position {
-                            block_number: pending[3].as_u64().unwrap(),
+                            epoch_number: pending[3].as_u64().unwrap(),
                             entry_index: 0,
                         },
                         0,

@@ -10,7 +10,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const WIST_VERSION: &str = "1.0.0";
 
 pub mod aggregator_keys;
-pub mod block;
 pub mod chain;
 pub mod checkpoint;
 pub mod crypto;
@@ -19,6 +18,7 @@ pub mod declarations;
 pub mod delta;
 pub mod delta_fields;
 pub mod envelope;
+pub mod epoch;
 pub mod error;
 pub mod extract;
 pub mod host;

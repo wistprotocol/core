@@ -8,7 +8,7 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct SnapshotIndexEntry {
     pub snapshot_date: String,
-    pub log_position: u64,
+    pub tree_size: u64,
     pub manifest_url: String,
     pub content_digest: String,
 }
@@ -60,9 +60,9 @@ pub struct SnapshotFile {
 pub struct SnapshotManifest {
     pub wist_version: String,
     pub snapshot_date: String,
-    pub block_number: u64,
-    pub log_position: u64,
-    pub anchor_block_hash: String,
+    pub epoch_number: u64,
+    pub tree_size: u64,
+    pub root_hash: String,
     pub content_digest: String,
     pub state: SnapshotStateFile,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -374,7 +374,7 @@ impl Serialize for StateEntry {
 #[serde(deny_unknown_fields)]
 pub struct SnapshotState {
     pub wist_version: String,
-    pub log_position: u64,
+    pub tree_size: u64,
     pub entries: Vec<StateEntry>,
 }
 

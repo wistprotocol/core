@@ -53,17 +53,17 @@ pub fn check_manifest_anchor(
     checkpoint: &Checkpoint,
 ) -> Result<(), Error> {
     let divergence = |message: &str| Error::Snapshot(format!("WIST3-E02 {message}"));
-    if manifest.block_number != checkpoint.block_number() {
-        return Err(divergence("the Checkpoint is not the Snapshot's Block"));
+    if manifest.epoch_number != checkpoint.epoch_number() {
+        return Err(divergence("the Checkpoint is not the Snapshot's Epoch"));
     }
-    if manifest.log_position != checkpoint.tree_size() {
+    if manifest.tree_size != checkpoint.tree_size() {
         return Err(divergence(
-            "the Checkpoint states another tree size than log_position",
+            "the Checkpoint's tree size is not the Snapshot's tree_size",
         ));
     }
-    if manifest.anchor_block_hash != checkpoint.root_token() {
+    if manifest.root_hash != checkpoint.root_token() {
         return Err(divergence(
-            "the Checkpoint states another root than anchor_block_hash",
+            "the Checkpoint states another root than root_hash",
         ));
     }
     Ok(())
