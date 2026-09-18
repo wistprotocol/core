@@ -474,8 +474,8 @@ pub fn check_sequence(
                 ));
             }
             if next.tree_size() < previous.tree_size() {
-                return Err(Error::Checkpoint(
-                    "a Block's tree size is not below the Block before it".into(),
+                return Err(divergence(
+                    "a Block's tree size is not below the Block before it",
                 ));
             }
             if sealed_at_s <= previous.sealed_at_s()? {
@@ -601,12 +601,70 @@ mod tests {
         let (block0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
         check_sequence(None, &block0, 3600).unwrap();
         let (block2, _) = signed(2, "2026-08-02T14:00:00Z", ROOT);
-        assert!(check_sequence(Some(&block0), &block2, 3600).is_err());
+        assert_eq!(
+            check_sequence(Some(&block0), &block2, 3600)
+                .unwrap_err()
+                .code(),
+            None
+        );
         let (same_instant, _) = signed(1, "2026-08-02T13:00:00Z", ROOT);
-        assert!(check_sequence(Some(&block0), &same_instant, 3600).is_err());
+        assert_eq!(
+            check_sequence(Some(&block0), &same_instant, 3600)
+                .unwrap_err()
+                .code(),
+            None
+        );
         let (off_grid, _) = signed(1, "2026-08-02T13:30:00Z", ROOT);
-        assert!(check_sequence(Some(&block0), &off_grid, 3600).is_err());
+        assert_eq!(
+            check_sequence(Some(&block0), &off_grid, 3600)
+                .unwrap_err()
+                .code(),
+            None
+        );
         check_sequence(Some(&block0), &off_grid, 1800).unwrap();
+    }
+
+    #[test]
+    fn a_block_whose_tree_shrinks_is_reported_as_divergence() {
+        let (block0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        assert_eq!(block0.tree_size(), 4);
+        let mut smaller =
+            Checkpoint::new("log.example.org", 3, ROOT, 1, "2026-08-02T14:00:00Z").unwrap();
+        smaller.sign(&SigningKey::from_seed(&[3u8; 32]));
+        assert_eq!(
+            check_sequence(Some(&block0), &smaller, 3600)
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E02")
+        );
+    }
+
+    #[test]
+    fn a_size_zero_checkpoint_stating_a_non_empty_root_fails_consistency() {
+        let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| merkle::leaf_hash(&[i])).collect();
+        let four = Checkpoint::new(
+            "log.example.org",
+            4,
+            merkle::merkle_root(&leaves),
+            1,
+            "2026-08-02T14:00:00Z",
+        )
+        .unwrap();
+        let empty = Checkpoint::new(
+            "log.example.org",
+            0,
+            merkle::EMPTY_ROOT,
+            0,
+            "2026-08-02T13:00:00Z",
+        )
+        .unwrap();
+        check_consistency(&empty, &four, &[]).unwrap();
+        let stated =
+            Checkpoint::new("log.example.org", 0, ROOT, 0, "2026-08-02T13:00:00Z").unwrap();
+        assert_eq!(
+            check_consistency(&stated, &four, &[]).unwrap_err().code(),
+            Some("WIST3-E02")
+        );
     }
 
     #[test]

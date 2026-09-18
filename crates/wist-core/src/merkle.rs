@@ -156,6 +156,16 @@ pub fn verify_consistency(
             "no Consistency Proof runs from a larger tree to a smaller one",
         ));
     }
+    if m == 0 && *m_root != EMPTY_ROOT {
+        return Err(failure(
+            "the empty tree states another root than SHA-256(\"\")",
+        ));
+    }
+    if n == 0 && *n_root != EMPTY_ROOT {
+        return Err(failure(
+            "the empty tree states another root than SHA-256(\"\")",
+        ));
+    }
     if m == 0 || m == n {
         if !path.is_empty() {
             return Err(failure(
@@ -462,6 +472,17 @@ mod tests {
         assert!(verify_inclusion(&ls[1], 1, 5, &long, &root).is_err());
         assert!(verify_inclusion(&ls[1], 5, 5, &path, &root).is_err());
         assert!(verify_inclusion(&ls[1], 1, 4, &path, &root).is_err());
+    }
+
+    #[test]
+    fn a_consistency_proof_over_an_empty_tree_requires_the_empty_root() {
+        let ls = leaves(4);
+        let root = merkle_root(&ls);
+        verify_consistency(0, 4, &EMPTY_ROOT, &root, &[]).unwrap();
+        assert!(verify_consistency(0, 4, &[9u8; 32], &root, &[]).is_err());
+        verify_consistency(0, 0, &EMPTY_ROOT, &EMPTY_ROOT, &[]).unwrap();
+        assert!(verify_consistency(0, 0, &[9u8; 32], &[9u8; 32], &[]).is_err());
+        assert!(verify_consistency(0, 0, &EMPTY_ROOT, &[9u8; 32], &[]).is_err());
     }
 
     #[test]

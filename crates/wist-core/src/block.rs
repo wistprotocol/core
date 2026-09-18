@@ -98,7 +98,7 @@ pub fn verify_block(
 ) -> Result<BlockSummary, Error> {
     if checkpoint.tree_size() < previous_size {
         return Err(Error::Block(
-            "a Block's tree size is not below the Block before it".into(),
+            "WIST3-E02 a Block's tree size is not below the Block before it".into(),
         ));
     }
     if checkpoint.tree_size() - previous_size != entries.len() as u64 {
@@ -249,6 +249,22 @@ mod tests {
                 .code(),
             Some("WIST3-E03")
         );
+    }
+
+    #[test]
+    fn a_block_whose_checkpoint_shrinks_the_tree_is_reported_as_divergence() {
+        let entries = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
+        let hashes = leaf_hashes(&entries).unwrap();
+        let checkpoint = sealed(&hashes, &[], 1);
+        let err = verify_block(
+            hashes.len() as u64 + 1,
+            &checkpoint,
+            &[],
+            &LeafHashes(&hashes),
+            1 << 20,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), Some("WIST3-E02"));
     }
 
     #[test]
