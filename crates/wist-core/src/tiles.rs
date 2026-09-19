@@ -42,6 +42,23 @@ fn width_suffix(width: u32) -> String {
     }
 }
 
+pub fn path_width(path: &str) -> Result<u32, Error> {
+    let Some((_, stated)) = path.rsplit_once(".p/") else {
+        return Ok(TILE_WIDTH);
+    };
+    let canonical = stated == "0" || (!stated.starts_with('0') && !stated.is_empty());
+    let width = (canonical && stated.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| stated.parse::<u64>().ok())
+        .flatten()
+        .ok_or_else(|| Error::Tile("a partial path states no decimal width".into()))?;
+    if !(1..u64::from(TILE_WIDTH)).contains(&width) {
+        return Err(invalid(
+            "a partial path states a width outside 1 through 255",
+        ));
+    }
+    Ok(width as u32)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tile {
     pub level: u8,
@@ -170,6 +187,28 @@ pub fn decode_tile(bytes: &[u8]) -> Result<Vec<[u8; 32]>, Error> {
         .chunks(32)
         .map(|chunk| chunk.try_into().expect("32 octets"))
         .collect())
+}
+
+pub fn decode_tile_at(path: &str, bytes: &[u8]) -> Result<Vec<[u8; 32]>, Error> {
+    let width = path_width(path)?;
+    let hashes = decode_tile(bytes)?;
+    if hashes.len() as u64 != u64::from(width) {
+        return Err(invalid(
+            "a tile holds a number of hashes other than the one its path states",
+        ));
+    }
+    Ok(hashes)
+}
+
+pub fn decode_entry_bundle_at(path: &str, bytes: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    let width = path_width(path)?;
+    let entries = decode_entry_bundle(bytes)?;
+    if entries.len() as u64 != u64::from(width) {
+        return Err(invalid(
+            "an entry bundle holds a number of Entries other than the one its path states",
+        ));
+    }
+    Ok(entries)
 }
 
 pub fn encode_entry_bundle(entries: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
@@ -494,6 +533,66 @@ mod tests {
                 )
                 .unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn a_path_states_the_width_a_file_served_at_it_must_hold() {
+        assert_eq!(path_width("/tile/0/000").unwrap(), TILE_WIDTH);
+        assert_eq!(path_width("/tile/entries/x001/000").unwrap(), TILE_WIDTH);
+        assert_eq!(path_width("/tile/0/001.p/1").unwrap(), 1);
+        assert_eq!(path_width("/tile/0/001.p/255").unwrap(), 255);
+        for path in ["/tile/0/001.p/0", "/tile/0/001.p/256", "/tile/0/001.p/4096"] {
+            assert_eq!(
+                path_width(path).unwrap_err().code(),
+                Some("WIST3-E03"),
+                "{path}"
+            );
+        }
+        for path in ["/tile/0/001.p/", "/tile/0/001.p/04", "/tile/0/001.p/4x"] {
+            assert_eq!(path_width(path).unwrap_err().code(), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_tile_or_bundle_holding_another_count_than_its_path_states_is_rejected() {
+        let hashes = leaves(44);
+        let octets = encode_tile(&hashes);
+        assert_eq!(decode_tile_at("/tile/0/001.p/44", &octets).unwrap(), hashes);
+        for (path, bytes) in [
+            ("/tile/0/000", octets.clone()),
+            ("/tile/0/001.p/44", octets[..octets.len() - 32].to_vec()),
+            ("/tile/0/001.p/44", octets[..octets.len() - 1].to_vec()),
+            ("/tile/0/001.p/44", Vec::new()),
+        ] {
+            assert_eq!(
+                decode_tile_at(path, &bytes).unwrap_err().code(),
+                Some("WIST3-E03"),
+                "{path} with {} octets",
+                bytes.len()
+            );
+        }
+
+        let entries: Vec<Vec<u8>> = (0..3u8).map(|i| vec![b'{', b'}', i]).collect();
+        let bundle = encode_entry_bundle(&entries).unwrap();
+        assert_eq!(
+            decode_entry_bundle_at("/tile/entries/000.p/3", &bundle).unwrap(),
+            entries
+        );
+        let mut trailing = bundle.clone();
+        trailing.extend_from_slice(&[0, 0]);
+        for (path, bytes) in [
+            ("/tile/entries/000.p/2", bundle.clone()),
+            ("/tile/entries/000.p/4", bundle.clone()),
+            ("/tile/entries/000", bundle.clone()),
+            ("/tile/entries/000.p/3", trailing),
+        ] {
+            assert_eq!(
+                decode_entry_bundle_at(path, &bytes).unwrap_err().code(),
+                Some("WIST3-E03"),
+                "{path} with {} octets",
+                bytes.len()
+            );
         }
     }
 

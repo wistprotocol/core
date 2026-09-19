@@ -48,13 +48,27 @@ pub fn content_digest(records: &[Value]) -> Result<String, Error> {
     Ok(format!("sha256:{}", hex_encode(&hash)))
 }
 
+pub fn check_state_tree_size(
+    manifest: &SnapshotManifest,
+    state_tree_size: u64,
+) -> Result<(), Error> {
+    if state_tree_size != manifest.tree_size {
+        return Err(Error::Snapshot(
+            "WIST3-E04 the state file states another tree_size than the manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn check_manifest_anchor(
     manifest: &SnapshotManifest,
     checkpoint: &Checkpoint,
 ) -> Result<(), Error> {
     let divergence = |message: &str| Error::Snapshot(format!("WIST3-E02 {message}"));
     if manifest.epoch_number != checkpoint.epoch_number() {
-        return Err(divergence("the Checkpoint is not the Snapshot's Epoch"));
+        return Err(Error::Snapshot(
+            "WIST3-E03 the Checkpoint at the manifest's epoch_number states another Epoch".into(),
+        ));
     }
     if manifest.tree_size != checkpoint.tree_size() {
         return Err(divergence(

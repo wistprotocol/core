@@ -60,8 +60,106 @@ fn note_form_and_signature_rules_select_the_documented_outcome() {
 }
 
 #[test]
+fn the_sequence_rules_at_a_verified_head_select_the_documented_code() {
+    let vector = vector();
+    let (log_id, key) = example_log();
+    let cadence = vector["epoch_cadence_seconds"].as_i64().unwrap();
+    let mut outcomes = std::collections::BTreeSet::new();
+    for case in vector["sequence_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let head = verified(case["verified_checkpoint"].as_str().unwrap(), &[])
+            .unwrap_or_else(|code| panic!("{name}: the head Checkpoint verifies, got {code}"));
+        assert_eq!(
+            head.epoch_number(),
+            case["verified_head_epoch_number"].as_u64().unwrap(),
+            "{name}"
+        );
+        let offered = Checkpoint::parse(case["offered_checkpoint"].as_str().unwrap())
+            .unwrap_or_else(|e| panic!("{name}: the offered note parses, got {e}"));
+        let signature_verifies =
+            checkpoint::verify(&offered, &log_id, std::slice::from_ref(&key), &[]).is_ok();
+        assert_eq!(
+            signature_verifies,
+            case["signature_verifies"].as_bool().unwrap(),
+            "{name}"
+        );
+
+        let larger = case["larger_tree_leaf_hashes"]
+            .as_array()
+            .map(|_| hash_list(&case["larger_tree_leaf_hashes"]));
+        assert_eq!(
+            larger.is_some(),
+            offered.tree_size() < head.tree_size(),
+            "{name}: the larger tree's leaf hashes are the evidence of the size rule"
+        );
+        if let Some(leaves) = &larger {
+            assert_eq!(
+                merkle::merkle_root(leaves),
+                *head.root(),
+                "{name}: the stated hashes do not reproduce the head's root"
+            );
+        }
+        let reader = larger.as_deref().map(LeafHashes);
+
+        let outcome = match checkpoint::check_sequence_at_head(
+            &head,
+            &offered,
+            cadence,
+            signature_verifies,
+            reader.as_ref().map(|tree| tree as &dyn merkle::HashReader),
+        ) {
+            Ok(()) if signature_verifies => "valid".to_string(),
+            Ok(()) => "WIST3-E03".to_string(),
+            Err(error) => error.code().unwrap().to_string(),
+        };
+        assert_eq!(case["expected"], outcome, "{name}");
+        let head_after = if outcome == "valid" {
+            offered.epoch_number()
+        } else {
+            head.epoch_number()
+        };
+        assert_eq!(
+            case["expected_head_epoch_number"].as_u64().unwrap(),
+            head_after,
+            "{name}"
+        );
+        if let Some(unobtainable) = case["unobtainable_epoch_number"].as_u64() {
+            assert_eq!(outcome, "WIST3-E01", "{name}");
+            assert_eq!(unobtainable, head.epoch_number() + 1, "{name}");
+            assert!(unobtainable < offered.epoch_number(), "{name}");
+        }
+        assert_eq!(
+            case["evidence"].is_array(),
+            outcome == "WIST3-E02",
+            "{name}: Equivocation is the case that carries an evidence bundle"
+        );
+        if let Some(evidence) = case["evidence"].as_array() {
+            let named: Vec<&str> = evidence.iter().map(|e| e.as_str().unwrap()).collect();
+            assert_eq!(
+                named,
+                [
+                    "verified_checkpoint",
+                    "offered_checkpoint",
+                    "larger_tree_leaf_hashes"
+                ],
+                "{name}"
+            );
+        }
+        outcomes.insert(outcome);
+    }
+    assert_eq!(
+        outcomes,
+        ["valid", "WIST3-E01", "WIST3-E02", "WIST3-E03"]
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    );
+}
+
+#[test]
 fn each_epoch_of_the_vector_log_states_its_cumulative_tree() {
     let vector = vector();
+    let cadence = vector["epoch_cadence_seconds"].as_i64().unwrap();
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut previous: Option<Checkpoint> = None;
     for epoch in vector["epochs"].as_array().unwrap() {
@@ -86,13 +184,13 @@ fn each_epoch_of_the_vector_log_states_its_cumulative_tree() {
         assert_eq!(leaves, hash_list(&epoch["leaf_hashes"]));
         assert_eq!(*checkpoint.root(), merkle::merkle_root(&leaves));
         if let Some(previous) = &previous {
-            checkpoint::check_sequence(Some(previous), &checkpoint, 3600).unwrap();
+            checkpoint::check_sequence(Some(previous), &checkpoint, cadence).unwrap();
             let path =
                 merkle::consistency_proof(previous.tree_size(), checkpoint.tree_size(), &leaves)
                     .unwrap();
             checkpoint::check_consistency(previous, &checkpoint, &path).unwrap();
         } else {
-            checkpoint::check_sequence(None, &checkpoint, 3600).unwrap();
+            checkpoint::check_sequence(None, &checkpoint, cadence).unwrap();
         }
         previous = Some(checkpoint);
     }
@@ -257,8 +355,9 @@ fn the_witness_quorum_counts_distinct_trusted_names() {
 }
 
 #[test]
-fn a_snapshot_manifest_must_match_the_checkpoint_at_its_epoch() {
+fn a_snapshot_position_is_read_from_the_state_file_and_the_checkpoint_the_manifest_selects() {
     let manifest_template: Value = read_json("examples/snapshot-manifest.json")["manifest"].clone();
+    let mut outcomes = std::collections::BTreeSet::new();
     for case in vector()["cold_start_cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
         let checkpoint = verified(case["checkpoint"].as_str().unwrap(), &[]).unwrap();
@@ -267,11 +366,25 @@ fn a_snapshot_manifest_must_match_the_checkpoint_at_its_epoch() {
             value[field] = case["manifest"][field].clone();
         }
         let manifest: wist_core::objects::SnapshotManifest = serde_json::from_value(value).unwrap();
-        match wist_core::snapshot::check_manifest_anchor(&manifest, &checkpoint) {
-            Ok(()) => assert_eq!(case["expected"], "valid", "{name}"),
-            Err(error) => assert_eq!(case["expected"], error.code().unwrap(), "{name}"),
-        }
+        let state_tree_size = case["state_tree_size"].as_u64().unwrap();
+        let outcome = wist_core::snapshot::check_state_tree_size(&manifest, state_tree_size)
+            .and_then(|()| wist_core::snapshot::check_manifest_anchor(&manifest, &checkpoint));
+        let outcome = match outcome {
+            Ok(()) => "valid".to_string(),
+            Err(error) => error.code().unwrap().to_string(),
+        };
+        assert_eq!(case["expected"], outcome, "{name}");
+        let head = (outcome == "valid").then_some(manifest.epoch_number);
+        assert_eq!(case["expected_head_epoch_number"].as_u64(), head, "{name}");
+        outcomes.insert(outcome);
     }
+    assert_eq!(
+        outcomes,
+        ["valid", "WIST3-E02", "WIST3-E03", "WIST3-E04"]
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    );
 }
 
 #[test]
@@ -353,6 +466,91 @@ fn the_static_surface_of_the_example_tree_is_the_octets_the_vector_fixes() {
             .code(),
         Some("WIST3-E03")
     );
+}
+
+#[test]
+fn the_tile_and_bundle_forms_the_spec_excludes_are_rejected_at_the_paths_width() {
+    let vector = read_json("vectors/wist3/tile-bounds.json");
+    assert_eq!(vector["tile_hash_octets"].as_u64().unwrap(), 32);
+    assert_eq!(
+        vector["full_tile_hashes"].as_u64().unwrap(),
+        u64::from(tiles::TILE_WIDTH)
+    );
+
+    let mut tile_outcomes = std::collections::BTreeSet::new();
+    for case in vector["tile_form_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let path = case["path"].as_str().unwrap();
+        let octets = wist_core::crypto::hex_decode(case["octets_hex"].as_str().unwrap()).unwrap();
+        let outcome = match tiles::decode_tile_at(path, &octets) {
+            Ok(hashes) => {
+                assert_eq!(hashes.len(), octets.len() / 32, "{name}");
+                assert_eq!(
+                    hashes.len() as u32,
+                    tiles::path_width(path).unwrap(),
+                    "{name}"
+                );
+                "valid".to_string()
+            }
+            Err(error) => error.code().unwrap().to_string(),
+        };
+        assert_eq!(case["expected"], outcome, "{name}");
+        tile_outcomes.insert(outcome);
+    }
+
+    let mut bundle_outcomes = std::collections::BTreeSet::new();
+    for case in vector["bundle_form_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let path = case["path"].as_str().unwrap();
+        let octets = wist_core::crypto::hex_decode(case["octets_hex"].as_str().unwrap()).unwrap();
+        let outcome = match tiles::decode_entry_bundle_at(path, &octets) {
+            Ok(entries) => {
+                assert_eq!(
+                    entries.len() as u32,
+                    tiles::path_width(path).unwrap(),
+                    "{name}"
+                );
+                assert_eq!(
+                    tiles::encode_entry_bundle(&entries).unwrap(),
+                    octets,
+                    "{name}: the accepted form does not re-encode to its octets"
+                );
+                "valid".to_string()
+            }
+            Err(error) => error.code().unwrap().to_string(),
+        };
+        assert_eq!(case["expected"], outcome, "{name}");
+        bundle_outcomes.insert(outcome);
+    }
+
+    let mut range_outcomes = std::collections::BTreeSet::new();
+    for case in vector["epoch_range_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let indexes: Vec<u64> = case["entry_leaf_indexes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| index.as_u64().unwrap())
+            .collect();
+        let outcome = match wist_core::epoch::check_leaf_range(
+            case["size_previous"].as_u64().unwrap(),
+            case["size"].as_u64().unwrap(),
+            &indexes,
+        ) {
+            Ok(()) => "valid".to_string(),
+            Err(error) => error.code().unwrap().to_string(),
+        };
+        assert_eq!(case["expected"], outcome, "{name}");
+        range_outcomes.insert(outcome);
+    }
+
+    let both: std::collections::BTreeSet<String> = ["valid", "WIST3-E03"]
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    assert_eq!(tile_outcomes, both);
+    assert_eq!(bundle_outcomes, both);
+    assert_eq!(range_outcomes, both);
 }
 
 #[test]

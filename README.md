@@ -51,7 +51,11 @@ party holding tiles rather than every leaf gets identical values;
 read a prior tree plus the leaves an Epoch appends.
 
 `checkpoint::Checkpoint` is the five-line signed note of WIST-3 §5.
-`parse` rejects every octet-level departure as `WIST3-E03`; `note_text`
+`parse` rejects every octet-level departure as `WIST3-E03` — a root hash
+line that is not the canonical padded base64 of exactly 32 octets, a
+signature line without its terminating newline or under an empty key name
+or one carrying `+` or a Unicode White_Space character, and more than the
+`MAX_SIGNATURE_LINES` a note may carry; `note_text`
 and `encode` re-emit it byte for byte; `new`, `sign` and `add_signature`
 build one and append further signature lines — a rotation's second key, or
 a Cosignature a Witness returned — without changing the note text.
@@ -70,9 +74,19 @@ equivocation forms, `check_sequence` §3.1's Epoch-to-Epoch rules
 (sequential number, a tree that never shrinks, a strictly increasing
 `sealed_at` on the cadence grid), `check_consistency` the Consistency
 Proof between two Checkpoints, and `archive_path`/`check_archive_path`
-§6's per-Epoch archive path. A tree below the previous Checkpoint's size
-is the §5 divergence `WIST3-E02`, in `check_sequence` and in
-`epoch::verify_epoch`; the other sequence failures carry no code.
+§6's per-Epoch archive path. §3.1 fixes each sequence failure's
+disposition: a `sealed_at` that does not advance or sits off the grid is
+`WIST3-E03` whatever the signature does, and so is a tree size below the
+previous Checkpoint's, except where the signature verifies under the key
+set valid at the previous height and the offered root is not that tree's
+root at the smaller size — the divergence `WIST3-E02`.
+`check_sequence_at_head` takes that signature status and the larger tree's
+hashes and reports both, `WIST3-E02` prevailing where a Checkpoint breaks
+several rules; `check_sequence` judges the pair without them, so a smaller
+tree there is `WIST3-E03`, as it is in `epoch::verify_epoch`. A Checkpoint
+offered above the Epoch after the head leaves the Consumer without the one
+between: that is `absent_checkpoint`'s `WIST3-E01`, which every source
+that does not serve an archived Checkpoint also carries.
 
 `tiles` is the [tlog-tiles] surface (WIST-3 §6): `Tile` and `EntryBundle`
 with their paths, including the `x`-prefixed three-digit groups above
@@ -81,7 +95,11 @@ index 999 and the `.p/<W>` partial widths;
 `tiles_for_range`/`entry_bundles_for_range` for an Epoch's leaves;
 `encode_tile`/`decode_tile` and
 `encode_entry_bundle`/`decode_entry_bundle`, which reject a truncated
-Entry or octets left over; `TileSet`, which builds and serves a tree's
+Entry or octets left over; `path_width` with `decode_tile_at` and
+`decode_entry_bundle_at`, which read a served file at the count its path
+states — 256 for a full path, `W` for `.p/<W>` with `W` from 1 through 255
+— and reject every other form §6 excludes as `WIST3-E03`; `TileSet`, which
+builds and serves a tree's
 tiles and reads them back as a `HashReader`; `check_tree` and
 `check_entry_bundle`, which verify served octets by recomputation against
 a verified Checkpoint's root; and the `TILE_MAX_BYTES`,
@@ -93,11 +111,16 @@ five Entry types, the canonical order, each Entry's JCS within 65 535
 octets, the Epoch's entry-bundle octets against the cap in force, and that
 the leaf hashes occupy `[size(N-1), size(N))` in the tree whose root the
 Checkpoint states, recomputed from the prefix already verified.
-`sort_entries` puts Entries in that canonical order, `epoch_octets` sizes
-an Epoch and `parse_entries` reads an entry bundle's leaf data back into
-Entries. `snapshot::check_manifest_anchor` is WIST-3 §8 step 5, where a
-Snapshot manifest that names another tree than the Checkpoint at its
-`epoch_number` is `WIST3-E02`.
+`sort_entries` puts Entries in that canonical order, `check_leaf_range`
+holds an Epoch's Entries to the leaf indexes `size(N-1)` through
+`size(N) - 1` (`WIST3-E03`), `epoch_octets` sizes an Epoch and
+`parse_entries` reads an entry bundle's leaf data back into Entries.
+`snapshot::check_state_tree_size` is WIST-3 §8 step 4, where a state file
+stating another `tree_size` than the manifest is `WIST3-E04`, and
+`check_manifest_anchor` is step 5: the manifest's `epoch_number` selects
+the archived Checkpoint, so a file at that path stating another Epoch is
+the source's `WIST3-E03`, while a `tree_size` or `root_hash` the selected
+Checkpoint contradicts is the divergence `WIST3-E02`.
 
 ## Registry Updates
 

@@ -74,6 +74,20 @@ pub fn sort_entries(entries: &mut [Value]) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn check_leaf_range(
+    previous_size: u64,
+    tree_size: u64,
+    leaf_indexes: &[u64],
+) -> Result<(), Error> {
+    if tree_size < previous_size {
+        return Err(invalid("an Epoch's tree size is below the Epoch before it"));
+    }
+    if !leaf_indexes.iter().copied().eq(previous_size..tree_size) {
+        return Err(invalid("the Epoch's Entries do not fill its leaf range"));
+    }
+    Ok(())
+}
+
 pub fn epoch_octets(entries: &[Value]) -> Result<u64, Error> {
     let mut octets: u64 = 0;
     for entry in entries {
@@ -97,9 +111,7 @@ pub fn verify_epoch(
     epoch_cap_bytes: u64,
 ) -> Result<EpochSummary, Error> {
     if checkpoint.tree_size() < previous_size {
-        return Err(Error::Epoch(
-            "WIST3-E02 an Epoch's tree size is not below the Epoch before it".into(),
-        ));
+        return Err(invalid("an Epoch's tree size is below the Epoch before it"));
     }
     if checkpoint.tree_size() - previous_size != entries.len() as u64 {
         return Err(invalid("the Epoch's Entries do not fill its leaf range"));
@@ -252,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn an_epoch_whose_checkpoint_shrinks_the_tree_is_reported_as_divergence() {
+    fn an_epoch_whose_checkpoint_shrinks_the_tree_is_an_invalid_object() {
         let entries = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
         let hashes = leaf_hashes(&entries).unwrap();
         let checkpoint = sealed(&hashes, &[], 1);
@@ -264,7 +276,31 @@ mod tests {
             1 << 20,
         )
         .unwrap_err();
-        assert_eq!(err.code(), Some("WIST3-E02"));
+        assert_eq!(err.code(), Some("WIST3-E03"));
+    }
+
+    #[test]
+    fn an_epochs_entries_occupy_the_leaf_range_its_tree_sizes_fix() {
+        check_leaf_range(4, 7, &[4, 5, 6]).unwrap();
+        check_leaf_range(4, 4, &[]).unwrap();
+        for indexes in [
+            vec![4, 5],
+            vec![4, 5, 7],
+            vec![4, 5, 6, 7],
+            vec![3, 4, 5],
+            vec![6, 5, 4],
+            vec![4, 4, 5],
+        ] {
+            assert_eq!(
+                check_leaf_range(4, 7, &indexes).unwrap_err().code(),
+                Some("WIST3-E03"),
+                "{indexes:?}"
+            );
+        }
+        assert_eq!(
+            check_leaf_range(7, 4, &[]).unwrap_err().code(),
+            Some("WIST3-E03")
+        );
     }
 
     #[test]

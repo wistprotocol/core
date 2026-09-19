@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 pub const AGGREGATOR_KEY_TYPE: u8 = 0x01;
 pub const WITNESS_KEY_TYPE: u8 = 0x04;
+pub const MAX_SIGNATURE_LINES: usize = 16;
 
 const SIGNATURE_PREFIX: &str = "\u{2014} ";
 
@@ -18,6 +19,12 @@ fn invalid(message: &str) -> Error {
 
 fn divergence(message: &str) -> Error {
     Error::Checkpoint(format!("WIST3-E02 {message}"))
+}
+
+pub fn absent_checkpoint(epoch_number: u64) -> Error {
+    Error::Checkpoint(format!(
+        "WIST3-E01 no source serves the archived Checkpoint of Epoch {epoch_number}"
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +48,14 @@ impl SignatureLine {
         let (name, encoded) = rest
             .rsplit_once(' ')
             .ok_or_else(|| invalid("signature line without a signature value"))?;
+        if name.is_empty() {
+            return Err(invalid("signature line with an empty key name"));
+        }
+        if name.contains('+') || name.chars().any(char::is_whitespace) {
+            return Err(invalid(
+                "signature line whose key name carries a plus or a White_Space character",
+            ));
+        }
         let blob = STANDARD
             .decode(encoded)
             .map_err(|_| invalid("signature value is not base64"))?;
@@ -181,6 +196,11 @@ impl Checkpoint {
         }
         if signature_lines.is_empty() {
             return Err(invalid("the note carries no signature line"));
+        }
+        if signature_lines.len() > MAX_SIGNATURE_LINES {
+            return Err(invalid(
+                "the note carries more signature lines than the sixteen §5 admits",
+            ));
         }
         let signatures = signature_lines
             .iter()
@@ -458,7 +478,6 @@ pub fn check_sequence(
     next: &Checkpoint,
     cadence_seconds: i64,
 ) -> Result<(), Error> {
-    let sealed_at_s = next.sealed_at_s()?;
     match previous {
         None => {
             if next.epoch_number() != 0 {
@@ -466,33 +485,58 @@ pub fn check_sequence(
                     "the first Epoch of the Log is Epoch 0".into(),
                 ));
             }
+            check_cadence(next, cadence_seconds)
         }
-        Some(previous) => {
-            if previous.epoch_number().checked_add(1) != Some(next.epoch_number()) {
-                return Err(Error::Checkpoint(
-                    "epoch_number is sequential from 0 without gaps".into(),
-                ));
-            }
-            if next.tree_size() < previous.tree_size() {
-                return Err(divergence(
-                    "an Epoch's tree size is not below the Epoch before it",
-                ));
-            }
-            if sealed_at_s <= previous.sealed_at_s()? {
-                return Err(Error::Checkpoint(
-                    "sealed_at is not strictly increasing across Epochs".into(),
-                ));
-            }
-        }
+        Some(previous) => check_sequence_at_head(previous, next, cadence_seconds, false, None),
     }
+}
+
+pub fn check_sequence_at_head(
+    previous: &Checkpoint,
+    offered: &Checkpoint,
+    cadence_seconds: i64,
+    signature_verifies: bool,
+    larger_tree: Option<&dyn merkle::HashReader>,
+) -> Result<(), Error> {
+    if previous.epoch_number().checked_add(1) != Some(offered.epoch_number()) {
+        if offered.epoch_number() > previous.epoch_number() {
+            return Err(absent_checkpoint(previous.epoch_number() + 1));
+        }
+        return Err(Error::Checkpoint(
+            "the offered Checkpoint is not the Epoch after the verified head".into(),
+        ));
+    }
+    if offered.tree_size() < previous.tree_size() {
+        if signature_verifies {
+            if let Some(larger_tree) = larger_tree {
+                if prefix_equivocation(offered, previous, larger_tree)?.is_some() {
+                    return Err(divergence(
+                        "a Checkpoint below the previous tree size states a root that is not that tree's at the smaller size",
+                    ));
+                }
+            }
+        }
+        return Err(invalid(
+            "a Checkpoint states a tree size below the Epoch before it",
+        ));
+    }
+    if offered.sealed_at_s()? <= previous.sealed_at_s()? {
+        return Err(invalid(
+            "sealed_at is not later than the previous Checkpoint's",
+        ));
+    }
+    check_cadence(offered, cadence_seconds)
+}
+
+fn check_cadence(checkpoint: &Checkpoint, cadence_seconds: i64) -> Result<(), Error> {
     if cadence_seconds <= 0 {
         return Err(Error::Checkpoint(
             "the sealing cadence in force is not a positive number of seconds".into(),
         ));
     }
-    if sealed_at_s.rem_euclid(cadence_seconds) != 0 {
-        return Err(Error::Checkpoint(
-            "sealed_at is off the cadence grid in force at the previous Epoch".into(),
+    if checkpoint.sealed_at_s()?.rem_euclid(cadence_seconds) != 0 {
+        return Err(invalid(
+            "sealed_at is off the cadence grid in force at the previous Epoch",
         ));
     }
     Ok(())
@@ -589,6 +633,86 @@ mod tests {
     }
 
     #[test]
+    fn a_note_carries_sixteen_signature_lines_at_most() {
+        let (checkpoint, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        let text = checkpoint.note_text();
+        let mut lines = Vec::new();
+        for index in 0..MAX_SIGNATURE_LINES {
+            let key = SigningKey::from_seed(&[index as u8; 32]);
+            lines.push(cosignature_line(
+                &format!("witness-{index:02}.example"),
+                &key,
+                &text,
+                1_775_000_000,
+            ));
+        }
+        let mut sixteen = checkpoint.clone();
+        for line in lines.iter().take(MAX_SIGNATURE_LINES - 1) {
+            sixteen.add_signature(line.clone());
+        }
+        let note = sixteen.encode();
+        assert_eq!(Checkpoint::parse(&note).unwrap(), sixteen);
+
+        let mut seventeen = sixteen.clone();
+        seventeen.add_signature(lines[MAX_SIGNATURE_LINES - 1].clone());
+        let over = seventeen.encode();
+        assert!(over.starts_with(&note));
+        assert_eq!(
+            Checkpoint::parse(&over).unwrap_err().code(),
+            Some("WIST3-E03")
+        );
+    }
+
+    #[test]
+    fn a_signature_line_key_name_is_non_empty_and_free_of_plus_and_white_space() {
+        let (checkpoint, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        let note = checkpoint.encode();
+        let line = checkpoint.signatures()[0].encode();
+        for name in [
+            "",
+            "witness+a.example",
+            "witness\u{a0}a.example",
+            "witness a",
+        ] {
+            let mut renamed = checkpoint.signatures()[0].clone();
+            renamed.name = name.to_string();
+            let note = note.replace(&line, &renamed.encode());
+            assert_eq!(
+                Checkpoint::parse(&note).unwrap_err().code(),
+                Some("WIST3-E03"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_hash_line_is_exactly_thirty_two_octets_in_canonical_padded_base64() {
+        let (checkpoint, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        let note = checkpoint.encode();
+        let encoded = STANDARD.encode(ROOT);
+        for line in [
+            STANDARD.encode([7u8; 31]),
+            STANDARD.encode([7u8; 33]),
+            encoded.trim_end_matches('=').to_string(),
+            format!("{}{}", &encoded[..encoded.len() - 2], "5="),
+        ] {
+            let note = note.replace(&encoded, &line);
+            assert_eq!(
+                Checkpoint::parse(&note).unwrap_err().code(),
+                Some("WIST3-E03"),
+                "{line}"
+            );
+        }
+        assert!(!note.ends_with("\n\n"));
+        assert_eq!(
+            Checkpoint::parse(note.trim_end_matches('\n'))
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E03")
+        );
+    }
+
+    #[test]
     fn a_checkpoint_without_an_aggregator_signature_is_rejected() {
         let (checkpoint, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
         let other = SigningKey::from_seed(&[11u8; 32]);
@@ -606,44 +730,113 @@ mod tests {
     }
 
     #[test]
-    fn the_sequence_rules_reject_gaps_shrinking_trees_and_off_grid_instants() {
+    fn a_gap_above_the_head_names_the_checkpoint_no_source_serves() {
         let (epoch0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
         check_sequence(None, &epoch0, 3600).unwrap();
         let (epoch2, _) = signed(2, "2026-08-02T14:00:00Z", ROOT);
-        assert_eq!(
-            check_sequence(Some(&epoch0), &epoch2, 3600)
-                .unwrap_err()
-                .code(),
-            None
-        );
+        let err = check_sequence(Some(&epoch0), &epoch2, 3600).unwrap_err();
+        assert_eq!(err.code(), Some("WIST3-E01"));
+        assert!(err.to_string().contains("Epoch 1"));
+        assert_eq!(absent_checkpoint(1).to_string(), err.to_string());
+    }
+
+    #[test]
+    fn a_sealed_at_that_does_not_advance_or_sits_off_the_grid_is_an_invalid_object() {
+        let (epoch0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
         let (same_instant, _) = signed(1, "2026-08-02T13:00:00Z", ROOT);
         assert_eq!(
             check_sequence(Some(&epoch0), &same_instant, 3600)
                 .unwrap_err()
                 .code(),
-            None
+            Some("WIST3-E03")
+        );
+        let (earlier, _) = signed(1, "2026-08-02T12:00:00Z", ROOT);
+        assert_eq!(
+            check_sequence(Some(&epoch0), &earlier, 3600)
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E03")
         );
         let (off_grid, _) = signed(1, "2026-08-02T13:30:00Z", ROOT);
         assert_eq!(
             check_sequence(Some(&epoch0), &off_grid, 3600)
                 .unwrap_err()
                 .code(),
-            None
+            Some("WIST3-E03")
         );
         check_sequence(Some(&epoch0), &off_grid, 1800).unwrap();
     }
 
     #[test]
-    fn an_epoch_whose_tree_shrinks_is_reported_as_divergence() {
-        let (epoch0, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
-        assert_eq!(epoch0.tree_size(), 4);
-        let mut smaller =
+    fn a_shrinking_tree_is_an_invalid_object_unless_its_root_contradicts_the_prefix() {
+        let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| merkle::leaf_hash(&[i])).collect();
+        let head = Checkpoint::new(
+            "log.example.org",
+            4,
+            merkle::merkle_root(&leaves),
+            0,
+            "2026-08-02T13:00:00Z",
+        )
+        .unwrap();
+        let tree = merkle::LeafHashes(&leaves);
+        let prefix = merkle::merkle_root(&leaves[..3]);
+
+        let restating =
+            Checkpoint::new("log.example.org", 3, prefix, 1, "2026-08-02T14:00:00Z").unwrap();
+        for signature_verifies in [false, true] {
+            assert_eq!(
+                check_sequence_at_head(&head, &restating, 3600, signature_verifies, Some(&tree))
+                    .unwrap_err()
+                    .code(),
+                Some("WIST3-E03")
+            );
+        }
+
+        let contradicting =
             Checkpoint::new("log.example.org", 3, ROOT, 1, "2026-08-02T14:00:00Z").unwrap();
-        smaller.sign(&SigningKey::from_seed(&[3u8; 32]));
         assert_eq!(
-            check_sequence(Some(&epoch0), &smaller, 3600)
+            check_sequence_at_head(&head, &contradicting, 3600, false, Some(&tree))
                 .unwrap_err()
                 .code(),
+            Some("WIST3-E03")
+        );
+        assert_eq!(
+            check_sequence_at_head(&head, &contradicting, 3600, true, None)
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E03")
+        );
+        assert_eq!(
+            check_sequence_at_head(&head, &contradicting, 3600, true, Some(&tree))
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E02")
+        );
+    }
+
+    #[test]
+    fn divergence_prevails_over_an_off_grid_sealed_at_in_the_same_checkpoint() {
+        let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| merkle::leaf_hash(&[i])).collect();
+        let head = Checkpoint::new(
+            "log.example.org",
+            4,
+            merkle::merkle_root(&leaves),
+            0,
+            "2026-08-02T13:00:00Z",
+        )
+        .unwrap();
+        let off_grid_and_smaller =
+            Checkpoint::new("log.example.org", 3, ROOT, 1, "2026-08-02T13:30:00Z").unwrap();
+        assert_eq!(
+            check_sequence_at_head(
+                &head,
+                &off_grid_and_smaller,
+                3600,
+                true,
+                Some(&merkle::LeafHashes(&leaves))
+            )
+            .unwrap_err()
+            .code(),
             Some("WIST3-E02")
         );
     }
