@@ -2,11 +2,12 @@ use crate::checkpoint::{self, AggregatorKey};
 use crate::crypto::PublicKey;
 use crate::error::Error;
 use crate::objects::{
-    AggregatorKeyEntry, GenesisKey, KeyAddDetails, RegistryAction, RegistryDetails,
+    AggregatorKeyEntry, Anchor, GenesisKey, KeyAddDetails, RegistryAction, RegistryDetails,
     RegistryUpdateEnvelope,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 pub const KEY_ACT_CONFLICT_CODE: &str = "WIST4-E04";
 
@@ -52,11 +53,57 @@ pub struct KeyRecord {
     pub public_key: PublicKey,
     pub added_height: u64,
     pub removed_height: Option<u64>,
+    pub adding_act: Option<Value>,
+    pub removing_act: Option<Value>,
 }
 
 impl KeyRecord {
     pub fn valid_at(&self, height: u64) -> bool {
         self.added_height <= height && self.removed_height.is_none_or(|removed| removed > height)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyTupleRule {
+    DistinctKeys,
+    GenesisTuple,
+    AddingAct,
+    RemovingAct,
+    ActSignature,
+}
+
+impl KeyTupleRule {
+    pub fn number(self) -> u8 {
+        match self {
+            KeyTupleRule::DistinctKeys => 1,
+            KeyTupleRule::GenesisTuple => 2,
+            KeyTupleRule::AddingAct => 3,
+            KeyTupleRule::RemovingAct => 4,
+            KeyTupleRule::ActSignature => 5,
+        }
+    }
+}
+
+impl fmt::Display for KeyTupleRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let requirement = match self {
+            KeyTupleRule::DistinctKeys => {
+                "two tuples carry one key_id or keys with one note key ID"
+            }
+            KeyTupleRule::GenesisTuple => {
+                "the tuple with no adding act is not the Anchor's genesis key at height 0"
+            }
+            KeyTupleRule::AddingAct => {
+                "an adding act is not an aggregator_key_add for its tuple at a height through the Snapshot's Epoch"
+            }
+            KeyTupleRule::RemovingAct => {
+                "a removing act and a removed height do not pair as an aggregator_key_remove for the tuple above its added height"
+            }
+            KeyTupleRule::ActSignature => {
+                "an act does not verify under a key the tuples hold valid at the height below its own"
+            }
+        };
+        write!(f, "rule {} — {requirement}", self.number())
     }
 }
 
@@ -80,6 +127,8 @@ impl Registry {
             public_key,
             added_height: 0,
             removed_height: None,
+            adding_act: None,
+            removing_act: None,
         };
         Ok(Registry {
             log_id: log_id.to_owned(),
@@ -88,32 +137,129 @@ impl Registry {
         })
     }
 
-    pub fn from_entries(log_id: &str, entries: &[AggregatorKeyEntry]) -> Result<Self, Error> {
-        let mut keys = BTreeMap::new();
+    pub fn from_state_tuples(
+        anchor: &Anchor,
+        epoch_number: u64,
+        entries: &[AggregatorKeyEntry],
+    ) -> Result<Self, Error> {
+        let genesis = &anchor.genesis_key;
+        let log_id = anchor.log_id.as_str();
+        let broken = |rule: KeyTupleRule| Err(Error::KeyTuples(rule));
+
+        let mut public_keys = Vec::with_capacity(entries.len());
         for entry in entries {
-            if entry
-                .removed_height
-                .is_some_and(|removed| removed < entry.added_height)
-            {
-                return Err(Error::Envelope(
-                    "a key is retired below the height that admitted it".into(),
-                ));
-            }
-            let record = KeyRecord {
-                key_id: entry.key_id.clone(),
-                public_key: PublicKey::from_b64u(&entry.public_key)?,
-                added_height: entry.added_height,
-                removed_height: entry.removed_height,
-            };
-            if keys.insert(entry.key_id.clone(), record).is_some() {
-                return Err(Error::Envelope(
-                    "the state carries one key_id more than once".into(),
-                ));
+            match PublicKey::from_b64u(&entry.public_key) {
+                Ok(key) => public_keys.push(key),
+                Err(_) => return broken(KeyTupleRule::DistinctKeys),
             }
         }
+        let mut key_ids = BTreeSet::new();
+        let mut note_key_ids = BTreeSet::new();
+        for (entry, public_key) in entries.iter().zip(&public_keys) {
+            if !key_ids.insert(entry.key_id.as_str())
+                || !note_key_ids.insert(checkpoint::aggregator_key_id(log_id, public_key))
+            {
+                return broken(KeyTupleRule::DistinctKeys);
+            }
+        }
+
+        let mut rootless = entries.iter().filter(|entry| entry.adding_act.is_none());
+        let Some(root) = rootless.next() else {
+            return broken(KeyTupleRule::GenesisTuple);
+        };
+        if rootless.next().is_some()
+            || root.key_id != genesis.key_id
+            || root.public_key != genesis.public_key
+            || root.added_height != 0
+        {
+            return broken(KeyTupleRule::GenesisTuple);
+        }
+
+        for entry in entries {
+            if let Some(act) = &entry.adding_act {
+                if !carries_act(
+                    act,
+                    RegistryAction::AggregatorKeyAdd,
+                    &entry.key_id,
+                    Some(&entry.public_key),
+                ) || entry.added_height > epoch_number
+                {
+                    return broken(KeyTupleRule::AddingAct);
+                }
+            }
+            match (entry.removed_height, &entry.removing_act) {
+                (None, None) => {}
+                (Some(removed), Some(act)) => {
+                    let floor = match entry.adding_act {
+                        None => 0,
+                        Some(_) => entry.added_height + 1,
+                    };
+                    if !carries_act(
+                        act,
+                        RegistryAction::AggregatorKeyRemove,
+                        &entry.key_id,
+                        None,
+                    ) || removed < floor
+                        || removed > epoch_number
+                    {
+                        return broken(KeyTupleRule::RemovingAct);
+                    }
+                }
+                _ => return broken(KeyTupleRule::RemovingAct),
+            }
+        }
+
+        for entry in entries {
+            for (act, height) in [
+                (&entry.adding_act, Some(entry.added_height)),
+                (&entry.removing_act, entry.removed_height),
+            ] {
+                let (Some(act), Some(height)) = (act, height) else {
+                    continue;
+                };
+                let signer = act.pointer("/sig/key_id").and_then(Value::as_str);
+                let named = signer.and_then(|signer| {
+                    entries
+                        .iter()
+                        .zip(&public_keys)
+                        .find(|(entry, _)| entry.key_id == signer)
+                });
+                let Some((tuple, public_key)) = named else {
+                    return broken(KeyTupleRule::ActSignature);
+                };
+                let valid = match height.checked_sub(1) {
+                    None => tuple.key_id == genesis.key_id,
+                    Some(below) => {
+                        tuple.added_height <= below
+                            && tuple.removed_height.is_none_or(|removed| removed > below)
+                    }
+                };
+                if !valid || crate::envelope::verify_envelope(act, "update", public_key).is_err() {
+                    return broken(KeyTupleRule::ActSignature);
+                }
+            }
+        }
+
+        let keys = entries
+            .iter()
+            .zip(public_keys)
+            .map(|(entry, public_key)| {
+                (
+                    entry.key_id.clone(),
+                    KeyRecord {
+                        key_id: entry.key_id.clone(),
+                        public_key,
+                        added_height: entry.added_height,
+                        removed_height: entry.removed_height,
+                        adding_act: entry.adding_act.clone(),
+                        removing_act: entry.removing_act.clone(),
+                    },
+                )
+            })
+            .collect();
         Ok(Registry {
             log_id: log_id.to_owned(),
-            genesis_key_id: None,
+            genesis_key_id: Some(genesis.key_id.clone()),
             keys,
         })
     }
@@ -176,6 +322,8 @@ impl Registry {
                 public_key: record.public_key.to_b64u(),
                 added_height: record.added_height,
                 removed_height: record.removed_height,
+                adding_act: record.adding_act.clone(),
+                removing_act: record.removing_act.clone(),
             })
             .collect()
     }
@@ -232,15 +380,15 @@ impl Registry {
             };
         }
         match details {
-            RegistryDetails::KeyAdd(details) => self.admit(height, &details),
+            RegistryDetails::KeyAdd(details) => self.admit(height, act, &details),
             RegistryDetails::KeyRemove(details) => {
-                self.retire(height, &details.key_id, authenticators)
+                self.retire(height, act, &details.key_id, authenticators)
             }
             _ => Outcome::NotKeyAct,
         }
     }
 
-    fn admit(&mut self, height: u64, details: &KeyAddDetails) -> Outcome {
+    fn admit(&mut self, height: u64, act: &Value, details: &KeyAddDetails) -> Outcome {
         let Ok(public_key) = PublicKey::from_b64u(&details.public_key) else {
             return Outcome::Ignored {
                 code: "WIST4-E04",
@@ -267,6 +415,8 @@ impl Registry {
                 public_key,
                 added_height: height,
                 removed_height: None,
+                adding_act: Some(act.clone()),
+                removing_act: None,
             },
         );
         Outcome::Accepted {
@@ -275,7 +425,13 @@ impl Registry {
         }
     }
 
-    fn retire(&mut self, height: u64, key_id: &str, authenticators: &[AggregatorKey]) -> Outcome {
+    fn retire(
+        &mut self,
+        height: u64,
+        act: &Value,
+        key_id: &str,
+        authenticators: &[AggregatorKey],
+    ) -> Outcome {
         if !authenticators.iter().any(|key| key.key_id == key_id) {
             return Outcome::Conflict {
                 reason: "the key_id is not valid at the Epoch before this one",
@@ -283,11 +439,97 @@ impl Registry {
         }
         if let Some(record) = self.keys.get_mut(key_id) {
             record.removed_height = Some(height);
+            if record.removing_act.is_none() {
+                record.removing_act = Some(act.clone());
+            }
         }
         Outcome::Accepted {
             action: KeyAction::Remove,
             key_id: key_id.to_owned(),
         }
+    }
+}
+
+fn carries_act(
+    act: &Value,
+    action: RegistryAction,
+    key_id: &str,
+    public_key: Option<&str>,
+) -> bool {
+    if crate::jcs::canonicalize(act).is_err() {
+        return false;
+    }
+    let Ok(envelope) = serde_json::from_value::<RegistryUpdateEnvelope>(act.clone()) else {
+        return false;
+    };
+    if crate::withdrawal::envelope_fields(&envelope).is_err() || envelope.update.action != action {
+        return false;
+    }
+    match envelope.update.typed_details() {
+        Ok(RegistryDetails::KeyAdd(details)) => {
+            details.key_id == key_id && public_key == Some(details.public_key.as_str())
+        }
+        Ok(RegistryDetails::KeyRemove(details)) => details.key_id == key_id,
+        _ => false,
+    }
+}
+
+pub fn check_catch_up(
+    held: &Registry,
+    verified_head: u64,
+    offered: &Registry,
+) -> Result<(), Error> {
+    let disagreement = |key_id: &str| {
+        Err(Error::KeyTupleCatchUp {
+            key_id: key_id.to_owned(),
+        })
+    };
+    let key_ids: BTreeSet<&str> = held
+        .keys
+        .keys()
+        .chain(offered.keys.keys())
+        .map(String::as_str)
+        .collect();
+    for key_id in key_ids {
+        match (held.keys.get(key_id), offered.keys.get(key_id)) {
+            (Some(_), None) => return disagreement(key_id),
+            (Some(held), Some(offered)) => {
+                let agrees = offered.public_key == held.public_key
+                    && offered.added_height == held.added_height
+                    && same_act(&offered.adding_act, &held.adding_act)
+                    && match held.removed_height {
+                        None => offered.removed_height.is_none_or(|h| h > verified_head),
+                        Some(removed) => {
+                            offered.removed_height == Some(removed)
+                                && same_act(&offered.removing_act, &held.removing_act)
+                        }
+                    };
+                if !agrees {
+                    return disagreement(key_id);
+                }
+            }
+            (None, Some(offered)) => {
+                if offered.added_height <= verified_head {
+                    return disagreement(key_id);
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    Ok(())
+}
+
+fn same_act(left: &Option<Value>, right: &Option<Value>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => match (
+            crate::jcs::canonicalize(left),
+            crate::jcs::canonicalize(right),
+        ) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -320,14 +562,27 @@ mod tests {
         SigningKey::from_seed(&[seed; 32])
     }
 
+    fn anchor(genesis: &SigningKey) -> Anchor {
+        Anchor {
+            wist_version: crate::WIST_VERSION.into(),
+            log_id: LOG_ID.into(),
+            genesis_key: GenesisKey {
+                key_id: "genesis".into(),
+                alg: "Ed25519".into(),
+                public_key: genesis.public().to_b64u(),
+            },
+            created_at: SEALED_AT.into(),
+            predecessor: None,
+        }
+    }
+
     fn genesis_registry() -> (Registry, SigningKey) {
         let key = signing_key(1);
-        let genesis = GenesisKey {
-            key_id: "genesis".into(),
-            alg: "Ed25519".into(),
-            public_key: key.public().to_b64u(),
-        };
-        (Registry::from_genesis(LOG_ID, &genesis).unwrap(), key)
+        let anchor = anchor(&key);
+        (
+            Registry::from_genesis(LOG_ID, &anchor.genesis_key).unwrap(),
+            key,
+        )
     }
 
     fn add_act(signer_id: &str, signer: &SigningKey, key_id: &str, added: &SigningKey) -> Value {
@@ -439,7 +694,8 @@ mod tests {
                 other => panic!("{other:?} is not an aggregator_key tuple"),
             })
             .collect();
-        let mut restored = Registry::from_entries(LOG_ID, &restored_entries).unwrap();
+        let mut restored =
+            Registry::from_state_tuples(&anchor(&genesis), 5, &restored_entries).unwrap();
         assert_eq!(tuples(&restored), tuples(&registry));
         assert!(!signs_checkpoint(&restored, 5, &genesis));
         assert_eq!(
@@ -579,9 +835,17 @@ mod tests {
             vec!["genesis".to_string(), "k2".to_string()]
         );
 
-        let resumed = Registry::from_entries(LOG_ID, &registry.entries()).unwrap();
-        assert_eq!(resumed.genesis_key_id(), None);
-        assert!(resumed.key_act_authenticators(0).is_empty());
+        let resumed = Registry::from_state_tuples(&anchor(&genesis), 4, &registry.entries())
+            .expect("the tuples the replay leaves authenticate from the Anchor");
+        assert_eq!(resumed.genesis_key_id(), Some("genesis"));
+        assert_eq!(
+            resumed
+                .key_act_authenticators(0)
+                .iter()
+                .map(|key| key.key_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["genesis".to_string()]
+        );
     }
 
     #[test]
@@ -639,19 +903,223 @@ mod tests {
         assert!(Registry::from_genesis(LOG_ID, &wrong_key).is_err());
     }
 
+    fn state_tuples(registry: &Registry) -> Vec<AggregatorKeyEntry> {
+        registry.entries()
+    }
+
+    fn rule(error: &Error) -> KeyTupleRule {
+        match error {
+            Error::KeyTuples(rule) => *rule,
+            other => panic!("{other} is not a key-tuple authentication failure"),
+        }
+    }
+
     #[test]
-    fn a_state_that_repeats_a_key_id_or_retires_before_admission_is_rejected() {
-        let key = signing_key(1);
-        let entry = |key_id: &str, added: u64, removed: Option<u64>| AggregatorKeyEntry {
-            key_id: key_id.into(),
-            public_key: key.public().to_b64u(),
-            added_height: added,
-            removed_height: removed,
-        };
-        assert!(
-            Registry::from_entries(LOG_ID, &[entry("k1", 0, None), entry("k1", 1, None)]).is_err()
+    fn a_state_that_repeats_a_key_id_or_a_note_key_id_does_not_authenticate() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let anchor = anchor(&genesis);
+        let entries = state_tuples(&registry);
+        Registry::from_state_tuples(&anchor, 1, &entries).unwrap();
+
+        let mut repeated = entries.clone();
+        repeated.push(entries[0].clone());
+        let error = Registry::from_state_tuples(&anchor, 1, &repeated).unwrap_err();
+        assert_eq!(rule(&error), KeyTupleRule::DistinctKeys);
+        assert_eq!(error.code(), Some("WIST3-E04"));
+
+        let mut shared_note_key = entries.clone();
+        shared_note_key.push(AggregatorKeyEntry {
+            key_id: "k3".into(),
+            public_key: second.public().to_b64u(),
+            added_height: 1,
+            removed_height: None,
+            adding_act: Some(add_act("genesis", &genesis, "k3", &second)),
+            removing_act: None,
+        });
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 1, &shared_note_key).unwrap_err()),
+            KeyTupleRule::DistinctKeys,
+            "two key_ids naming one public key derive one note key ID"
         );
-        assert!(Registry::from_entries(LOG_ID, &[entry("k1", 4, Some(3))]).is_err());
-        assert!(Registry::from_entries(LOG_ID, &[entry("k1", 4, Some(4))]).is_ok());
+    }
+
+    #[test]
+    fn only_the_anchors_genesis_key_may_carry_no_adding_act() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let anchor = anchor(&genesis);
+
+        let mut rootless = state_tuples(&registry);
+        rootless[1].adding_act = None;
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 1, &rootless).unwrap_err()),
+            KeyTupleRule::GenesisTuple
+        );
+
+        let mut restated = state_tuples(&registry);
+        restated[0].public_key = signing_key(3).public().to_b64u();
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 1, &restated).unwrap_err()),
+            KeyTupleRule::GenesisTuple
+        );
+
+        let mut raised = state_tuples(&registry);
+        raised[0].added_height = 1;
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 1, &raised).unwrap_err()),
+            KeyTupleRule::GenesisTuple
+        );
+    }
+
+    #[test]
+    fn a_height_outside_its_acts_contract_does_not_authenticate() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        registry.apply_epoch(2, &[remove_act("genesis", &genesis, "k2")]);
+        let anchor = anchor(&genesis);
+        let entries = state_tuples(&registry);
+
+        let mut above_the_epoch = entries.clone();
+        above_the_epoch[1].added_height = 3;
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &above_the_epoch).unwrap_err()),
+            KeyTupleRule::AddingAct
+        );
+
+        let mut removed_where_added = entries.clone();
+        removed_where_added[1].removed_height = Some(entries[1].added_height);
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &removed_where_added).unwrap_err()),
+            KeyTupleRule::RemovingAct
+        );
+
+        let mut act_without_height = entries.clone();
+        act_without_height[1].removed_height = None;
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &act_without_height).unwrap_err()),
+            KeyTupleRule::RemovingAct
+        );
+
+        let mut height_without_act = entries.clone();
+        height_without_act[1].removing_act = None;
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &height_without_act).unwrap_err()),
+            KeyTupleRule::RemovingAct
+        );
+    }
+
+    #[test]
+    fn the_genesis_key_alone_may_be_removed_at_the_height_that_admitted_it() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        registry.apply_epoch(
+            0,
+            &[
+                add_act("genesis", &genesis, "k2", &second),
+                remove_act("genesis", &genesis, "genesis"),
+            ],
+        );
+        assert_eq!(registry.record("genesis").unwrap().removed_height, Some(0));
+        let entries = state_tuples(&registry);
+        let restored = Registry::from_state_tuples(&anchor(&genesis), 0, &entries).unwrap();
+        assert_eq!(tuples(&restored), tuples(&registry));
+    }
+
+    #[test]
+    fn an_act_no_key_the_tuples_hold_valid_below_its_height_signed_does_not_authenticate() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        let third = signing_key(3);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        registry.apply_epoch(2, &[add_act("genesis", &genesis, "k3", &third)]);
+        let anchor = anchor(&genesis);
+        Registry::from_state_tuples(&anchor, 2, &state_tuples(&registry)).unwrap();
+
+        let mut self_admitted = state_tuples(&registry);
+        self_admitted[2].adding_act = Some(add_act("k3", &third, "k3", &third));
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &self_admitted).unwrap_err()),
+            KeyTupleRule::ActSignature
+        );
+
+        let mut signed_by_a_stranger = state_tuples(&registry);
+        let stranger = signing_key(8);
+        signed_by_a_stranger[2].adding_act = Some(add_act("k8", &stranger, "k3", &third));
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &signed_by_a_stranger).unwrap_err()),
+            KeyTupleRule::ActSignature
+        );
+
+        let mut damaged = state_tuples(&registry);
+        let mut act = damaged[2].adding_act.clone().unwrap();
+        act["update"]["effective_at"] = json!("2026-08-02T14:00:00Z");
+        damaged[2].adding_act = Some(act);
+        assert_eq!(
+            rule(&Registry::from_state_tuples(&anchor, 2, &damaged).unwrap_err()),
+            KeyTupleRule::ActSignature
+        );
+    }
+
+    #[test]
+    fn a_second_removal_of_one_key_in_one_epoch_leaves_the_act_at_the_lower_entry_index() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let first_removal = remove_act("genesis", &genesis, "k2");
+        let second_removal = remove_act("k2", &second, "k2");
+        assert_ne!(first_removal, second_removal);
+        let outcomes = registry.apply_epoch(2, &[first_removal.clone(), second_removal]);
+        assert!(outcomes.iter().all(Outcome::is_accepted));
+        let record = registry.record("k2").unwrap();
+        assert_eq!(record.removed_height, Some(2));
+        assert_eq!(record.removing_act.as_ref(), Some(&first_removal));
+    }
+
+    #[test]
+    fn tuples_agree_with_a_consumers_registry_up_to_its_verified_head() {
+        let (mut held, genesis) = genesis_registry();
+        let second = signing_key(2);
+        let third = signing_key(3);
+        held.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let mut offered = held.clone();
+        offered.apply_epoch(2, &[add_act("genesis", &genesis, "k3", &third)]);
+        let anchor = anchor(&genesis);
+        let offered = Registry::from_state_tuples(&anchor, 2, &offered.entries()).unwrap();
+        check_catch_up(&held, 1, &offered).unwrap();
+
+        let key_id = |error: Error| match error {
+            Error::KeyTupleCatchUp { key_id } => key_id,
+            other => panic!("{other} is not a catch-up disagreement"),
+        };
+        assert_eq!(
+            key_id(check_catch_up(&held, 2, &offered).unwrap_err()),
+            "k3",
+            "a key the registry does not hold is admitted at or below its verified head"
+        );
+
+        let mut omitted = offered.entries();
+        omitted.retain(|entry| entry.key_id != "k2");
+        let omitted = Registry::from_state_tuples(&anchor, 2, &omitted)
+            .expect("§7's rules do not require a tuple for every key the Log admitted");
+        assert_eq!(
+            key_id(check_catch_up(&held, 1, &omitted).unwrap_err()),
+            "k2",
+            "a key the registry holds has no tuple"
+        );
+
+        let mut removed_below_the_head = held.clone();
+        removed_below_the_head.apply_epoch(2, &[remove_act("genesis", &genesis, "k2")]);
+        let removed_below_the_head =
+            Registry::from_state_tuples(&anchor, 2, &removed_below_the_head.entries()).unwrap();
+        check_catch_up(&held, 1, &removed_below_the_head).unwrap();
+        assert_eq!(
+            key_id(check_catch_up(&held, 2, &removed_below_the_head).unwrap_err()),
+            "k2",
+            "a key the registry holds as valid at its head is removed at or below it"
+        );
     }
 }

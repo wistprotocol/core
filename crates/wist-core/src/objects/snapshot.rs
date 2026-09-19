@@ -83,6 +83,8 @@ pub struct AggregatorKeyEntry {
     pub public_key: String,
     pub added_height: u64,
     pub removed_height: Option<u64>,
+    pub adding_act: Option<Value>,
+    pub removing_act: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,12 +205,14 @@ impl<'de> Deserialize<'de> for StateEntry {
         let tail = &items[1..];
         match kind.as_str() {
             "aggregator_key" => {
-                check_arity::<D::Error>(&kind, tail, 4)?;
+                check_arity::<D::Error>(&kind, tail, 6)?;
                 Ok(StateEntry::AggregatorKey(AggregatorKeyEntry {
                     key_id: field(tail, 0)?,
                     public_key: field(tail, 1)?,
                     added_height: field(tail, 2)?,
                     removed_height: field(tail, 3)?,
+                    adding_act: field(tail, 4)?,
+                    removing_act: field(tail, 5)?,
                 }))
             }
             "declaration" => {
@@ -309,7 +313,9 @@ impl Serialize for StateEntry {
                 e.key_id,
                 e.public_key,
                 e.added_height,
-                e.removed_height
+                e.removed_height,
+                e.adding_act,
+                e.removing_act
             ]),
             StateEntry::Declaration(e) => serde_json::json!([
                 "declaration",
@@ -394,7 +400,15 @@ mod tests {
         let pk = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
         let delta_id = format!("sha256:{}", "c".repeat(64));
         let cases = [
-            serde_json::json!(["aggregator_key", "key-1", pk, 10, Value::Null]),
+            serde_json::json!([
+                "aggregator_key",
+                "key-1",
+                pk,
+                10,
+                Value::Null,
+                {"update": {"action": "aggregator_key_add"}, "sig": {"key_id": "key-0"}},
+                Value::Null
+            ]),
             serde_json::json!(["declaration", "example.com", {"policy": "strict"}, 42, 43]),
             serde_json::json!(["parameter", "quota_base", "2026-08-09T13:00:00Z", -5]),
             serde_json::json!([
@@ -448,6 +462,7 @@ mod tests {
             serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
             serde_json::json!(["withdrawal", "sha256:00", "example.com"]),
             serde_json::json!([]),
+            serde_json::json!(["aggregator_key", "key-1", "pk", 10, Value::Null]),
         ] {
             assert!(serde_json::from_value::<StateEntry>(tuple).is_err());
         }

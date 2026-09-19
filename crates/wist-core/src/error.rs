@@ -1,3 +1,5 @@
+pub const SNAPSHOT_MISMATCH_CODE: &str = "WIST3-E04";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("jcs: {0}")]
@@ -28,6 +30,22 @@ pub enum Error {
     Timestamp(String),
     #[error("history: {0}")]
     History(String),
+    #[error(
+        "WIST3-E04 the state file's aggregator_key tuples do not authenticate from the Anchor: {0}"
+    )]
+    KeyTuples(crate::aggregator_keys::KeyTupleRule),
+    #[error(
+        "WIST3-E04 the state file's aggregator_key tuples disagree with the Consumer's registry about key {key_id:?}"
+    )]
+    KeyTupleCatchUp { key_id: String },
+    #[error(
+        "WIST3-E04 {document}'s signature does not verify under key {key_id:?} at height {height}"
+    )]
+    UnsealedSignature {
+        document: crate::unsealed::Document,
+        key_id: String,
+        height: u64,
+    },
 }
 
 impl Error {
@@ -46,6 +64,9 @@ impl Error {
             | Error::Parameter(m)
             | Error::Timestamp(m)
             | Error::History(m) => m.as_str(),
+            Error::KeyTuples(_)
+            | Error::KeyTupleCatchUp { .. }
+            | Error::UnsealedSignature { .. } => return Some(SNAPSHOT_MISMATCH_CODE),
             Error::Signature => return None,
         };
         let token = message.split(' ').next()?;

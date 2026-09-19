@@ -5,7 +5,7 @@ use wist_core::aggregator_keys::{self, Outcome, Registry};
 use wist_core::checkpoint::{self, Checkpoint};
 use wist_core::crypto::PublicKey;
 use wist_core::merkle::{self, LeafHashes};
-use wist_core::objects::{AggregatorKeyEntry, GenesisKey, StateEntry};
+use wist_core::objects::{AggregatorKeyEntry, Anchor, StateEntry};
 
 const EPOCH_CAP_BYTES: u64 = 268_435_456;
 const CADENCE_SECONDS: i64 = 3600;
@@ -25,16 +25,19 @@ fn history_named(name: &str) -> Value {
         .unwrap_or_else(|| panic!("the vector carries no history named {name:?}"))
 }
 
-fn genesis_registry(history: &Value) -> Registry {
-    let log_id = history["log_id"].as_str().unwrap();
-    let anchor = &history["anchor"];
-    assert_eq!(anchor["anchor"]["log_id"], history["log_id"]);
-    let genesis: GenesisKey =
-        serde_json::from_value(anchor["anchor"]["genesis_key"].clone()).unwrap();
-    let public_key = PublicKey::from_b64u(&genesis.public_key).unwrap();
-    wist_core::envelope::verify_envelope(anchor, "anchor", &public_key)
+fn anchor(history: &Value) -> Anchor {
+    let envelope = &history["anchor"];
+    let anchor: Anchor = serde_json::from_value(envelope["anchor"].clone()).unwrap();
+    assert_eq!(anchor.log_id, history["log_id"].as_str().unwrap());
+    let public_key = PublicKey::from_b64u(&anchor.genesis_key.public_key).unwrap();
+    wist_core::envelope::verify_envelope(envelope, "anchor", &public_key)
         .expect("the Anchor is self-signed under its own genesis_key");
-    Registry::from_genesis(log_id, &genesis).unwrap()
+    anchor
+}
+
+fn genesis_registry(history: &Value) -> Registry {
+    let anchor = anchor(history);
+    Registry::from_genesis(&anchor.log_id, &anchor.genesis_key).unwrap()
 }
 
 fn tuple_set(registry: &Registry) -> BTreeSet<String> {
@@ -42,6 +45,20 @@ fn tuple_set(registry: &Registry) -> BTreeSet<String> {
         .entries()
         .into_iter()
         .map(|entry| serde_json::to_string(&StateEntry::AggregatorKey(entry)).unwrap())
+        .collect()
+}
+
+/// A tuple's key state — every member but the two acts it carries.
+fn key_state(registry: &Registry) -> BTreeSet<String> {
+    registry
+        .entries()
+        .into_iter()
+        .map(|entry| {
+            format!(
+                "{} {} {} {:?}",
+                entry.key_id, entry.public_key, entry.added_height, entry.removed_height
+            )
+        })
         .collect()
 }
 
@@ -500,16 +517,28 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
                     },
                 )
                 .collect();
-            let restored = Registry::from_entries(&replayed.log_id, &entries).unwrap();
-            assert_eq!(
-                tuple_set(&restored) == epoch.tuples,
-                complete,
-                "{name}: the resumed registry"
-            );
+            match Registry::from_state_tuples(&anchor(&history), head, &entries) {
+                Ok(restored) => {
+                    assert!(complete, "{name}: the resumed registry");
+                    assert_eq!(tuple_set(&restored), epoch.tuples, "{name}");
+                }
+                Err(error) => {
+                    assert!(!complete, "{name}: the complete state file was rejected");
+                    assert_eq!(error.code(), Some("WIST3-E04"), "{name}");
+                }
+            }
             if !complete {
-                let missing: BTreeSet<&String> = epoch.tuples.difference(&carried).collect();
+                let missing: Vec<AggregatorKeyEntry> = epoch
+                    .tuples
+                    .difference(&carried)
+                    .map(|tuple| match serde_json::from_str(tuple).unwrap() {
+                        StateEntry::AggregatorKey(entry) => entry,
+                        other => panic!("{other:?} is not an aggregator_key tuple"),
+                    })
+                    .collect();
                 assert!(
-                    !missing.is_empty() && missing.iter().all(|tuple| !tuple.ends_with(",null]")),
+                    !missing.is_empty()
+                        && missing.iter().all(|entry| entry.removed_height.is_some()),
                     "{name}: what the file omits is a removed key's tuple"
                 );
             }
@@ -524,14 +553,16 @@ fn the_two_entry_orders_of_one_epochs_add_and_remove_leave_one_registry() {
     let names = vector()["same_registry_histories"].clone();
     let names = names.as_array().unwrap();
     assert_eq!(names.len(), 2);
-    let registries: Vec<BTreeSet<String>> = names
+    let registries: Vec<Registry> = names
         .iter()
-        .map(|name| {
-            let history = history_named(name.as_str().unwrap());
-            tuple_set(&replay(&history).adopted)
-        })
+        .map(|name| replay(&history_named(name.as_str().unwrap())).adopted)
         .collect();
-    assert_eq!(registries[0], registries[1]);
+    assert_eq!(key_state(&registries[0]), key_state(&registries[1]));
+    assert_ne!(
+        tuple_set(&registries[0]),
+        tuple_set(&registries[1]),
+        "the two histories carry one act Envelope, so the Entry orders are not distinct"
+    );
 
     let action_order = |name: &str| {
         let history = history_named(name);

@@ -12,6 +12,8 @@ mod logbook;
 mod parameters;
 #[path = "conformance/recovery.rs"]
 mod recovery;
+#[path = "conformance/snapshot_keys.rs"]
+mod snapshot_keys;
 
 pub fn spec_dir() -> PathBuf {
     std::env::var_os("WIST_SPEC_DIR")

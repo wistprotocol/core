@@ -36,5 +36,6 @@ pub mod snapshot;
 pub mod suffix_list;
 pub mod tiles;
 pub mod timestamp;
+pub mod unsealed;
 pub mod withdrawal;
 pub use error::Error;
