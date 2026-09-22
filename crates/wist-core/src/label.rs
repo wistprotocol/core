@@ -31,6 +31,8 @@ pub const WIST_TERMS: &[&str] = &[
 pub enum Rejection {
     /// A field, form or version failure, `WIST2-E06`.
     Fields,
+    /// An `asserted_at` beyond the clock allowance, `WIST2-E06`.
+    Clock,
     /// A Label about the Labeler itself, `WIST2-E06`.
     SelfLabel,
     /// A dispute of a Label the Log has not sealed, `WIST2-E06`.
@@ -48,6 +50,7 @@ impl Rejection {
     pub fn code(self) -> &'static str {
         match self {
             Rejection::Fields
+            | Rejection::Clock
             | Rejection::SelfLabel
             | Rejection::Unsealed
             | Rejection::Authority => "WIST2-E06",
@@ -177,11 +180,15 @@ fn sig_fields(doc: &Value) -> Result<(), Rejection> {
 
 /// WIST-2 §3.3: validates one Label Envelope under the Labeler's
 /// Declaration and the `url_cap_bytes` in force, in the order the section
-/// and WIST-1 §7 apply the checks.
+/// and WIST-1 §7 apply the checks; `asserted_at` is read as a Delta's
+/// `observed_at` against `clock_s` (WIST-1 §3.4: the attempt clock before
+/// sealing, the committing Epoch's `sealed_at` once sealed).
 pub fn validate_label(
     doc: &Value,
     declaration: &PublisherEnvelope,
     url_cap_bytes: i64,
+    clock_s: i64,
+    clock_skew_seconds: i64,
 ) -> Result<LabelEnvelope, Rejection> {
     let envelope: LabelEnvelope =
         serde_json::from_value(doc.clone()).map_err(|_| Rejection::Fields)?;
@@ -214,6 +221,7 @@ pub fn validate_label(
     {
         return Err(Rejection::Fields);
     }
+    within_allowance(&label.asserted_at, clock_s, clock_skew_seconds)?;
     if let Some(expires_at) = &label.expires_at {
         if publisher_time::compare(expires_at, &label.asserted_at) != Some(Ordering::Greater) {
             return Err(Rejection::Fields);
@@ -326,12 +334,27 @@ pub enum LabelLookup {
     Unverifiable,
 }
 
+fn within_allowance(
+    asserted_at: &str,
+    clock_s: i64,
+    clock_skew_seconds: i64,
+) -> Result<(), Rejection> {
+    match publisher_time::within_clock_bound(asserted_at, clock_s, clock_skew_seconds) {
+        Some(true) => Ok(()),
+        Some(false) => Err(Rejection::Clock),
+        None => Err(Rejection::Fields),
+    }
+}
+
 /// WIST-2 §3.3: validates one Dispute Envelope under the disputant's
-/// Declaration against the Labels this Log sealed.
+/// Declaration against the Labels this Log sealed, its `asserted_at` read
+/// as a Label's against `clock_s`.
 pub fn validate_dispute(
     doc: &Value,
     declaration: &PublisherEnvelope,
     sealed: impl Fn(&str) -> LabelLookup,
+    clock_s: i64,
+    clock_skew_seconds: i64,
 ) -> Result<DisputeEnvelope, Rejection> {
     let envelope: DisputeEnvelope =
         serde_json::from_value(doc.clone()).map_err(|_| Rejection::Fields)?;
@@ -350,6 +373,7 @@ pub fn validate_dispute(
     {
         return Err(Rejection::Fields);
     }
+    within_allowance(&dispute.asserted_at, clock_s, clock_skew_seconds)?;
     match sealed(&dispute.label) {
         LabelLookup::Absent => return Err(Rejection::Unsealed),
         LabelLookup::Known { subject } if !under_authority(subject_host(&subject), publisher) => {

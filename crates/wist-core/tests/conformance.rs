@@ -1195,11 +1195,19 @@ fn wist4_registrable_domain_vectors() {
     }
 }
 
+fn vector_clock(vector: &serde_json::Value) -> (i64, i64) {
+    (
+        wist_core::timestamp::log_seconds(vector["clock"].as_str().unwrap()).unwrap(),
+        vector["clock_skew_seconds"].as_i64().unwrap(),
+    )
+}
+
 fn label_outcome(result: &Result<(), wist_core::label::Rejection>) -> &'static str {
     use wist_core::label::Rejection;
     match result {
         Ok(()) => "accepted",
         Err(Rejection::Fields) => "fields",
+        Err(Rejection::Clock) => "clock",
         Err(Rejection::SelfLabel) => "self",
         Err(Rejection::Unsealed) => "unsealed",
         Err(Rejection::Authority) => "authority",
@@ -1215,6 +1223,7 @@ fn wist2_label_vectors() {
     let declaration: wist_core::objects::PublisherEnvelope =
         serde_json::from_value(vector["declaration"].clone()).unwrap();
     let url_cap = vector["url_cap_bytes"].as_i64().unwrap();
+    let clock = vector_clock(&vector);
     let spec = std::fs::read_to_string(spec_dir().join("specs/WIST-4-governance.md")).unwrap();
     let registry = spec
         .split("## 6. Label Registry")
@@ -1232,7 +1241,9 @@ fn wist2_label_vectors() {
     let mut outcomes = std::collections::BTreeSet::new();
     for case in vector["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        let result = label::validate_label(&case["envelope"], &declaration, url_cap).map(|_| ());
+        let result =
+            label::validate_label(&case["envelope"], &declaration, url_cap, clock.0, clock.1)
+                .map(|_| ());
         let got = label_outcome(&result);
         assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
         match result {
@@ -1251,9 +1262,28 @@ fn wist2_label_vectors() {
         }
         outcomes.insert(got);
     }
-    assert_eq!(outcomes.len(), 5);
+    assert_eq!(outcomes.len(), 6);
+    let bound = vector["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "asserted_at at the allowance bound")
+        .unwrap();
+    assert_eq!(
+        label_outcome(
+            &label::validate_label(
+                &bound["envelope"],
+                &declaration,
+                url_cap,
+                clock.0,
+                clock.1 - 1
+            )
+            .map(|_| ())
+        ),
+        "clock"
+    );
     let example = read_json("examples/label.json");
-    assert!(label::validate_label(&example, &declaration, url_cap).is_ok());
+    assert!(label::validate_label(&example, &declaration, url_cap, clock.0, clock.1).is_ok());
     let feed = read_json("examples/label-feed.json");
     assert_eq!(
         feed["feed"]["deltas"],
@@ -1299,6 +1329,7 @@ fn wist2_label_vectors() {
 fn wist2_dispute_vectors() {
     use wist_core::label::{self, LabelLookup, SealedDispute};
     let vector = read_json("vectors/wist2/disputes.json");
+    let clock = vector_clock(&vector);
     let sealed: Vec<(String, String)> = vector["sealed_labels"]
         .as_array()
         .unwrap()
@@ -1323,7 +1354,9 @@ fn wist2_dispute_vectors() {
         let name = case["name"].as_str().unwrap();
         let declaration: wist_core::objects::PublisherEnvelope =
             serde_json::from_value(case["declaration"].clone()).unwrap();
-        let result = label::validate_dispute(&case["envelope"], &declaration, lookup).map(|_| ());
+        let result =
+            label::validate_dispute(&case["envelope"], &declaration, lookup, clock.0, clock.1)
+                .map(|_| ());
         let got = label_outcome(&result);
         assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
         match result {
@@ -1336,16 +1369,20 @@ fn wist2_dispute_vectors() {
         }
         outcomes.insert(got);
     }
-    assert_eq!(outcomes.len(), 6);
+    assert_eq!(outcomes.len(), 7);
     let example = read_json("examples/dispute.json");
     let publisher: wist_core::objects::PublisherEnvelope =
         serde_json::from_value(read_json("examples/publisher.json")).unwrap();
-    assert!(
-        label::validate_dispute(&example, &publisher, |_| LabelLookup::Known {
+    assert!(label::validate_dispute(
+        &example,
+        &publisher,
+        |_| LabelLookup::Known {
             subject: "https://example.com/blog/post-1".into()
-        })
-        .is_ok()
-    );
+        },
+        clock.0,
+        clock.1
+    )
+    .is_ok());
     let unsealed = vector["cases"]
         .as_array()
         .unwrap()
@@ -1362,9 +1399,13 @@ fn wist2_dispute_vectors() {
         let declaration: wist_core::objects::PublisherEnvelope =
             serde_json::from_value(case["declaration"].clone()).unwrap();
         assert!(
-            label::validate_dispute(&case["envelope"], &declaration, |_| {
-                LabelLookup::Unverifiable
-            })
+            label::validate_dispute(
+                &case["envelope"],
+                &declaration,
+                |_| LabelLookup::Unverifiable,
+                clock.0,
+                clock.1
+            )
             .is_ok(),
             "{}",
             case["name"]
