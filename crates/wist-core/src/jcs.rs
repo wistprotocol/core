@@ -3,8 +3,7 @@ use serde_json::Value;
 
 const MAX_SAFE: i64 = 9_007_199_254_740_991;
 
-/// RFC 8785 JSON Canonicalization Scheme. A number outside the IEEE-754
-/// double range has no canonical form and is rejected (`WIST1-E05`).
+/// RFC 8785: a number outside the IEEE-754 double range has no canonical form (`WIST1-E05`).
 pub fn canonicalize(v: &Value) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     write_value(v, &mut out)?;
@@ -50,10 +49,8 @@ fn write_value(v: &Value, out: &mut Vec<u8>) -> Result<(), Error> {
     Ok(())
 }
 
-/// RFC 8785 §3.2.2.3: a JSON number is an IEEE-754 double serialized by
-/// the ECMA-262 `Number::toString` algorithm. Integers inside the
-/// ±(2^53−1) safe range take the plain path, which that algorithm agrees
-/// with exactly.
+/// RFC 8785 §3.2.2.3: integers inside the ±(2^53−1) safe range take the plain path, which
+/// ECMA-262 `Number::toString` agrees with exactly.
 fn write_number(n: &serde_json::Number, out: &mut Vec<u8>) -> Result<(), Error> {
     if let Some(i) = n.as_i64() {
         if (-MAX_SAFE..=MAX_SAFE).contains(&i) {
@@ -137,11 +134,8 @@ mod tests {
     #[test]
     fn sorts_keys_by_utf16_code_units() {
         assert_eq!(c(json!({"b":1,"a":2})), r#"{"a":2,"b":1}"#);
-        // '€' (U+20AC, one UTF-16 unit 0x20AC) sorts before '𝄞' (U+1D11E,
-        // surrogate pair starting 0xD834), which sorts before 'ﬁ' (U+FB01):
-        // surrogate code units (0xD800-0xDFFF) are numerically below the
-        // Alphabetic Presentation Forms block, even though UTF-8 byte order
-        // would rank 'ﬁ' before '𝄞'.
+        // RFC 8785 §3.2.3 sorts by UTF-16 code units: '𝄞' (surrogate 0xD834) sorts before 'ﬁ'
+        // (U+FB01), unlike UTF-8 byte order.
         assert_eq!(
             c(json!({"𝄞": 1, "€": 2, "ﬁ": 3})),
             "{\"€\":2,\"𝄞\":1,\"ﬁ\":3}"

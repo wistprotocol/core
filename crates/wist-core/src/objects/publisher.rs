@@ -2,9 +2,7 @@ use crate::objects::Sig;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-/// WIST-1 §5.1: a Declaration key entry is an Ed25519 JSON Web Key whose
-/// `kid` is its RFC 7638 thumbprint and whose `nbf`/`exp` NumericDate
-/// window bounds the Deltas it signs.
+/// WIST-1 §5.1: `kid` is the RFC 7638 thumbprint; `nbf`/`exp` are NumericDates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublisherKey {
@@ -32,9 +30,6 @@ impl PublisherKey {
         }
     }
 
-    /// Whether the entry's window contains the Publisher instant
-    /// `observed_at`: `nbf <= observed_at < exp`; `None` when the instant
-    /// is malformed.
     pub fn admits(&self, observed_at: &str) -> Option<bool> {
         let after_nbf = crate::publisher_time::at_or_after(observed_at, i128::from(self.nbf))?;
         let before_exp = match self.exp {
@@ -45,14 +40,13 @@ impl PublisherKey {
     }
 }
 
-/// RFC 7638 thumbprint of an Ed25519 OKP key given its `x` member.
+/// RFC 7638 thumbprint.
 pub fn thumbprint(x: &str) -> String {
     let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
     crate::crypto::b64u_encode(&sha2::Sha256::digest(canonical.as_bytes()))
 }
 
-/// WIST-1 §5.1 Key Set fingerprint: SHA-256 over the JCS array of the
-/// entries' `kid` values in ascending byte order.
+/// WIST-1 §5.1 Key Set fingerprint.
 pub fn key_set_fingerprint(keys: &[PublisherKey]) -> String {
     let mut kids: Vec<&str> = keys.iter().map(|key| key.kid.as_str()).collect();
     kids.sort_unstable();

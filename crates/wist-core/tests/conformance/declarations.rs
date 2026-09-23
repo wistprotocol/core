@@ -6,8 +6,6 @@ use wist_core::declarations::{Declarations, Domain, Effects};
 use wist_core::merkle;
 use wist_core::Error;
 
-/// The recovery window length and the fresh-identity activation delay a
-/// vector's parameter map fixes; an absent delay is the registry default.
 #[derive(Clone, Copy)]
 struct Params {
     days: i64,
@@ -107,9 +105,6 @@ fn candidate_epoch(prefix: &[Value], sealed_at: &str, entries: Vec<Value>) -> Se
     }
 }
 
-/// Replays the prefix, then applies the probe's candidate Epoch, checking
-/// that the projection agrees with the application and that a rejected
-/// candidate leaves the state untouched.
 fn probe(
     epochs: &[Value],
     days: Params,

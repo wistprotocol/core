@@ -1,8 +1,4 @@
-//! WIST-1 §5.2 Declaration replay: the accepted Declaration per domain,
-//! the sequence floor, recovery windows with their owner, chain head,
-//! pre-recovery source and competitors, settlement at the window's end,
-//! pending fresh identities with their activation and reversal, and
-//! identity resets — computed identically by every party replaying a Log.
+//! WIST-1 §5.2 Declaration replay.
 use crate::declaration::{evaluate, evaluate_initial, inner_hash, validate_fields, Decision};
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
@@ -71,8 +67,8 @@ impl RecoveryWindow {
     }
 }
 
-/// WIST-1 §5.2: a fresh identity accepted outside a recovery window, held
-/// without authority until the Epoch at its activation height.
+/// WIST-1 §5.2: a fresh identity accepted outside a recovery window has no authority before its
+/// activation height.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
     head: Arc<Declaration>,
@@ -143,11 +139,7 @@ pub struct Installation {
     pub decision: Option<Decision>,
     pub opens_window: bool,
     pub resets_identity: bool,
-    /// The Declaration became or replaced the pending head instead of
-    /// the current Declaration.
     pub pending: bool,
-    /// The pending head this replacement of the current Declaration
-    /// discarded.
     pub reversed: Option<Arc<Declaration>>,
 }
 
@@ -246,18 +238,11 @@ impl Declarations {
         Ok(projection.effects)
     }
 
-    /// Seeds the accepted prefix's head for a party that starts at an
-    /// Epoch must be the following height.
     pub fn seed_head(&mut self, epoch_number: u64, epoch_root: &str, sealed_at_s: Option<i64>) {
         self.head = Some((epoch_number, epoch_root.to_owned()));
         self.sealed_at_s = sealed_at_s;
     }
 
-    /// Seeds a domain's accepted state from a Snapshot: the current
-    /// Declaration at its sealing position, the accepted sequence floor,
-    /// when a window is open its chain head and frozen end, and when a
-    /// fresh identity is pending its head, sealing position and
-    /// activation height.
     #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         &mut self,

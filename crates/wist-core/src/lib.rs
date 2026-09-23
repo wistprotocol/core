@@ -1,12 +1,7 @@
-//! Rust implementation of the WIST-1..4 primitives: JCS canonicalization,
-//! Conformance is defined by the sibling spec repo's schemas and vectors,
-//! not by this crate — every normative behavior is verified against those
-//! vectors in `tests/conformance.rs`.
 #![forbid(unsafe_code)]
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The wire version this revision of the suite emits and validates.
 pub const WIST_VERSION: &str = "1.0.0";
 
 pub mod aggregator_keys;

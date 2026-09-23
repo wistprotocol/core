@@ -80,8 +80,7 @@ pub enum RegistryDetails {
 }
 
 impl RegistryUpdate {
-    /// WIST-4 §5.1: the `details` and `subject` contract of the act's
-    /// `action`; a violation is `WIST4-E04`.
+    /// WIST-4 §5.1: a violation of the action's `details` and `subject` contract is `WIST4-E04`.
     pub fn typed_details(&self) -> Result<RegistryDetails, crate::error::Error> {
         use RegistryAction::*;
         let value = self.details.clone();

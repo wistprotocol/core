@@ -65,8 +65,7 @@ struct ComboRule {
     holds: fn(EffLookup) -> bool,
 }
 
-/// WIST-4 §5's combination rules: the bounds a value satisfies only
-/// together with another parameter's value in the same map.
+/// WIST-4 §5 combination rules.
 const COMBO_RULES: &[ComboRule] = &[
     ComboRule {
         participants: &["links_cap_bytes", "link_url_cap_bytes"],

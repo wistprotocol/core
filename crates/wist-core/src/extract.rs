@@ -582,9 +582,8 @@ pub fn links_member(urls: &[String], total: u64, cap_bytes: usize) -> Value {
             }
         }
     }
-    // WIST-4 §9: links_cap_bytes MUST be >= 21 octets, so this is an operator
-    // config bug, not attacker-reachable HTML; mirrors the Python reference's
-    // AssertionError rather than papering over a cap that admits no member.
+    // WIST-4 §5: `links_cap_bytes` is at least 21 octets, so no HTML reaches this under a valid
+    // profile.
     panic!(
         "cap_bytes={cap_bytes} is below the minimal links object {{\"total\": {total}, \"urls\": []}}; no conforming member exists"
     );

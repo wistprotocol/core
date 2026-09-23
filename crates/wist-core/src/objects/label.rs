@@ -1,8 +1,7 @@
 use crate::objects::Sig;
 use serde::{Deserialize, Serialize};
 
-/// WIST-2 §3.3: a Labeler's signed statement about a subject outside its
-/// own authority.
+/// WIST-2 §3.3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Label {
@@ -28,7 +27,7 @@ pub struct LabelEnvelope {
     pub sig: Sig,
 }
 
-/// WIST-2 §3.3: a labeled domain's signed dispute of one sealed Label.
+/// WIST-2 §3.3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dispute {
@@ -49,7 +48,7 @@ pub struct DisputeEnvelope {
     pub sig: Sig,
 }
 
-/// WIST-4 §6: what a Consumer does with a labeled subject.
+/// WIST-4 §6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Treatment {
@@ -58,7 +57,7 @@ pub enum Treatment {
     Inform,
 }
 
-/// WIST-2 §3.3: a Labeler's signed definition of one name it uses.
+/// WIST-2 §3.3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LabelDefinition {

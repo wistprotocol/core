@@ -13,8 +13,7 @@ pub struct WindowDeclaration {
 }
 
 impl WindowDeclaration {
-    /// WIST-1 §3.2: authority passes only where the source covers the
-    /// Delta's URL host and one of its own bindings verifies the Delta.
+    /// WIST-1 §3.2: the source covers the Delta's URL host and one of its own bindings verifies it.
     fn authorizes(
         &self,
         delta: &Value,
@@ -35,8 +34,7 @@ pub struct Settlement {
     pub rejected: Vec<String>,
 }
 
-/// WIST-1 §5.2: a Delta is queued when either frozen admission source
-/// authorizes it, each under its own bindings and its own scope.
+/// WIST-1 §5.2: either frozen admission source authorizes, each under its own bindings and scope.
 pub fn admits_to_queue(
     pre_recovery: &WindowDeclaration,
     recovery: &WindowDeclaration,

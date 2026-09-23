@@ -1,6 +1,4 @@
-//! WIST-1 §5.1/§5.2: the key directory, its windows, the rotation
-//! commitment and the activation delay, replayed from
-//! `vectors/wist1/key-directory.json`.
+//! WIST-1 §5.1 and §5.2: the key directory.
 use super::read_json;
 use serde_json::{json, Value};
 use wist_core::declaration::{evaluate, evaluate_initial, verify_signed, Decision};
@@ -58,7 +56,6 @@ fn delta_check(declaration: &Value, envelope: &Value) -> String {
     }
 }
 
-/// Replays one history and returns the state after each of its Epochs.
 fn replay(vector: &Value, history: &Value) -> Vec<Declarations> {
     let days = vector["recovery_window_days"].as_i64().unwrap();
     let activation = history["declaration_activation_epochs"]
@@ -199,7 +196,6 @@ fn histories_activate_reverse_and_resume_as_the_vector_records() {
                             "{}",
                             case["name"]
                         ),
-                        // A re-serve of the pending head installs nothing.
                         "idempotent" => assert_eq!(
                             summary(&projection.domains()["example.com"]),
                             summary(&state.domains()["example.com"]),
@@ -272,7 +268,7 @@ fn a_pending_declaration_tuple_restores_the_state_it_records() {
             summary(&adopted.domains()["example.com"]),
             summary(&prefix[height].domains()["example.com"]),
         );
-        // A Snapshot records no reset height (WIST-3 §7).
+        // WIST-3 §7: a Snapshot records no reset height.
         restored["reset_height"] = Value::Null;
         replayed["reset_height"] = Value::Null;
         assert_eq!(restored, replayed, "{} at height {height}", row["history"]);

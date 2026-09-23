@@ -1,39 +1,28 @@
-//! WIST-4 §5.1 replay of `payload_withdrawal` acts: JSON eligibility, the
-//! field partition between `WIST4-E11` and `WIST4-E04`, authentication
-//! under a Log key valid at the act's Epoch, the sealed-Delta contract and
-//! the earliest-Epoch rule every withdrawn Delta reads.
+//! WIST-4 §5.1 `payload_withdrawal` replay.
 use crate::crypto::PublicKey;
 use crate::error::Error;
 use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope, WithdrawalEntry};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// What a replaying party knows about the Delta a withdrawal names.
+/// WIST-3 §7 carries no per-Delta tuple a resuming Consumer could check, so an act naming an
+/// `Unverifiable` Delta is read as consistent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SealedDelta {
-    /// Sealed at `height` under the signed `publisher`.
     Known { publisher: String, height: u64 },
-    /// Not sealed anywhere the party can see, at or below the act.
     Absent,
-    /// Sealed below what the party holds, so the contract cannot be
-    /// checked; the act is read as consistent (WIST-3 §7 carries no
-    /// per-Delta tuple a resuming Consumer could check it against).
     Unverifiable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disposition {
-    /// The act is a valid withdrawal; `withdrawn_height` is the earliest
-    /// accepted withdrawal's Epoch, this act's own when `changed`.
     Accepted {
         delta_id: String,
         publisher: String,
         withdrawn_height: u64,
         changed: bool,
     },
-    /// The act is ignored: `WIST1-E05`, `WIST4-E11` or `WIST4-E04`.
     Rejected(&'static str),
-    /// The act is a governance act of another kind.
     NotWithdrawal,
 }
 
@@ -47,7 +36,6 @@ impl WithdrawalReplay {
         Self::default()
     }
 
-    /// Adopts a withdrawal a Snapshot tuple or a store already holds.
     pub fn adopt(&mut self, delta_id: &str, publisher: &str, height: u64) {
         self.withdrawn
             .entry(delta_id.to_string())
@@ -62,7 +50,7 @@ impl WithdrawalReplay {
         self.withdrawn.get(delta_id).map(|(height, _)| *height)
     }
 
-    /// The WIST-3 §7 `withdrawal` tuples, one per withdrawn Delta.
+    /// WIST-3 §7.
     pub fn entries(&self) -> Vec<WithdrawalEntry> {
         self.withdrawn
             .iter()
@@ -74,7 +62,6 @@ impl WithdrawalReplay {
             .collect()
     }
 
-    /// Replays one `registry_update` body from its raw octets at `height`.
     pub fn apply_raw(
         &mut self,
         height: u64,
@@ -88,8 +75,7 @@ impl WithdrawalReplay {
         self.apply(height, &doc, log_key, sealed)
     }
 
-    /// Replays one parsed `registry_update` body at `height`. The caller
-    /// has parsed it through `json::parse` so repeated members are gone.
+    /// The body must come from `json::parse`, which rejects repeated members.
     pub fn apply(
         &mut self,
         height: u64,
@@ -147,9 +133,7 @@ impl WithdrawalReplay {
     }
 }
 
-/// WIST-4 §5.1's field checks outside any action's contract: release
-/// version spelling under major 1, the general `subject` bound, a Log
-/// timestamp `effective_at` and a well-formed signature block.
+/// WIST-4 §5.1 checks outside any action's contract.
 pub(crate) fn envelope_fields(envelope: &RegistryUpdateEnvelope) -> Result<(), &'static str> {
     let update = &envelope.update;
     if !release_version(&update.wist_version)

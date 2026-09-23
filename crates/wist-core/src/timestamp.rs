@@ -1,6 +1,4 @@
-//! WIST-3 §3.1's whole-second, literal-`Z` Log timestamp profile: exact
-//! Gregorian calendar validation across the four-digit-year range, and the
-//! inverse spelling of an instant inside it.
+//! WIST-3 §3.1: whole-second, literal-`Z` Log timestamps inside the four-digit-year range.
 use crate::error::Error;
 
 /// `0000-01-01T00:00:00Z`, the first instant a Log timestamp denotes.
@@ -50,8 +48,6 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-/// Parses a Log timestamp into Unix seconds, rejecting
-/// fractions, offsets, leap seconds and calendar dates that do not exist.
 pub fn log_seconds(at: &str) -> Result<i64, Error> {
     let bytes = at.as_bytes();
     let shaped = bytes.len() == 20
@@ -87,7 +83,6 @@ pub fn log_seconds(at: &str) -> Result<i64, Error> {
     Ok(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
-/// The Log timestamp spelling of an instant inside the four-digit-year range.
 pub fn instant(unix_s: i64) -> Result<String, Error> {
     if !(LOG_TIMESTAMP_MIN_S..=LOG_TIMESTAMP_MAX_S).contains(&unix_s) {
         return Err(Error::Timestamp(

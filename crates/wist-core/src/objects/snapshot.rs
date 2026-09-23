@@ -161,7 +161,7 @@ pub struct RecordEntry {
     pub delta_id: String,
 }
 
-/// One live-state tuple of WIST-3 §7's inventory, in the table's order.
+/// WIST-3 §7 inventory; variants follow the table's order.
 #[derive(Debug, Clone)]
 pub enum StateEntry {
     AggregatorKey(AggregatorKeyEntry),

@@ -35,9 +35,8 @@ pub fn entry_leaf(entry: &Value) -> Result<(Vec<u8>, [u8; 32]), Error> {
     Ok((bytes, hash))
 }
 
-/// WIST-3 §3.3: Entries are grouped by type in the fixed order and, within
-/// a group, in ascending octet order of their Merkle leaf hashes; an Epoch
-/// ordered otherwise is rejected by every replaying party.
+/// WIST-3 §3.3: Entries grouped by type in the fixed order, then ascending by Merkle leaf hash
+/// octets.
 pub fn validate_entry_order(entries: &[Value]) -> Result<(), Error> {
     leaf_hashes(entries).map(|_| ())
 }

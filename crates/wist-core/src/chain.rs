@@ -25,8 +25,6 @@ impl ChainTips {
         true
     }
 
-    /// Sets a tip without the `prev` check — for restoring state a
-    /// Snapshot or a local store already carries.
     pub fn adopt(&mut self, publisher: &str, url: &str, id: &str) {
         self.tips
             .entry(publisher.to_string())

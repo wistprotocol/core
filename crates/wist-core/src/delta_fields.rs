@@ -1,7 +1,5 @@
-//! WIST-1 §7's Delta diagnostics: complete field validation under
-//! `delta.schema.json` before any semantic rejection, version eligibility
-//! (§3.1, ADR-0030), the stage-independent static checks, and the §3.4
-//! clock check. Each function returns the WIST-1 §7 error code it selects.
+//! WIST-1 §7: complete field validation under `delta.schema.json` precedes any semantic
+//! rejection.
 use crate::crypto::{b64u_decode, b64u_encode};
 use crate::publisher_time;
 use serde_json::Value;
@@ -38,13 +36,11 @@ fn hash(value: &Value, prefix: &str) -> bool {
         })
 }
 
-/// Whether `value` is the canonical base64url spelling of `length` octets.
 pub fn canonical_b64u(value: &str, length: usize) -> bool {
     b64u_decode(value).is_ok_and(|bytes| bytes.len() == length && b64u_encode(&bytes) == value)
 }
 
-/// Whether `version` is three dot-separated decimal components without
-/// leading zeros, prerelease or build suffix (§3.1).
+/// WIST-1 §3.1: no leading zeros, prerelease or build suffix.
 pub fn version_spelled(version: &str) -> bool {
     version.split('.').count() == 3
         && version.split('.').all(|part| {
@@ -54,8 +50,6 @@ pub fn version_spelled(version: &str) -> bool {
         })
 }
 
-/// Complete field validation of a Delta Envelope: `WIST1-E05` for
-/// non-canonicalizable input, `WIST1-E14` for any structural failure.
 pub fn validate_fields(doc: &Value) -> Result<(), &'static str> {
     crate::jcs::canonicalize(doc).map_err(|_| "WIST1-E05")?;
     object(doc, &["delta", "sig"], &[])?;
@@ -137,8 +131,7 @@ pub fn validate_fields(doc: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Field validation followed by §3.1 major support: a validator of this
-/// revision implements wire major `1` only (`WIST1-E15` otherwise).
+/// WIST-1 §3.1: wire major `1` alone is implemented.
 pub fn validate_version(doc: &Value) -> Result<(), &'static str> {
     validate_fields(doc)?;
     if doc["delta"]["wist_version"]
@@ -153,8 +146,6 @@ pub fn validate_version(doc: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Version validation plus the presence rules: `payload` on `new` and
-/// `update` (`WIST1-E09`), `prev` on everything but `new` (`WIST1-E07`).
 pub fn validate_content_and_prev(doc: &Value) -> Result<(), &'static str> {
     validate_version(doc)?;
     let body = &doc["delta"];
@@ -169,9 +160,7 @@ pub fn validate_content_and_prev(doc: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The stage-independent checks under a parameter profile: the §3.6
-/// derived commitment cap (`WIST1-E04`) and the §3.2 JCS-octet URL cap
-/// (`WIST1-E11`), after `validate_content_and_prev`.
+/// WIST-1 §3.6 commitment cap and §3.2 URL cap, the latter in JCS octets.
 pub fn validate_static(
     doc: &Value,
     url_cap: i64,
@@ -194,15 +183,13 @@ pub fn validate_static(
     Ok(())
 }
 
-/// §3.6's derived commitment cap: 32 salt octets plus the extract, links
-/// and summary caps in force.
+/// WIST-1 §3.6, in octets.
 pub fn commitment_cap(extract_cap: i64, links_cap: i64, summary_cap: i64) -> i128 {
     32 + i128::from(extract_cap) + i128::from(links_cap) + i128::from(summary_cap)
 }
 
-/// §3.4's clock check against a whole-second clock: a sealed Delta uses its
-/// committing Epoch's `sealed_at` and the `clock_skew_seconds` accepted at
-/// that instant (`WIST1-E06`; a malformed `observed_at` is `WIST1-E14`).
+/// WIST-1 §3.4: for a sealed Delta, `clock_s` is its committing Epoch's `sealed_at` and
+/// `allowance_s` the `clock_skew_seconds` in force then, both in seconds.
 pub fn verify_clock(doc: &Value, clock_s: i64, allowance_s: i64) -> Result<(), &'static str> {
     let observed_at = doc["delta"]["observed_at"].as_str().ok_or("WIST1-E14")?;
     match publisher_time::within_clock_bound(observed_at, clock_s, allowance_s) {
@@ -212,7 +199,7 @@ pub fn verify_clock(doc: &Value, clock_s: i64, allowance_s: i64) -> Result<(), &
     }
 }
 
-/// §3.4's predecessor order: `observed_at` strictly after the predecessor's.
+/// WIST-1 §3.4: `observed_at` strictly after the predecessor's.
 pub fn verify_observation_order(
     observed_at: &str,
     predecessor_observed_at: &str,

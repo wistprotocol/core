@@ -56,9 +56,8 @@ impl Schedule {
         ScheduleReplay { schedule, rejected }
     }
 
-    /// Restores an amendment a Snapshot's `parameter` tuple carries
-    /// (WIST-3 §7): already accepted by the Log, so no admission check
-    /// applies; a resuming validator starts from the accepted schedule.
+    /// WIST-3 §7: an amendment from a Snapshot's `parameter` tuple is already accepted, so no
+    /// admission check applies.
     pub fn adopt(&mut self, amendment: Amendment) {
         self.accepted.push(amendment);
     }

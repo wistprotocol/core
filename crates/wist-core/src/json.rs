@@ -1,7 +1,4 @@
-//! WIST-1 §4 and RFC 8785 §3.1: protocol JSON is rejected when any object,
-//! at any depth, repeats a decoded member name, before a parsed value that
-//! would silently keep the last occurrence can reach field, signature or
-//! replay checks.
+//! WIST-1 §4 and RFC 8785 §3.1: a repeated decoded member name at any depth is rejected.
 use serde::de::{Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor};
 use std::collections::HashSet;
 use std::fmt;
@@ -62,13 +59,11 @@ impl<'de> Visitor<'de> for Unique {
     }
 }
 
-/// Rejects malformed JSON and any repeated decoded member name.
 pub fn validate(raw: &[u8]) -> serde_json::Result<()> {
     serde_json::from_slice::<Unique>(raw)?;
     Ok(())
 }
 
-/// `validate` followed by the ordinary parse.
 pub fn parse(raw: &[u8]) -> serde_json::Result<serde_json::Value> {
     validate(raw)?;
     serde_json::from_slice(raw)

@@ -1,7 +1,3 @@
-//! WIST-1 §§5.1/5.2 and ADR-0023: Declaration field validation, key-set
-//! well-formedness, signer resolution, replacement classification, and the
-//! Delta authority, predecessor and clock rules every role applies.
-//! Rejections carry the WIST-1 §7 code and a detail.
 use crate::crypto::PublicKey;
 use crate::delta_fields::{self, canonical_b64u};
 use crate::envelope::verify_envelope;
@@ -32,10 +28,8 @@ pub fn verify_delta_predecessor(doc: &Value, predecessor: &Value) -> Result<(), 
     )
 }
 
-/// Complete Declaration field validation (`WIST1-E05` for
-/// non-canonicalizable input, `WIST1-E14` otherwise), with WIST-1 §3.1's
-/// major-version support: this revision implements major `1` alone, and a
-/// differing minor or patch component never rejects (`WIST1-E15`).
+/// WIST-1 §3.1: major `1` alone is implemented; a differing minor or patch never rejects
+/// (`WIST1-E15`).
 pub fn validate_fields(doc: &Value) -> Result<PublisherEnvelope, Rejection> {
     let canonical = crate::jcs::canonicalize(doc).map_err(|e| ("WIST1-E05", e.to_string()))?;
     let envelope: PublisherEnvelope =
@@ -162,9 +156,8 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
     Ok(())
 }
 
-/// ADR-0023: the keys whose public bytes decode to a canonical,
-/// non-small-order Ed25519 point; every other signed entry is retained
-/// but never a signer candidate.
+/// ADR-0023: only a canonical, non-small-order Ed25519 point is a signer candidate; other signed
+/// entries are retained.
 pub fn usable_keys(keys: &[PublisherKey]) -> impl Iterator<Item = &PublisherKey> {
     keys.iter()
         .filter(|key| PublicKey::from_b64u(&key.x).is_ok())
@@ -178,7 +171,6 @@ pub enum Decision {
     FreshIdentity,
 }
 
-/// The Declaration hash: SHA-256 of the canonical `publisher` object.
 pub fn inner_hash(doc: &Value) -> Result<String, String> {
     let canonical = crate::jcs::canonicalize(&doc["publisher"]).map_err(|e| e.to_string())?;
     Ok(format!(
@@ -222,8 +214,6 @@ fn verify_with(doc: &Value, key: &PublisherKey) -> bool {
         .is_some_and(|public| verify_envelope(doc, "publisher", &public).is_ok())
 }
 
-/// An initial Declaration: seq 0, no predecessor, self-signed by one of
-/// its own usable signing keys.
 pub fn evaluate_initial(doc: &Value) -> Result<Publisher, Rejection> {
     let envelope = validate_fields(doc)?;
     let publisher = envelope.publisher;
@@ -238,10 +228,8 @@ pub fn evaluate_initial(doc: &Value) -> Result<Publisher, Rejection> {
     Ok(publisher)
 }
 
-/// ADR-0023: the signer is the entry named by `sig.key_id` among the usable
-/// previous signing and recovery bindings and the usable incoming signing
-/// bindings whose key verifies the Envelope; `WIST1-E02` names none,
-/// `WIST1-E01` verifies under none.
+/// ADR-0023: candidates are the usable previous signing and recovery bindings and the usable
+/// incoming signing bindings.
 pub fn resolve_signer<'a>(
     doc: &Value,
     incoming: &'a Publisher,
@@ -271,16 +259,13 @@ pub fn resolve_signer<'a>(
         ))
 }
 
-/// The canonical Publisher of a field-valid Delta.
 pub fn delta_publisher(doc: &Value) -> Result<&str, &'static str> {
     delta_fields::validate_fields(doc)?;
     Ok(doc["delta"]["publisher"].as_str().unwrap())
 }
 
-/// WIST-1 §§3.2/5.2 and ADR-0023: a Delta is authorized when a named,
-/// usable signing binding of a source Declaration for its Publisher, valid
-/// at its `observed_at`, verifies it, and its URL lies inside that
-/// source's authority.
+/// WIST-1 §§3.2/5.2 and ADR-0023: a usable signing binding valid at `observed_at` verifies the
+/// Delta, and its source's authority covers the URL.
 pub fn verify_delta_authority(sources: &[&Publisher], doc: &Value) -> Result<(), &'static str> {
     let domain = delta_publisher(doc)?;
     let sources: Vec<_> = sources
@@ -310,8 +295,6 @@ pub fn verify_delta_authority(sources: &[&Publisher], doc: &Value) -> Result<(),
     Err("WIST1-E03")
 }
 
-/// Whether `url` is its own Normalized URL under `domain` or one of the
-/// declared scope hosts.
 pub fn url_in_scope(url: &str, domain: &str, scope: &[String]) -> bool {
     if crate::extract::normalize_url(url, url).as_deref() != Some(url) {
         return false;
@@ -328,8 +311,7 @@ pub fn url_host(url: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// WIST-1 §5.1/§5.2 Key Set checks for a signed object. `observed_at`
-/// activates the `nbf`/`exp` window (Deltas); pass None for Feeds.
+/// WIST-1 §5.1/§5.2: `observed_at` is `None` for Feeds, which no `nbf`/`exp` window bounds.
 pub fn verify_signed(
     keys: &[&PublisherKey],
     doc: &Value,
@@ -371,11 +353,8 @@ pub fn verify_signed(
     }
 }
 
-/// WIST-1 §5.2: evaluate a fetched Declaration against the accepted one,
-/// with an open recovery window's chain head or a pending head as an
-/// alternative predecessor and the accepted sequence floor every
-/// replacement must exceed. The caller reads which predecessor the
-/// Declaration named from `prev_declaration`.
+/// WIST-1 §5.2: an open recovery window's chain head or a pending head is an alternative
+/// predecessor; every replacement must exceed the accepted sequence floor.
 pub fn evaluate_with_heads(
     current: &Value,
     recovery_head: Option<&Value>,
@@ -391,9 +370,8 @@ pub fn evaluate_with_heads(
     if inner_hash(current).map_err(|e| ("WIST2-E04", e))? == fetched_hash {
         return Ok(Decision::Unchanged);
     }
-    // A served Declaration is re-fetched throughout the activation delay, so
-    // a re-serve of the pending head installs nothing rather than reading as
-    // a superseded replay (§5.2).
+    // WIST-1 §5.2: the pending head is re-fetched throughout the activation delay, so its
+    // re-serve installs nothing rather than reading as a superseded replay.
     if pending_head.is_some_and(|head| inner_hash(head).ok().as_deref() == Some(&fetched_hash)) {
         return Ok(Decision::Unchanged);
     }
@@ -411,9 +389,8 @@ pub fn evaluate_with_heads(
     evaluate(previous, fetched)
 }
 
-/// WIST-1 §5.2 and ADR-0023: classify a replacement of `stored` by the
-/// authenticated public bytes of its signer, protecting a nonempty
-/// recovery set against every non-recovery signer.
+/// WIST-1 §5.2 and ADR-0023: a nonempty recovery set is protected against every non-recovery
+/// signer.
 pub fn evaluate(stored: &Value, fetched: &Value) -> Result<Decision, Rejection> {
     let stored_p = publisher_of(stored).map_err(|e| ("WIST2-E04", e))?;
     let fetched_p = validate_fields(fetched)?.publisher;
@@ -504,8 +481,7 @@ pub fn evaluate(stored: &Value, fetched: &Value) -> Result<Decision, Rejection> 
     Ok(decision)
 }
 
-/// WIST-1 §5.2: a Declaration legitimately follows the recovery chain when
-/// its signer is named in the chain head's `keys` or `recovery_keys`.
+/// WIST-1 §5.2: the signer must be named in the chain head's `keys` or `recovery_keys`.
 pub fn follows_chain_head(head: &Value, candidate: &Value) -> bool {
     matches!(
         evaluate(head, candidate),

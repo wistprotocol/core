@@ -1,6 +1,5 @@
-//! WIST-1 §3.4's Publisher timestamp profile (ADR-0026): an RFC 3339-derived
-//! Gregorian spelling with an unbounded exact fraction and a numeric offset,
-//! compared arithmetically without rounding, clamping or leap-second tables.
+//! WIST-1 §3.4 and ADR-0026: Publisher timestamps compare exactly, without rounding, clamping
+//! or leap-second tables.
 use crate::timestamp::{days_from_civil, days_in_month};
 use std::cmp::Ordering;
 
@@ -85,19 +84,15 @@ fn parse(value: &str) -> Option<Instant<'_>> {
     })
 }
 
-/// Whether `value` is a well-formed Publisher timestamp.
 pub fn valid(value: &str) -> bool {
     parse(value).is_some()
 }
 
-/// Exact ordering of two Publisher timestamps, `None` when either is malformed.
 pub fn compare(left: &str, right: &str) -> Option<Ordering> {
     Some(parse(left)?.cmp(&parse(right)?))
 }
 
-/// Whether `value` is at or before the bound `bound_s` seconds plus the
-/// decimal `bound_fraction` (digits after the point, without trailing
-/// zeros); `None` when `value` is malformed.
+/// `bound_fraction` is the decimal digits after the point, without trailing zeros.
 pub fn within_bound(value: &str, bound_s: i128, bound_fraction: &str) -> Option<bool> {
     let bound = Instant {
         second: bound_s,
@@ -106,8 +101,6 @@ pub fn within_bound(value: &str, bound_s: i128, bound_fraction: &str) -> Option<
     Some(parse(value)? <= bound)
 }
 
-/// Whether `value` is at or after the whole second `bound_s`; `None` when
-/// `value` is malformed.
 pub fn at_or_after(value: &str, bound_s: i128) -> Option<bool> {
     Some(
         parse(value)?
@@ -118,9 +111,8 @@ pub fn at_or_after(value: &str, bound_s: i128) -> Option<bool> {
     )
 }
 
-/// WIST-1 §3.4's clock check against a whole-second clock such as an Epoch's
-/// `sealed_at`: `value <= clock + allowance`, endpoint included, with a
-/// signed allowance and no clamping to the spelling range.
+/// WIST-1 §3.4: `value <= clock + allowance`, endpoint included, with a signed allowance and no
+/// clamping to the spelling range; seconds.
 pub fn within_clock_bound(value: &str, clock_s: i64, allowance_s: i64) -> Option<bool> {
     within_bound(value, i128::from(clock_s) + i128::from(allowance_s), "")
 }

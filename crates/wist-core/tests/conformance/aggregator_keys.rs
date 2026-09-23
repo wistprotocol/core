@@ -48,7 +48,6 @@ fn tuple_set(registry: &Registry) -> BTreeSet<String> {
         .collect()
 }
 
-/// A tuple's key state — every member but the two acts it carries.
 fn key_state(registry: &Registry) -> BTreeSet<String> {
     registry
         .entries()

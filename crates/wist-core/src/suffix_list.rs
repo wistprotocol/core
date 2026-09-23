@@ -1,7 +1,4 @@
-//! WIST-4 §3.1: Public Suffix List snapshots, the Registrable Domain of a
-//! Canonical Host under one, the replay of `suffix_list_update` acts with
-//! the snapshot in force at each Epoch, and WIST-3 §3.2's per-domain Epoch
-//! capacity counted per Registrable Domain.
+//! WIST-4 §3.1: Registrable Domains under the Public Suffix List snapshot in force.
 use crate::crypto::{hex_encode, PublicKey};
 use crate::error::Error;
 use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope, SuffixListEntry};
@@ -9,7 +6,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-/// The snapshot identifier of a file: `"sha256:" + hex(SHA-256(octets))`.
 pub fn identifier(octets: &[u8]) -> String {
     format!("sha256:{}", hex_encode(&Sha256::digest(octets)))
 }
@@ -17,8 +13,6 @@ pub fn identifier(octets: &[u8]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistrableDomain {
     pub domain: String,
-    /// The host is a listed suffix, a single label or a host a wildcard
-    /// rule swallows whole, so the unit is the host itself.
     pub public_suffix: bool,
 }
 
@@ -28,7 +22,6 @@ struct Rule {
     exception: bool,
 }
 
-/// One Public Suffix List snapshot, its rules in Canonical Host form.
 #[derive(Debug, Clone)]
 pub struct SuffixList {
     identifier: String,
@@ -37,9 +30,8 @@ pub struct SuffixList {
 }
 
 impl SuffixList {
-    /// Parses the exact octets of a snapshot: every rule line of both
-    /// sections, a rule with a label Canonical Host processing rejects
-    /// ignored.
+    /// WIST-4 §3.1: every rule line of both sections applies; a rule with a label Canonical Host
+    /// processing rejects is ignored.
     pub fn parse(octets: &[u8]) -> Result<Self, Error> {
         let text = std::str::from_utf8(octets)
             .map_err(|e| Error::Host(format!("suffix list is not UTF-8: {e}")))?;
@@ -84,7 +76,6 @@ impl SuffixList {
         self.bytes
     }
 
-    /// The Registrable Domain of a Canonical Host under this snapshot.
     pub fn registrable_domain(&self, host: &str) -> RegistrableDomain {
         let labels: Vec<&str> = host.split('.').collect();
         let mut prevailing: Option<&Rule> = None;
@@ -130,8 +121,6 @@ fn prevails(candidate: &Rule, current: &Rule) -> bool {
     candidate.labels.len() > current.labels.len()
 }
 
-/// The Registrable Domain of a Canonical Host under the snapshot in force,
-/// the host itself while none is.
 pub fn registrable_domain(host: &str, list: Option<&SuffixList>) -> RegistrableDomain {
     match list {
         Some(list) => list.registrable_domain(host),
@@ -142,36 +131,24 @@ pub fn registrable_domain(host: &str, list: Option<&SuffixList>) -> RegistrableD
     }
 }
 
-/// What the replaying party holds under the identifier an act names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeldFile {
-    /// The file, verified to hash to the identifier, with its octet count.
     Bytes(u64),
-    /// No such file: the party that must hold every file it seals under
-    /// knows the act fails its contract.
     Absent,
-    /// A file the party could not obtain, so the act cannot be checked.
     Unobtainable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Disposition {
-    /// The act is accepted; `in_force_height` is the sealing height of the
-    /// act that put the named snapshot in force, this one's when `changed`.
     Accepted {
         identifier: String,
         in_force_height: u64,
         changed: bool,
     },
-    /// The act is ignored: `WIST1-E05`, `WIST4-E11` or `WIST4-E04`; or
-    /// the named file could not be obtained, `WIST3-E01`, which stops a
-    /// Consumer at the act's Epoch.
     Rejected(&'static str),
-    /// The act is a governance act of another kind.
     NotSuffixList,
 }
 
-/// The accepted `suffix_list_update` acts in Log order.
 #[derive(Debug, Clone, Default)]
 pub struct SuffixListReplay {
     accepted: Vec<(u64, String)>,
@@ -182,14 +159,11 @@ impl SuffixListReplay {
         Self::default()
     }
 
-    /// Adopts the WIST-3 §7 `suffix_list` tuple: the snapshot in force
-    /// and the height of the act that put it there.
+    /// WIST-3 §7 `suffix_list` tuple.
     pub fn adopt(&mut self, identifier: &str, height: u64) {
         self.accepted.push((height, identifier.to_string()));
     }
 
-    /// Replays one `registry_update` body at `height`. `held` answers
-    /// what the caller holds under the named identifier.
     pub fn apply(
         &mut self,
         height: u64,
@@ -245,8 +219,7 @@ impl SuffixListReplay {
         }
     }
 
-    /// The snapshot in force at Epoch `height`, named by the most recent
-    /// accepted act sealed below it, with that act's height.
+    /// WIST-4 §3.1: named by the most recent accepted act sealed below `height`.
     pub fn in_force_at_epoch(&self, height: u64) -> Option<(&str, u64)> {
         self.accepted
             .iter()
@@ -255,8 +228,7 @@ impl SuffixListReplay {
             .map(|(sealed, id)| (id.as_str(), *sealed))
     }
 
-    /// The snapshot in force once Epoch `height` is sealed: at every
-    /// instant from its `sealed_at` to the next Epoch's, and at Epoch
+    /// WIST-4 §3.1: in force from Epoch `height`'s `sealed_at` to the next Epoch's, and at Epoch
     /// `height + 1`.
     pub fn in_force_after(&self, height: u64) -> Option<(&str, u64)> {
         self.accepted
@@ -266,7 +238,7 @@ impl SuffixListReplay {
             .map(|(sealed, id)| (id.as_str(), *sealed))
     }
 
-    /// The WIST-3 §7 `suffix_list` tuple of a Snapshot at `tree_size`.
+    /// WIST-3 §7.
     pub fn entry_at(&self, tree_size: u64) -> Option<SuffixListEntry> {
         self.in_force_after(tree_size)
             .map(|(identifier, sealing_height)| SuffixListEntry {
@@ -286,12 +258,8 @@ pub struct EpochCaps {
     pub labeler_epoch_entries_max: u64,
 }
 
-/// WIST-3 §3.2: an Epoch carries at most `domain_epoch_entries_max`
-/// `publisher_delta`, `label` and `dispute` Entries of one Registrable
-/// Domain under the snapshot in force at it, and inside that at most
-/// `labeler_epoch_entries_max` `label` and `dispute` Entries. `entries`
-/// pairs each Entry type with the Canonical Host of its Publisher,
-/// Labeler or disputant; a breach is `WIST3-E03`.
+/// WIST-3 §3.2: `entries` pairs each Entry type with the Canonical Host of its Publisher,
+/// Labeler or disputant.
 pub fn check_epoch_capacity<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a str)>,
     list: Option<&SuffixList>,

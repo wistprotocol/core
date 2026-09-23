@@ -1,8 +1,3 @@
-//! WIST-2 §3.3 and WIST-4 §6: Labels, disputes and label definitions —
-//! their IDs, validation under the signer's Declaration, the current-Label
-//! and current-dispute rules with the WIST-3 §7 tuples they leave, the
-//! Delta binding, the labeler statistics and the recommended default
-//! profile.
 use crate::crypto::{hex_encode, PublicKey};
 use crate::objects::{
     DisputeEntry, DisputeEnvelope, Label, LabelDefinitionEnvelope, LabelEntry, LabelEnvelope,
@@ -14,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The names WIST-4 §6 defines under the `wist` prefix.
+/// WIST-4 §6.
 pub const WIST_TERMS: &[&str] = &[
     "wist:trust-seed",
     "wist:distrust-seed",
@@ -25,24 +20,15 @@ pub const WIST_TERMS: &[&str] = &[
     "wist:adult",
 ];
 
-/// Why a Label, dispute or definition is not accepted, with the code an
-/// Aggregator reports (WIST-2 §3.3, WIST-1 §7).
+/// WIST-2 §3.3 and WIST-1 §7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
-    /// A field, form or version failure, `WIST2-E06`.
     Fields,
-    /// An `asserted_at` beyond the clock allowance, `WIST2-E06`.
     Clock,
-    /// A Label about the Labeler itself, `WIST2-E06`.
     SelfLabel,
-    /// A dispute of a Label the Log has not sealed, `WIST2-E06`.
     Unsealed,
-    /// A dispute of a Label whose subject is outside the disputant's
-    /// authority, `WIST2-E06`.
     Authority,
-    /// `sig.key_id` names no usable signing entry, `WIST1-E02`.
     Binding,
-    /// The signature does not verify under the named entry, `WIST1-E01`.
     Signature,
 }
 
@@ -68,12 +54,10 @@ fn digest_of(inner: &Value) -> Result<String, Rejection> {
     ))
 }
 
-/// The Label ID: `"sha256:" + hex(SHA-256(JCS(label)))`.
 pub fn label_id(label: &Value) -> Result<String, Rejection> {
     digest_of(label)
 }
 
-/// The Dispute ID, the Label ID construction over `dispute`.
 pub fn dispute_id(dispute: &Value) -> Result<String, Rejection> {
     digest_of(dispute)
 }
@@ -107,8 +91,7 @@ fn signature_canonical(value: &str) -> bool {
     crate::delta_fields::canonical_b64u(value, 64)
 }
 
-/// WIST-4 §6: the `<prefix>:<term>` form, a registry term under `wist`
-/// and a Canonical Host under any other prefix.
+/// WIST-4 §6: a registry term under `wist`, a Canonical Host under any other prefix.
 pub fn valid_name(name: &str) -> bool {
     if name.len() > 64 {
         return false;
@@ -130,8 +113,6 @@ pub fn valid_name(name: &str) -> bool {
     }
 }
 
-/// The host a subject names: a Normalized URL's host or the Canonical
-/// Host itself.
 pub fn subject_host(subject: &str) -> &str {
     match subject.strip_prefix("https://") {
         Some(rest) => rest.split('/').next().unwrap_or(rest),
@@ -178,11 +159,8 @@ fn sig_fields(doc: &Value) -> Result<(), Rejection> {
     Ok(())
 }
 
-/// WIST-2 §3.3: validates one Label Envelope under the Labeler's
-/// Declaration and the `url_cap_bytes` in force, in the order the section
-/// and WIST-1 §7 apply the checks; `asserted_at` is read as a Delta's
-/// `observed_at` against `clock_s` (WIST-1 §3.4: the attempt clock before
-/// sealing, the committing Epoch's `sealed_at` once sealed).
+/// WIST-2 §3.3 and WIST-1 §7 check order; `asserted_at` is checked as a Delta's `observed_at`
+/// against `clock_s` (WIST-1 §3.4).
 pub fn validate_label(
     doc: &Value,
     declaration: &PublisherEnvelope,
@@ -239,7 +217,6 @@ pub fn validate_label(
     Ok(envelope)
 }
 
-/// A Label the Log sealed, at its Epoch and Entry index.
 #[derive(Debug, Clone)]
 pub struct SealedLabel {
     pub label: Label,
@@ -261,8 +238,7 @@ fn rank(
     }
 }
 
-/// WIST-2 §3.3: the current Label of one (labeler, subject, name) — the
-/// greatest `asserted_at`, then the later in Log order.
+/// WIST-2 §3.3: the greatest `asserted_at`, then the later in Log order.
 pub fn current_label<'a>(
     sealed: impl IntoIterator<Item = &'a SealedLabel>,
 ) -> Option<&'a SealedLabel> {
@@ -282,16 +258,13 @@ pub fn current_label<'a>(
         })
 }
 
-/// Whether a Label applies nothing at an Epoch sealed at `sealed_at`
-/// because its `expires_at` is at or before that instant.
 pub fn expired_at(label: &Label, sealed_at: &str) -> bool {
     label.expires_at.as_deref().is_some_and(|expires_at| {
         publisher_time::compare(expires_at, sealed_at) != Some(Ordering::Greater)
     })
 }
 
-/// WIST-3 §7: the `label` tuple the current Label leaves at a Snapshot
-/// whose Epoch is sealed at `sealed_at`; none when retracted or expired.
+/// WIST-3 §7: none when retracted or expired.
 pub fn label_tuple(current: &SealedLabel, sealed_at: &str) -> Option<LabelEntry> {
     let label = &current.label;
     if label.retracted == Some(true) || expired_at(label, sealed_at) {
@@ -310,8 +283,7 @@ pub fn label_tuple(current: &SealedLabel, sealed_at: &str) -> Option<LabelEntry>
     })
 }
 
-/// WIST-2 §3.3: whether a Label bound to `delta` applies to a URL whose
-/// record stands on `record_anchor`, none where no record is live.
+/// WIST-2 §3.3.
 pub fn binding_applies(delta: Option<&str>, record_anchor: Option<&str>) -> bool {
     match (delta, record_anchor) {
         (_, None) => false,
@@ -320,17 +292,12 @@ pub fn binding_applies(delta: Option<&str>, record_anchor: Option<&str>) -> bool
     }
 }
 
-/// What the validating party knows about the Label a dispute names.
+/// WIST-3 §7: a Consumer resumed from a Snapshot holds no Label IDs, so an `Unverifiable`
+/// dispute is read as consistent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LabelLookup {
-    /// Sealed in this Log, with its subject.
     Known { subject: String },
-    /// Not sealed anywhere the party can see.
     Absent,
-    /// Sealed below what the party holds — a Consumer resumed from a
-    /// Snapshot holds no Label IDs (WIST-3 §7) — so the sealing and
-    /// authority checks cannot be made and the dispute is read as
-    /// consistent, as a withdrawal of an unwalked Delta is.
     Unverifiable,
 }
 
@@ -346,9 +313,7 @@ fn within_allowance(
     }
 }
 
-/// WIST-2 §3.3: validates one Dispute Envelope under the disputant's
-/// Declaration against the Labels this Log sealed, its `asserted_at` read
-/// as a Label's against `clock_s`.
+/// WIST-2 §3.3: `asserted_at` is checked against `clock_s` as a Label's is.
 pub fn validate_dispute(
     doc: &Value,
     declaration: &PublisherEnvelope,
@@ -385,7 +350,6 @@ pub fn validate_dispute(
     Ok(envelope)
 }
 
-/// A dispute the Log sealed, at its Epoch and Entry index.
 #[derive(Debug, Clone)]
 pub struct SealedDispute {
     pub dispute: crate::objects::Dispute,
@@ -394,7 +358,7 @@ pub struct SealedDispute {
     pub entry_index: u64,
 }
 
-/// WIST-2 §3.3: the current dispute of one (label, disputant).
+/// WIST-2 §3.3: one current dispute per (label, disputant).
 pub fn current_dispute<'a>(
     sealed: impl IntoIterator<Item = &'a SealedDispute>,
 ) -> Option<&'a SealedDispute> {
@@ -414,7 +378,7 @@ pub fn current_dispute<'a>(
         })
 }
 
-/// WIST-3 §7: the `dispute` tuple the current dispute leaves.
+/// WIST-3 §7.
 pub fn dispute_tuple(current: &SealedDispute) -> DisputeEntry {
     DisputeEntry {
         label_id: current.dispute.label.clone(),
@@ -425,8 +389,7 @@ pub fn dispute_tuple(current: &SealedDispute) -> DisputeEntry {
     }
 }
 
-/// WIST-2 §3.3: validates one label definition under the Labeler's
-/// Declaration; a definition that fails supplies no treatment.
+/// WIST-2 §3.3: a failing definition supplies no treatment.
 pub fn validate_definition(
     doc: &Value,
     declaration: &PublisherEnvelope,
@@ -449,8 +412,7 @@ pub fn validate_definition(
     Ok(envelope)
 }
 
-/// WIST-2 §3.3: the path under the Labeler's well-known prefix where the
-/// definition of `name` is served.
+/// WIST-2 §3.3.
 pub fn definition_path(name: &str) -> String {
     format!(
         "labels/definitions/{}.json",
@@ -458,7 +420,6 @@ pub fn definition_path(name: &str) -> String {
     )
 }
 
-/// One sealed `label` Entry as the labeler table counts it.
 #[derive(Debug, Clone)]
 pub struct SealedLabelCount<'a> {
     pub height: u64,
@@ -477,8 +438,7 @@ pub struct LabelerRow {
     pub first_seen_height: u64,
 }
 
-/// WIST-3 §7: the labeler table over every sealed `label` Entry, in
-/// ascending labeler order.
+/// WIST-3 §7: ascending labeler order.
 pub fn labeler_rows<'a>(sealed: impl IntoIterator<Item = SealedLabelCount<'a>>) -> Vec<LabelerRow> {
     let mut rows: BTreeMap<&str, (u64, u64, BTreeSet<&str>, u64)> = BTreeMap::new();
     for entry in sealed {
@@ -503,8 +463,6 @@ pub fn labeler_rows<'a>(sealed: impl IntoIterator<Item = SealedLabelCount<'a>>) 
         .collect()
 }
 
-/// One Label event of a (labeler, subject, name) as the default profile
-/// reads it.
 #[derive(Debug, Clone)]
 pub struct LabelEvent<'a> {
     pub height: u64,
@@ -512,11 +470,8 @@ pub struct LabelEvent<'a> {
     pub retracted: bool,
 }
 
-/// WIST-4 §6's recommended default profile: whether the triple's Label is
-/// live at `height` — current, unretracted and not yet at
-/// `expires_at_height`, the first height whose Epoch instant reaches the
-/// expiry. `events` are in ascending Log order, which WIST-2 §3.3 uses to
-/// break equal `asserted_at` instants.
+/// WIST-4 §6 default profile. `expires_at_height` is the first height whose Epoch instant
+/// reaches the expiry; `events` are in ascending Log order, the WIST-2 §3.3 tie-break.
 pub fn live_at(events: &[LabelEvent<'_>], expires_at_height: Option<u64>, height: u64) -> bool {
     let current = events.iter().filter(|event| event.height <= height).fold(
         None,
