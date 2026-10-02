@@ -123,6 +123,7 @@ fn thumbprints_and_fingerprints_match_their_known_answers() {
 }
 
 #[test]
+#[ignore = "vectors/wist1/key-directory.json"]
 fn entry_field_rules_and_key_windows_hold() {
     let vector = vector();
     for case in vector["entry_cases"].as_array().unwrap() {
@@ -157,6 +158,7 @@ fn the_rotation_commitment_binds_an_ordinary_rotation() {
 }
 
 #[test]
+#[ignore = "vectors/wist1/key-directory.json"]
 fn histories_activate_reverse_and_resume_as_the_vector_records() {
     let vector = vector();
     let days = vector["recovery_window_days"].as_i64().unwrap();

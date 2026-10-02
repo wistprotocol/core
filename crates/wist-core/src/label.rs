@@ -84,11 +84,11 @@ fn is_normalized_url(value: &str) -> bool {
 }
 
 fn supported_major(version: &str) -> bool {
-    crate::delta_fields::version_spelled(version) && version.split('.').next() == Some("1")
+    crate::envelope::validate_version(version).is_ok()
 }
 
 fn signature_canonical(value: &str) -> bool {
-    crate::delta_fields::canonical_b64u(value, 64)
+    crate::envelope::canonical_b64u(value, 64)
 }
 
 /// WIST-4 §6: a registry term under `wist`, a Canonical Host under any other prefix.

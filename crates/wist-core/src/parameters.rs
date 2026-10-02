@@ -26,11 +26,27 @@ pub const PARAMS: &[ParamSpec] = &[
     p("epoch_cadence_seconds", Some(3600), Some(1), Some(86400)),
     p("epoch_cap_bytes", Some(268_435_456), Some(65_537), None),
     p("checkpoint_witness_quorum", Some(0), Some(0), None),
-    p("extract_cap_bytes", Some(32768), Some(2), None),
-    p("links_cap_bytes", Some(4096), Some(21), None),
-    p("link_url_cap_bytes", Some(2048), Some(14), None),
-    p("summary_cap_bytes", Some(2048), Some(12), None),
-    p("url_cap_bytes", Some(2048), Some(14), None),
+    p("extract_cap_bytes", Some(32_768), Some(32_768), None),
+    p("links_cap_bytes", Some(4096), Some(4096), None),
+    p("link_url_cap_bytes", Some(2048), Some(2048), None),
+    p("summary_cap_bytes", Some(2048), Some(2048), None),
+    p("url_cap_bytes", Some(2048), Some(2048), Some(32_768)),
+    p("collections_max", Some(16), Some(16), None),
+    p("scope_entries_max", Some(32), Some(32), None),
+    p(
+        "catalog_items_max",
+        Some(16_777_216),
+        Some(16_777_216),
+        None,
+    ),
+    p("tree_file_cap_bytes", Some(65_536), Some(65_536), None),
+    p("tree_depth_max", Some(16), Some(16), None),
+    p(
+        "catalog_refresh_seconds",
+        Some(604_800),
+        Some(1),
+        Some(7_776_000),
+    ),
     p("payload_window_days", Some(180), Some(30), None),
     p("mirror_retention_days", Some(90), Some(30), None),
     p("record_seal_epochs", Some(24), Some(1), None),
@@ -45,7 +61,6 @@ pub const PARAMS: &[ParamSpec] = &[
     ),
     p("feed_window", Some(1000), Some(1), None),
     p("clock_skew_seconds", Some(600), None, None),
-    p("keyset_cache_ttl_seconds", Some(86400), None, None),
     p("baseline_poll_seconds", Some(86400), None, None),
     p("quota_base", Some(1000), Some(1), None),
     p("recovery_window_days", Some(7), Some(1), None),
@@ -151,8 +166,15 @@ mod tests {
     fn combination_boundaries() {
         assert!(validate("link_url_cap_bytes", 4076, defaults).is_err());
         validate("link_url_cap_bytes", 4075, defaults).unwrap();
-        assert!(validate("links_cap_bytes", 2068, defaults).is_err());
-        validate("links_cap_bytes", 2069, defaults).unwrap();
+        let long_links = |name: &str| {
+            if name == "link_url_cap_bytes" {
+                5000
+            } else {
+                defaults(name)
+            }
+        };
+        assert!(validate("links_cap_bytes", 5020, long_links).is_err());
+        validate("links_cap_bytes", 5021, long_links).unwrap();
         assert!(validate("payload_window_days", 541, defaults).is_err());
         validate("payload_window_days", 540, defaults).unwrap();
         assert!(validate("mirror_retention_days", 29, defaults).is_err());
@@ -169,6 +191,46 @@ mod tests {
             }
         })
         .is_err());
+    }
+
+    #[test]
+    fn a_value_a_publisher_builds_to_is_never_amended_below_its_default() {
+        for name in [
+            "extract_cap_bytes",
+            "links_cap_bytes",
+            "link_url_cap_bytes",
+            "summary_cap_bytes",
+            "url_cap_bytes",
+            "collections_max",
+            "scope_entries_max",
+            "catalog_items_max",
+            "tree_file_cap_bytes",
+            "tree_depth_max",
+        ] {
+            let parameter = spec(name).unwrap();
+            assert_eq!(parameter.min, parameter.default, "{name}");
+            validate_value(name, defaults(name)).unwrap();
+            assert!(validate_value(name, defaults(name) - 1).is_err(), "{name}");
+        }
+        validate_value("url_cap_bytes", 32_768).unwrap();
+        assert!(validate_value("url_cap_bytes", 32_769).is_err());
+    }
+
+    #[test]
+    fn the_catalog_refresh_interval_lies_between_one_second_and_ninety_days() {
+        assert_eq!(defaults("catalog_refresh_seconds"), 604_800);
+        for value in [1, 7_776_000] {
+            validate_value("catalog_refresh_seconds", value).unwrap();
+        }
+        for value in [0, 7_776_001] {
+            assert!(validate_value("catalog_refresh_seconds", value).is_err());
+        }
+    }
+
+    #[test]
+    fn the_key_set_cache_lifetime_is_no_longer_a_parameter() {
+        assert!(spec("keyset_cache_ttl_seconds").is_none());
+        assert_eq!(PARAMS.len(), 28);
     }
 
     #[test]

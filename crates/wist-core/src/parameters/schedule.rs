@@ -213,15 +213,16 @@ mod tests {
         let replay = Schedule::replay(
             0,
             &[
-                change("links_cap_bytes", 3000, 0, 0, 10 * DAY),
-                change("links_cap_bytes", 2000, 1, DAY, 10 * DAY),
+                change("links_cap_bytes", 6000, 0, 0, 10 * DAY),
+                change("link_url_cap_bytes", 5000, 1, DAY, 10 * DAY),
+                change("links_cap_bytes", 5000, 2, 2 * DAY, 10 * DAY),
             ],
         );
-        assert_eq!(replay.rejected, [1]);
-        assert_eq!(replay.schedule.accepted().len(), 1);
+        assert_eq!(replay.rejected, [2]);
+        assert_eq!(replay.schedule.accepted().len(), 2);
         assert_eq!(
             replay.schedule.value_at("links_cap_bytes", 10 * DAY),
-            Some(3000)
+            Some(6000)
         );
     }
 
@@ -230,15 +231,16 @@ mod tests {
         let replay = Schedule::replay(
             0,
             &[
-                change("link_url_cap_bytes", 3000, 0, 0, 10 * DAY),
-                change("link_url_cap_bytes", 1000, 1, DAY, 12 * DAY),
-                change("links_cap_bytes", 3000, 2, 2 * DAY, 11 * DAY),
+                change("links_cap_bytes", 6000, 0, 0, 9 * DAY),
+                change("link_url_cap_bytes", 5000, 1, DAY, 10 * DAY),
+                change("link_url_cap_bytes", 2048, 2, 2 * DAY, 12 * DAY),
+                change("links_cap_bytes", 5000, 3, 3 * DAY, 11 * DAY),
             ],
         );
-        assert_eq!(replay.rejected, [2]);
+        assert_eq!(replay.rejected, [3]);
         assert_eq!(
             replay.schedule.value_at("links_cap_bytes", 12 * DAY),
-            Some(4096)
+            Some(6000)
         );
     }
 

@@ -5,8 +5,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const WIST_VERSION: &str = "1.0.0";
 
 pub mod aggregator_keys;
-pub mod chain;
 pub mod checkpoint;
+pub mod constants;
 pub mod crypto;
 pub mod declaration;
 pub mod declarations;

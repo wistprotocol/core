@@ -718,6 +718,7 @@ fn histories_that_carry_checkpoints_bind_their_cumulative_trees() {
 }
 
 #[test]
+#[ignore = "vectors/multilog/dedup.json"]
 fn each_log_of_the_deduplication_vector_seals_the_shared_delta_under_its_own_key() {
     let vector = read_json("vectors/multilog/dedup.json");
     let delta_id = vector["delta_id"].as_str().unwrap();

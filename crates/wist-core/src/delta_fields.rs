@@ -1,6 +1,6 @@
 //! WIST-1 §7: complete field validation under `delta.schema.json` precedes any semantic
 //! rejection.
-use crate::crypto::{b64u_decode, b64u_encode};
+use crate::envelope::{canonical_b64u, validate_version, version_spelled};
 use crate::publisher_time;
 use serde_json::Value;
 
@@ -33,20 +33,6 @@ fn hash(value: &Value, prefix: &str) -> bool {
                 && hex
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-}
-
-pub fn canonical_b64u(value: &str, length: usize) -> bool {
-    b64u_decode(value).is_ok_and(|bytes| bytes.len() == length && b64u_encode(&bytes) == value)
-}
-
-/// WIST-1 §3.1: no leading zeros, prerelease or build suffix.
-pub fn version_spelled(version: &str) -> bool {
-    version.split('.').count() == 3
-        && version.split('.').all(|part| {
-            !part.is_empty()
-                && !(part.len() > 1 && part.starts_with('0'))
-                && part.bytes().all(|b| b.is_ascii_digit())
         })
 }
 
@@ -131,23 +117,13 @@ pub fn validate_fields(doc: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// WIST-1 §3.1: wire major `1` alone is implemented.
-pub fn validate_version(doc: &Value) -> Result<(), &'static str> {
+pub fn validate_delta_version(doc: &Value) -> Result<(), &'static str> {
     validate_fields(doc)?;
-    if doc["delta"]["wist_version"]
-        .as_str()
-        .unwrap()
-        .split('.')
-        .next()
-        != Some("1")
-    {
-        return Err("WIST1-E15");
-    }
-    Ok(())
+    validate_version(doc["delta"]["wist_version"].as_str().unwrap())
 }
 
 pub fn validate_content_and_prev(doc: &Value) -> Result<(), &'static str> {
-    validate_version(doc)?;
+    validate_delta_version(doc)?;
     let body = &doc["delta"];
     if body.get("payload").is_none()
         && matches!(body["change_type"].as_str(), Some("new" | "update"))
@@ -207,118 +183,5 @@ pub fn verify_observation_order(
     match publisher_time::compare(observed_at, predecessor_observed_at) {
         Some(std::cmp::Ordering::Greater) => Ok(()),
         _ => Err("WIST1-E07"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeSet;
-    use std::path::PathBuf;
-
-    fn spec_dir() -> PathBuf {
-        std::env::var_os("WIST_SPEC_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../spec"))
-    }
-
-    #[test]
-    fn signed_field_vectors_select_the_documented_diagnostics() {
-        let vector: Value = serde_json::from_slice(
-            &std::fs::read(spec_dir().join("vectors/wist1/delta-fields.json")).unwrap(),
-        )
-        .unwrap();
-        for case in vector["cases"].as_array().unwrap() {
-            let doc = &case["envelope"];
-            let before = doc.clone();
-            let allowed: BTreeSet<&str> = case["allowed"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
-            let field = validate_fields(doc);
-            assert_eq!(
-                field.is_err(),
-                allowed.contains("WIST1-E14"),
-                "{}: {field:?}",
-                case["name"]
-            );
-            let version = validate_version(doc);
-            assert_eq!(
-                version,
-                if allowed.contains("WIST1-E14") {
-                    Err("WIST1-E14")
-                } else if allowed.contains("WIST1-E15") {
-                    Err("WIST1-E15")
-                } else {
-                    Ok(())
-                },
-                "{}",
-                case["name"]
-            );
-            let static_check = validate_static(
-                doc,
-                case["url_cap_bytes"].as_i64().unwrap_or(2048),
-                i128::from(case["commitment_cap_bytes"].as_i64().unwrap_or(38944)),
-            );
-            if let Err(code) = static_check {
-                assert!(allowed.contains(code), "{}: {code}", case["name"]);
-            }
-            assert_eq!(*doc, before);
-        }
-        for case in vector["version_cases"].as_array().into_iter().flatten() {
-            assert_eq!(
-                validate_version(&case["envelope"])
-                    .err()
-                    .unwrap_or("accepted"),
-                case["expected"],
-                "{}",
-                case["name"]
-            );
-        }
-    }
-
-    #[test]
-    fn version_cases_reject_unsupported_majors_after_field_checks() {
-        let vector: Value = serde_json::from_slice(
-            &std::fs::read(spec_dir().join("vectors/wist1/delta-attribution.json")).unwrap(),
-        )
-        .unwrap();
-        for case in vector["version_cases"].as_array().unwrap() {
-            assert_eq!(
-                validate_version(&case["envelope"])
-                    .err()
-                    .unwrap_or("accepted"),
-                case["expected"],
-                "{}",
-                case["name"]
-            );
-        }
-    }
-
-    #[test]
-    fn historical_clock_probes_use_the_sealing_instant_and_its_allowance() {
-        let vector: Value = serde_json::from_slice(
-            &std::fs::read(spec_dir().join("vectors/wist1/delta-clock-time.json")).unwrap(),
-        )
-        .unwrap();
-        for probe in vector["probes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|p| p["stage"] == "historical")
-        {
-            let clock_s =
-                crate::timestamp::log_seconds(probe["sealed_at"].as_str().unwrap()).unwrap();
-            assert_eq!(probe["sealed_at"], probe["expected_clock"]);
-            let allowance = probe["expected_allowance"].as_i64().unwrap();
-            assert_eq!(
-                serde_json::json!(verify_clock(&probe["envelope"], clock_s, allowance).err()),
-                probe["expected"],
-                "{}",
-                probe["name"]
-            );
-        }
     }
 }

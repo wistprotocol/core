@@ -1,67 +1,89 @@
-//! WIST-1 §4 and RFC 8785 §3.1: a repeated decoded member name at any depth is rejected.
-use serde::de::{Deserialize, Deserializer, Error, MapAccess, SeqAccess, Visitor};
+//! WIST-1 §4 and RFC 8785 §3.1: a repeated decoded member name at any depth is rejected, and so
+//! are arrays and objects nested deeper than 64 levels, the top-level value being level 1.
+use serde::de::{DeserializeSeed, Deserializer, Error, MapAccess, SeqAccess, Visitor};
 use std::collections::HashSet;
 use std::fmt;
 
-struct Unique;
+pub const NESTING_LEVELS_MAX: usize = 64;
 
-impl<'de> Deserialize<'de> for Unique {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(Unique)
+#[derive(Clone, Copy)]
+struct Unique {
+    enclosing: usize,
+}
+
+impl Unique {
+    fn inner<E: Error>(self) -> Result<Self, E> {
+        if self.enclosing >= NESTING_LEVELS_MAX {
+            return Err(E::custom("JSON nested deeper than 64 levels"));
+        }
+        Ok(Self {
+            enclosing: self.enclosing + 1,
+        })
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for Unique {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
     }
 }
 
 impl<'de> Visitor<'de> for Unique {
-    type Value = Self;
+    type Value = ();
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("JSON with unique object member names")
     }
 
-    fn visit_bool<E: Error>(self, _: bool) -> Result<Self, E> {
-        Ok(self)
+    fn visit_bool<E: Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
     }
 
-    fn visit_i64<E: Error>(self, _: i64) -> Result<Self, E> {
-        Ok(self)
+    fn visit_i64<E: Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
     }
 
-    fn visit_u64<E: Error>(self, _: u64) -> Result<Self, E> {
-        Ok(self)
+    fn visit_u64<E: Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
     }
 
-    fn visit_f64<E: Error>(self, _: f64) -> Result<Self, E> {
-        Ok(self)
+    fn visit_f64<E: Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
     }
 
-    fn visit_str<E: Error>(self, _: &str) -> Result<Self, E> {
-        Ok(self)
+    fn visit_str<E: Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
     }
 
-    fn visit_unit<E: Error>(self) -> Result<Self, E> {
-        Ok(self)
+    fn visit_unit<E: Error>(self) -> Result<(), E> {
+        Ok(())
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self, A::Error> {
-        while seq.next_element::<Unique>()?.is_some() {}
-        Ok(self)
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let inner = self.inner()?;
+        while seq.next_element_seed(inner)?.is_some() {}
+        Ok(())
     }
 
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let inner = self.inner()?;
         let mut names = HashSet::new();
         while let Some(name) = map.next_key::<String>()? {
             if !names.insert(name) {
                 return Err(A::Error::custom("duplicate JSON member name"));
             }
-            map.next_value::<Unique>()?;
+            map.next_value_seed(inner)?;
         }
-        Ok(self)
+        Ok(())
     }
 }
 
 pub fn validate(raw: &[u8]) -> serde_json::Result<()> {
-    serde_json::from_slice::<Unique>(raw)?;
-    Ok(())
+    let mut deserializer = serde_json::Deserializer::from_slice(raw);
+    Unique { enclosing: 0 }.deserialize(&mut deserializer)?;
+    deserializer.end()
 }
 
 pub fn parse(raw: &[u8]) -> serde_json::Result<serde_json::Value> {
@@ -100,6 +122,28 @@ mod tests {
             validate(raw.as_bytes()).unwrap_or_else(|e| panic!("{raw}: {e}"));
         }
         assert!(validate(b"{\"a\":1,}").is_err());
+    }
+
+    fn nested(levels: usize, open: &str, close: &str) -> String {
+        format!("{}{}", open.repeat(levels), close.repeat(levels))
+    }
+
+    #[test]
+    fn nesting_is_accepted_at_64_levels_and_refused_at_65() {
+        for (open, close) in [("[", "]"), ("{\"a\":", "}")] {
+            let at_bound = nested(NESTING_LEVELS_MAX, open, close).replace(":}", ":1}");
+            validate(at_bound.as_bytes()).unwrap_or_else(|e| panic!("{open}: {e}"));
+            parse(at_bound.as_bytes()).unwrap();
+            let past = nested(NESTING_LEVELS_MAX + 1, open, close).replace(":}", ":1}");
+            assert!(validate(past.as_bytes()).is_err(), "{open}");
+            assert!(parse(past.as_bytes()).is_err(), "{open}");
+        }
+        let scalar_inside = format!("{}1{}", "[".repeat(64), "]".repeat(64));
+        validate(scalar_inside.as_bytes()).unwrap();
+        let mixed = format!("{}[{{}}]{}", "[{\"a\":".repeat(31), "}]".repeat(31));
+        validate(mixed.as_bytes()).unwrap();
+        let mixed_past = format!("{}[[{{}}]]{}", "[{\"a\":".repeat(31), "}]".repeat(31));
+        assert!(validate(mixed_past.as_bytes()).is_err());
     }
 
     #[test]

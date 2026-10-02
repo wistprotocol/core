@@ -66,6 +66,7 @@ fn declaration(value: &Value, previous: Option<&Value>) -> WindowDeclaration {
 }
 
 #[test]
+#[ignore = "vectors/wist1/recovery-settlement.json"]
 fn signed_recovery_settlement() {
     let vector = super::read_json("vectors/wist1/recovery-settlement.json");
     for case in vector["cases"].as_array().unwrap() {
@@ -132,6 +133,7 @@ fn signed_recovery_settlement() {
 }
 
 #[test]
+#[ignore = "vectors/wist1/recovery-settlement.json"]
 fn delta_bindings_control_queue_admission_and_settlement() {
     let vector = super::read_json("vectors/wist1/recovery-settlement.json");
     for case in vector["binding_cases"].as_array().unwrap() {

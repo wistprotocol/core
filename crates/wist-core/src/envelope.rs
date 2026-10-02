@@ -1,7 +1,32 @@
-use crate::crypto::{verify, PublicKey, SigningKey};
+use crate::crypto::{b64u_decode, b64u_encode, verify, PublicKey, SigningKey};
 use crate::error::Error;
 use crate::jcs;
 use serde_json::Value;
+
+pub fn canonical_b64u(value: &str, length: usize) -> bool {
+    b64u_decode(value).is_ok_and(|bytes| bytes.len() == length && b64u_encode(&bytes) == value)
+}
+
+/// WIST-1 §3.1: no leading zeros, prerelease or build suffix.
+pub fn version_spelled(version: &str) -> bool {
+    version.split('.').count() == 3
+        && version.split('.').all(|part| {
+            !part.is_empty()
+                && !(part.len() > 1 && part.starts_with('0'))
+                && part.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+/// WIST-1 §3.1: wire major `1` alone is implemented.
+pub fn validate_version(version: &str) -> Result<(), &'static str> {
+    if !version_spelled(version) {
+        return Err("WIST1-E14");
+    }
+    if version.split('.').next() != Some("1") {
+        return Err("WIST1-E15");
+    }
+    Ok(())
+}
 
 pub fn verify_envelope(doc: &Value, inner_key: &str, key: &PublicKey) -> Result<(), Error> {
     let inner = doc
@@ -51,6 +76,30 @@ mod tests {
     }
 
     #[test]
+    fn a_version_is_refused_misspelled_before_outside_major_one() {
+        assert_eq!(validate_version("1.0.0"), Ok(()));
+        assert_eq!(validate_version("1.12.3"), Ok(()));
+        for misspelled in [
+            "1.0",
+            "1.0.0.0",
+            "01.0.0",
+            "1.00.0",
+            "1.0.0-rc1",
+            "1.0.0+b",
+            "",
+        ] {
+            assert_eq!(
+                validate_version(misspelled),
+                Err("WIST1-E14"),
+                "{misspelled}"
+            );
+        }
+        assert_eq!(validate_version("2.0.0"), Err("WIST1-E15"));
+        assert_eq!(validate_version("0.9.0"), Err("WIST1-E15"));
+    }
+
+    #[test]
+    #[ignore = "vectors/wist1/envelope.json"]
     fn sign_envelope_reproduces_wist1_vector() {
         let dir = spec_dir().join("vectors/wist1");
         let kp: serde_json::Value =

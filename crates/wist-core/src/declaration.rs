@@ -1,6 +1,6 @@
 use crate::crypto::PublicKey;
-use crate::delta_fields::{self, canonical_b64u};
-use crate::envelope::verify_envelope;
+use crate::delta_fields;
+use crate::envelope::{canonical_b64u, verify_envelope, version_spelled};
 use crate::objects::publisher::{key_set_fingerprint, thumbprint, NUMERIC_DATE_MAX};
 use crate::objects::{Publisher, PublisherEnvelope, PublisherKey};
 use crate::publisher_time;
@@ -85,7 +85,7 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
     if publisher.seq > 9_007_199_254_740_991 {
         return Err("seq exceeds the safe integer range".into());
     }
-    if !delta_fields::version_spelled(&publisher.wist_version) {
+    if !version_spelled(&publisher.wist_version) {
         return Err("wist_version must contain three decimal components".into());
     }
     let sha256_shaped = |hash: &String| {
@@ -319,7 +319,7 @@ pub fn verify_signed(
     observed_at: Option<&str>,
 ) -> Result<(), &'static str> {
     if kind == "delta" {
-        delta_fields::validate_version(doc)?;
+        delta_fields::validate_delta_version(doc)?;
     }
     if observed_at.is_some_and(|value| !publisher_time::valid(value)) {
         return Err("WIST1-E14");

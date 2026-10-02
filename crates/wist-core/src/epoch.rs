@@ -5,10 +5,11 @@ use crate::tiles;
 use crate::{jcs, json};
 use serde_json::Value;
 
-pub const ENTRY_TYPES: [&str; 5] = [
+pub const ENTRY_TYPES: [&str; 6] = [
     "publisher_declaration",
     "registry_update",
-    "publisher_delta",
+    "publisher_catalog",
+    "publisher_item",
     "label",
     "dispute",
 ];
@@ -191,19 +192,20 @@ mod tests {
     #[test]
     fn an_epochs_entries_reproduce_the_root_the_checkpoint_states() {
         let entries = canonical(vec![
-            entry("publisher_delta", 1),
-            entry("publisher_delta", 2),
-            entry("label", 3),
+            entry("publisher_catalog", 1),
+            entry("publisher_item", 2),
+            entry("publisher_item", 3),
+            entry("label", 4),
         ]);
         let checkpoint = sealed(&[], &entries, 0);
         let summary = verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), 1 << 20).unwrap();
-        assert_eq!(summary.leaf_hashes.len(), 3);
+        assert_eq!(summary.leaf_hashes.len(), 4);
         assert_eq!(summary.octets, epoch_octets(&entries).unwrap());
     }
 
     #[test]
     fn a_later_epoch_extends_the_tree_of_the_epoch_before_it() {
-        let first = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
+        let first = canonical(vec![entry("publisher_item", 1), entry("label", 2)]);
         let first_hashes = leaf_hashes(&first).unwrap();
         let second = canonical(vec![entry("dispute", 3)]);
         let checkpoint = sealed(&first_hashes, &second, 1);
@@ -219,7 +221,7 @@ mod tests {
 
     #[test]
     fn an_empty_epoch_restates_the_previous_tree() {
-        let first = canonical(vec![entry("publisher_delta", 1)]);
+        let first = canonical(vec![entry("publisher_item", 1)]);
         let hashes = leaf_hashes(&first).unwrap();
         let checkpoint = sealed(&hashes, &[], 1);
         assert_eq!(checkpoint.tree_size(), 1);
@@ -232,10 +234,11 @@ mod tests {
     fn sorting_puts_entries_in_the_order_an_epoch_seals_them() {
         let mut entries = vec![
             entry("dispute", 1),
-            entry("publisher_delta", 2),
+            entry("publisher_item", 2),
             entry("publisher_declaration", 3),
-            entry("registry_update", 4),
-            entry("label", 5),
+            entry("label", 4),
+            entry("publisher_catalog", 5),
+            entry("registry_update", 6),
         ];
         sort_entries(&mut entries).unwrap();
         let groups: Vec<&str> = entries
@@ -248,23 +251,59 @@ mod tests {
 
     #[test]
     fn entries_outside_the_canonical_order_or_type_are_rejected() {
-        let mut entries = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
+        let mut entries = canonical(vec![entry("publisher_item", 1), entry("label", 2)]);
         entries.reverse();
         assert_eq!(
             validate_entry_order(&entries).unwrap_err().code(),
             Some("WIST3-E03")
         );
+        for retired_or_unknown in ["publisher_delta", "surprise"] {
+            assert_eq!(
+                validate_entry_order(&[entry(retired_or_unknown, 1)])
+                    .unwrap_err()
+                    .code(),
+                Some("WIST3-E03"),
+                "{retired_or_unknown}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_entries_precede_item_entries_and_each_group_ascends_by_leaf_hash() {
+        let catalog = entry("publisher_catalog", 1);
+        let item = entry("publisher_item", 2);
+        validate_entry_order(&[catalog.clone(), item.clone()]).unwrap();
         assert_eq!(
-            validate_entry_order(&[entry("surprise", 1)])
+            validate_entry_order(&[item.clone(), catalog.clone()])
                 .unwrap_err()
                 .code(),
+            Some("WIST3-E03")
+        );
+        let mut items = canonical(vec![entry("publisher_item", 3), item]);
+        validate_entry_order(&items).unwrap();
+        items.reverse();
+        assert_eq!(
+            validate_entry_order(&items).unwrap_err().code(),
             Some("WIST3-E03")
         );
     }
 
     #[test]
+    fn a_catalog_or_item_entry_needs_an_object_body() {
+        for kind in ["publisher_catalog", "publisher_item"] {
+            assert_eq!(
+                validate_entry_order(&[json!({"type": kind, "body": []})])
+                    .unwrap_err()
+                    .code(),
+                Some("WIST3-E03"),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
     fn an_epoch_whose_checkpoint_shrinks_the_tree_is_an_invalid_object() {
-        let entries = canonical(vec![entry("publisher_delta", 1), entry("label", 2)]);
+        let entries = canonical(vec![entry("publisher_item", 1), entry("label", 2)]);
         let hashes = leaf_hashes(&entries).unwrap();
         let checkpoint = sealed(&hashes, &[], 1);
         let err = verify_epoch(
@@ -304,7 +343,7 @@ mod tests {
 
     #[test]
     fn an_epoch_over_the_cap_in_force_is_rejected() {
-        let entries = canonical(vec![entry("publisher_delta", 1)]);
+        let entries = canonical(vec![entry("publisher_item", 1)]);
         let checkpoint = sealed(&[], &entries, 0);
         let octets = epoch_octets(&entries).unwrap();
         verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), octets).unwrap();
@@ -314,7 +353,7 @@ mod tests {
 
     #[test]
     fn leaf_data_that_is_not_its_entrys_jcs_is_rejected() {
-        let entries = canonical(vec![entry("publisher_delta", 1)]);
+        let entries = canonical(vec![entry("publisher_item", 1)]);
         let leaf_data: Vec<Vec<u8>> = entries
             .iter()
             .map(|e| jcs::canonicalize(e).unwrap())

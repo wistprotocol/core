@@ -59,32 +59,47 @@ fn signed_parameter_wire_bounds() {
     let key = wist_core::crypto::PublicKey::from_b64u(vectors["wire_public_key"].as_str().unwrap())
         .unwrap();
     for case in vectors["wire_cases"].as_array().unwrap() {
+        let label = case["label"].as_str().unwrap();
         let envelope = &case["envelope"];
-        if case["canonical_integer"].as_bool().unwrap() {
-            let bytes = wist_core::jcs::canonicalize(&envelope["update"]).unwrap();
-            wist_core::crypto::verify(&key, &bytes, envelope["sig"]["value"].as_str().unwrap())
-                .unwrap();
+        let update = &envelope["update"];
+        let code = case["code"].as_str();
+        if !case["canonical_integer"].as_bool().unwrap() {
+            assert_eq!(code, Some("WIST1-E05"), "{label}");
+            assert_eq!(case["sealed_disposition"], "ignored", "{label}");
+            continue;
         }
-        let details = &envelope["update"]["details"];
-        let name = details["parameter"].as_str().unwrap();
+        let details = &update["details"];
+        let Some(name) = details["parameter"].as_str() else {
+            assert_eq!(code, Some("WIST4-E04"), "{label}");
+            continue;
+        };
+        if parameters::spec(name).is_none() && update["subject"] != name {
+            assert_eq!(code, Some("WIST4-E04"), "{label}");
+            continue;
+        }
         let integral = details["value"].as_i64().or_else(|| {
             details["value"]
                 .as_f64()
                 .filter(|f| f.fract() == 0.0)
                 .map(|f| f as i64)
         });
-        let timestamp_ok =
-            wist_core::timestamp::log_seconds(envelope["update"]["effective_at"].as_str().unwrap())
-                .is_ok();
-        let (Some(value), true) = (integral, timestamp_ok) else {
-            assert!(
-                !case["schema_valid"].as_bool().unwrap(),
-                "{}",
-                case["label"]
-            );
-            assert_eq!(case["sealed_disposition"], "ignored", "{}", case["label"]);
+        let Some(value) = integral else {
+            assert!(!case["schema_valid"].as_bool().unwrap(), "{label}");
+            assert_eq!(code, Some("WIST4-E04"), "{label}");
             continue;
         };
+        let timestamp_ok =
+            wist_core::timestamp::log_seconds(update["effective_at"].as_str().unwrap()).is_ok();
+        let bytes = wist_core::jcs::canonicalize(update).unwrap();
+        let authentic =
+            wist_core::crypto::verify(&key, &bytes, envelope["sig"]["value"].as_str().unwrap())
+                .is_ok();
+        if !timestamp_ok || !authentic {
+            assert!(!case["schema_valid"].as_bool().unwrap(), "{label}");
+            assert_eq!(case["sealed_disposition"], "ignored", "{label}");
+            assert_eq!(code, Some("WIST4-E11"), "{label}");
+            continue;
+        }
         let bounds = parameters::validate_value(name, value).is_ok();
         let combinations = parameters::validate_combinations(|p| {
             if p == name {
@@ -94,17 +109,12 @@ fn signed_parameter_wire_bounds() {
             }
         })
         .is_ok();
-        assert_eq!(
-            bounds,
-            case["schema_valid"].as_bool().unwrap(),
-            "{}",
-            case["label"]
-        );
+        assert_eq!(bounds, case["schema_valid"].as_bool().unwrap(), "{label}");
+        assert_eq!(code, (!bounds).then_some("WIST4-E03"), "{label}");
         assert_eq!(
             combinations,
             case["combinations_hold_at_defaults"].as_bool().unwrap(),
-            "{}",
-            case["label"]
+            "{label}"
         );
         let mut schedule = Schedule::new(0);
         assert_eq!(
@@ -119,8 +129,7 @@ fn signed_parameter_wire_bounds() {
                 })
                 .is_ok(),
             bounds && combinations,
-            "{}",
-            case["label"]
+            "{label}"
         );
     }
 }

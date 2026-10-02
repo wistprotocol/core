@@ -6,7 +6,7 @@ pub const TILE_HEIGHT: u32 = 8;
 pub const TILE_WIDTH: u32 = 256;
 pub const TILE_MAX_BYTES: u64 = 8_192;
 pub const ENTRY_BUNDLE_MAX_BYTES: u64 = 16_777_472;
-pub const ENTRY_MAX_BYTES: u64 = 65_535;
+pub use crate::constants::ENTRY_MAX_BYTES;
 
 fn invalid(message: &str) -> Error {
     Error::Tile(format!("WIST3-E03 {message}"))
