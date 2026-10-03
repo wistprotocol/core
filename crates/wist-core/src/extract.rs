@@ -242,37 +242,82 @@ fn rawtext_close(html: &[u8], low: &[u8], i: usize, tag: &[u8]) -> usize {
     find_from(low, &close_pat, start_tag_end).unwrap_or(html.len())
 }
 
-fn iter_hrefs(html: &[u8]) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Construct {
+    Comment {
+        start: usize,
+        end: usize,
+    },
+    StartTag {
+        element: usize,
+        attributes: Vec<(Vec<u8>, Vec<u8>)>,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl Construct {
+    pub fn first_attribute(&self, name: &[u8]) -> Option<&[u8]> {
+        match self {
+            Construct::Comment { .. } => None,
+            Construct::StartTag { attributes, .. } => attributes
+                .iter()
+                .find(|(attribute, _)| attribute == name)
+                .map(|(_, value)| value.as_slice()),
+        }
+    }
+}
+
+pub fn scan_tags(html: &[u8], elements: &[&[u8]]) -> Vec<Construct> {
     let low = html.to_ascii_lowercase();
     let n = html.len();
     let mut i = 0usize;
     let mut out = Vec::new();
     while i < n {
         if low[i..].starts_with(b"<!--") {
-            i = comment_close(&low, i);
+            let end = comment_close(&low, i);
+            out.push(Construct::Comment { start: i, end });
+            i = end;
             continue;
         }
         if let Some(tag) = find_rawtext_tag(&low, i) {
             i = rawtext_close(html, &low, i, tag);
             continue;
         }
-        if low[i..].starts_with(b"<a") && at_tag_boundary(&low, i + 2) {
-            let (attributes, end) = read_attributes(html, &low, i + 2);
+        let opened = (html[i] == b'<')
+            .then(|| {
+                elements.iter().position(|element| {
+                    low[i + 1..].starts_with(element)
+                        && at_tag_boundary(&low, i + 1 + element.len())
+                })
+            })
+            .flatten();
+        if let Some(element) = opened {
+            let (attributes, end) = read_attributes(html, &low, i + 1 + elements[element].len());
+            out.push(Construct::StartTag {
+                element,
+                attributes: attributes
+                    .into_iter()
+                    .map(|(name, value)| (name.to_vec(), value.to_vec()))
+                    .collect(),
+                start: i,
+                end,
+            });
             i = end;
-            let href = attributes
-                .into_iter()
-                .find(|(name, _)| *name == b"href")
-                .map(|(_, value)| value);
-            if let Some(Ok(candidate)) = href.map(std::str::from_utf8) {
-                if let Some(decoded) = decode_entities(candidate) {
-                    out.push(decoded);
-                }
-            }
             continue;
         }
         i += 1;
     }
     out
+}
+
+fn iter_hrefs(html: &[u8]) -> Vec<String> {
+    scan_tags(html, &[b"a"])
+        .iter()
+        .filter_map(|construct| construct.first_attribute(b"href"))
+        .filter_map(|href| std::str::from_utf8(href).ok())
+        .filter_map(decode_entities)
+        .collect()
 }
 
 fn valid_scheme(s: &str) -> bool {
@@ -926,6 +971,33 @@ mod tests {
             links(b"<style x=a\"b>z</style><a href=\"https://example.org/d2\">\""),
             ["https://example.org/d2"]
         );
+    }
+
+    #[test]
+    fn tag_scan_reports_comments_and_named_start_tags_outside_raw_text() {
+        let html = b"<META Name=x><!--c--><script><meta></script><a title=\"<!--\"><metas><p title=\"<!--\"><meta>-->";
+        let scanned = scan_tags(html, &[b"meta", b"a"]);
+        assert_eq!(
+            scanned,
+            [
+                Construct::StartTag {
+                    element: 0,
+                    attributes: vec![(b"name".to_vec(), b"x".to_vec())],
+                    start: 0,
+                    end: 13,
+                },
+                Construct::Comment { start: 13, end: 21 },
+                Construct::StartTag {
+                    element: 1,
+                    attributes: vec![(b"title".to_vec(), b"<!--".to_vec())],
+                    start: 44,
+                    end: 60,
+                },
+                Construct::Comment { start: 77, end: 92 },
+            ]
+        );
+        assert_eq!(scanned[0].first_attribute(b"name"), Some(&b"x"[..]));
+        assert_eq!(scanned[1].first_attribute(b"name"), None);
     }
 
     #[test]
