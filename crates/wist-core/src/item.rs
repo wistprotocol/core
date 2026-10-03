@@ -233,7 +233,7 @@ fn scalar_values_at_most(value: &Value, bound: usize) -> bool {
     value.as_str().is_some_and(|s| s.chars().count() <= bound)
 }
 
-fn language_tag(value: &Value) -> bool {
+pub fn language_tag(value: &Value) -> bool {
     let Some(tag) = value.as_str() else {
         return false;
     };

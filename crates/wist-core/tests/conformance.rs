@@ -682,6 +682,40 @@ fn wist2_link_extraction_vector() {
 }
 
 #[test]
+fn wist5_declared_links_of_text_emissions() {
+    let vector = read_json("vectors/wist5/emission-derivation.json");
+    let caps = wist_core::item::SizeCaps::suite();
+    let mut replayed = 0;
+    let mut mismatches = Vec::new();
+    for case in vector["cases"].as_array().unwrap() {
+        let emission = &case["emission"];
+        if emission.get("text").is_none() {
+            continue;
+        }
+        let raw_url = emission["url"].as_str().unwrap();
+        let url = wist_core::extract::normalize_url(raw_url, raw_url).unwrap();
+        let declared: Vec<String> = emission
+            .get("links")
+            .map(|links| serde_json::from_value(links.clone()).unwrap())
+            .unwrap_or_default();
+        let (urls, total) = wist_core::extract::declared_links(
+            &declared,
+            &url,
+            case["publisher"]["domain"].as_str().unwrap(),
+            caps.link_url_cap_bytes() as usize,
+        );
+        let member =
+            wist_core::extract::links_member(&urls, total, caps.links_cap_bytes() as usize);
+        if member != case["expected"]["content"]["links"] {
+            mismatches.push(format!("{}: {member}", case["label"]));
+        }
+        replayed += 1;
+    }
+    assert_eq!(replayed, 21);
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+#[test]
 fn wist2_text_extraction_vector() {
     let vec = read_json("vectors/wist2/text-extraction.json");
     let cases = vec["extraction"].as_array().unwrap();

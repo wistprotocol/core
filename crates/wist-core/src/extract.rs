@@ -648,10 +648,33 @@ pub fn extract_links(
     publisher_domain: &str,
     link_url_cap_bytes: usize,
 ) -> (Vec<String>, u64) {
+    surviving_links(
+        iter_hrefs(html),
+        base_url,
+        publisher_domain,
+        link_url_cap_bytes,
+    )
+}
+
+pub fn declared_links<S: AsRef<str>>(
+    links: &[S],
+    base_url: &str,
+    publisher_domain: &str,
+    link_url_cap_bytes: usize,
+) -> (Vec<String>, u64) {
+    surviving_links(links, base_url, publisher_domain, link_url_cap_bytes)
+}
+
+fn surviving_links<S: AsRef<str>>(
+    candidates: impl IntoIterator<Item = S>,
+    base_url: &str,
+    publisher_domain: &str,
+    link_url_cap_bytes: usize,
+) -> (Vec<String>, u64) {
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
-    for candidate in iter_hrefs(html) {
-        let Some(url) = normalize_url(trim_whitespace(&candidate), base_url) else {
+    for candidate in candidates {
+        let Some(url) = normalize_url(trim_whitespace(candidate.as_ref()), base_url) else {
             continue;
         };
         let within_cap = crate::jcs::canonicalize(&Value::String(url.clone()))
@@ -855,6 +878,20 @@ mod tests {
             links(b"<a href=\"&#160;https://example.org/nbsp\">"),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn declared_links_are_trimmed_and_keep_character_references_as_written() {
+        let declared = [
+            " \thttps://example.org/a?x=1&amp;y=2\r\n",
+            "&#104;ttps://example.org/b",
+            "\u{a0}https://example.org/c",
+            "https://example.org/a?x=1&amp;y=2",
+            "/internal",
+        ];
+        let (urls, total) = declared_links(&declared, BASE, "example.com", CAP);
+        assert_eq!(urls, ["https://example.org/a?x=1&amp;y=2"]);
+        assert_eq!(total, 1);
     }
 
     #[test]
