@@ -23,7 +23,10 @@ pub fn entry_group(entry: &Value) -> Result<usize, Error> {
         .as_str()
         .and_then(|kind| ENTRY_TYPES.iter().position(|known| *known == kind))
         .ok_or_else(|| invalid("unknown Epoch Entry type"))?;
-    if entry.as_object().is_none_or(|object| object.len() != 2) || !entry["body"].is_object() {
+    if entry
+        .as_object()
+        .is_none_or(|object| object.len() != 2 || !object.contains_key("body"))
+    {
         return Err(invalid("malformed Epoch Entry envelope"));
     }
     Ok(kind)
@@ -289,14 +292,33 @@ mod tests {
     }
 
     #[test]
-    fn a_catalog_or_item_entry_needs_an_object_body() {
-        for kind in ["publisher_catalog", "publisher_item"] {
+    fn an_entry_body_that_is_not_an_object_leaves_the_entry_form_intact() {
+        for kind in ENTRY_TYPES {
+            for body in [json!([]), json!("x"), json!(null)] {
+                assert_eq!(
+                    entry_group(&json!({"type": kind, "body": body})).unwrap(),
+                    ENTRY_TYPES.iter().position(|known| *known == kind).unwrap(),
+                    "{kind} {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_entry_not_an_object_of_exactly_type_and_body_is_rejected() {
+        for entry in [
+            json!("x"),
+            json!(["publisher_item", {}]),
+            json!({"type": "publisher_item"}),
+            json!({"type": "publisher_item", "item": {}}),
+            json!({"type": "publisher_item", "body": {}, "note": "x"}),
+        ] {
             assert_eq!(
-                validate_entry_order(&[json!({"type": kind, "body": []})])
+                validate_entry_order(std::slice::from_ref(&entry))
                     .unwrap_err()
                     .code(),
                 Some("WIST3-E03"),
-                "{kind}"
+                "{entry}"
             );
         }
     }
