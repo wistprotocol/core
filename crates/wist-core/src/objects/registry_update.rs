@@ -80,7 +80,9 @@ pub enum RegistryDetails {
 }
 
 impl RegistryUpdate {
-    /// WIST-4 §5.1: a violation of the action's `details` and `subject` contract is `WIST4-E04`.
+    /// WIST-4 §5.1: a violation of the action's `details` and `subject` contract is `WIST4-E04`,
+    /// except a `parameter_change` naming no §5 identifier or a value outside its §5 bound, which
+    /// §5 rejects with `WIST4-E03`.
     pub fn typed_details(&self) -> Result<RegistryDetails, crate::error::Error> {
         use RegistryAction::*;
         let value = self.details.clone();
@@ -103,8 +105,8 @@ impl RegistryUpdate {
             }
             RegistryDetails::KeyRemove(d) => key_id(&d.key_id) && self.subject == d.key_id,
             RegistryDetails::ParameterChange(d) => {
-                crate::parameters::spec(&d.parameter).is_some()
-                    && crate::parameters::validate_value(&d.parameter, d.value).is_ok()
+                (-crate::parameters::WIRE_INTEGER_MAX..=crate::parameters::WIRE_INTEGER_MAX)
+                    .contains(&d.value)
                     && self.subject == d.parameter
             }
             RegistryDetails::PayloadWithdrawal(d) => {
@@ -147,4 +149,62 @@ fn public_key(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parameter_change(subject: &str, details: Value) -> RegistryUpdate {
+        RegistryUpdate {
+            wist_version: "1.0.0".into(),
+            action: RegistryAction::ParameterChange,
+            subject: subject.into(),
+            details,
+            effective_at: "2026-08-09T00:00:00Z".into(),
+        }
+    }
+
+    fn outcome(update: &RegistryUpdate) -> Option<(String, i64)> {
+        match update.typed_details() {
+            Ok(RegistryDetails::ParameterChange(details)) => {
+                Some((details.parameter, details.value))
+            }
+            Ok(_) => panic!("a parameter_change reads as another action"),
+            Err(_) => None,
+        }
+    }
+
+    #[test]
+    fn an_unknown_identifier_or_an_out_of_bound_value_passes_the_field_check() {
+        let unknown = parameter_change(
+            "sampling_floor",
+            serde_json::json!({"parameter": "sampling_floor", "value": 1}),
+        );
+        assert_eq!(outcome(&unknown), Some(("sampling_floor".into(), 1)));
+        let out_of_bound = parameter_change(
+            "quota_base",
+            serde_json::json!({"parameter": "quota_base", "value": 0}),
+        );
+        assert_eq!(outcome(&out_of_bound), Some(("quota_base".into(), 0)));
+    }
+
+    #[test]
+    fn a_parameter_change_fails_its_fields_for_another_subject_type_or_wire_range() {
+        let other_subject = parameter_change(
+            "quota_base",
+            serde_json::json!({"parameter": "sampling_floor", "value": 1}),
+        );
+        assert_eq!(outcome(&other_subject), None);
+        let non_string = parameter_change(
+            "quota_base",
+            serde_json::json!({"parameter": 7, "value": 1}),
+        );
+        assert_eq!(outcome(&non_string), None);
+        let beyond_wire = parameter_change(
+            "quota_base",
+            serde_json::json!({"parameter": "quota_base", "value": 9_007_199_254_740_992_i64}),
+        );
+        assert_eq!(outcome(&beyond_wire), None);
+    }
 }
