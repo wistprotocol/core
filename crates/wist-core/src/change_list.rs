@@ -137,6 +137,10 @@ pub fn write(served: Option<Listed>, new: Listed) -> Result<Option<Written>, Err
         return Ok(None);
     };
     let change = difference(served, new)?;
+    // WIST-2 §3.1: a Catalog with the served Catalog's ID is the served Catalog.
+    if change.previous == change.catalog {
+        return Ok(None);
+    }
     let octets = crate::jcs::canonicalize(
         &serde_json::to_value(&change).expect("a change list serializes"),
     )?;

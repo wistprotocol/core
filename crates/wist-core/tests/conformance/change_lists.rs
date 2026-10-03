@@ -109,7 +109,7 @@ fn a_publisher_writes_the_difference_of_the_new_list_from_the_served_one_up_to_t
     let vector = read_json("vectors/wist2/change-list-serving.json");
     let sets = &vector["large_item_sets"];
     let cases = vector["write_cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 8);
+    assert_eq!(cases.len(), 9);
     let mut at_cap = 0;
     for case in cases {
         let name = case["name"].as_str().unwrap();
@@ -165,7 +165,7 @@ fn a_written_change_list_is_of_the_form_and_leads_from_the_served_list_to_the_ne
         }
         checked += 1;
     }
-    assert_eq!(checked, 7);
+    assert_eq!(checked, 8);
 }
 
 fn first_written_case() -> (Side, Side) {
