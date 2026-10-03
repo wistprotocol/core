@@ -67,7 +67,7 @@ impl Default for Limits {
     }
 }
 
-pub(crate) fn name_formed(name: &str) -> bool {
+pub fn name_formed(name: &str) -> bool {
     (1..=32).contains(&name.len())
         && name
             .bytes()
