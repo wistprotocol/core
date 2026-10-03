@@ -270,6 +270,10 @@ impl Declarations {
             .map(|(height, hash)| (*height, hash.as_str()))
     }
 
+    pub fn sealed_at_s(&self) -> Option<i64> {
+        self.sealed_at_s
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn apply_epoch(
         &mut self,
@@ -391,6 +395,44 @@ impl Declarations {
                 "candidate timestamp must follow the accepted prefix",
             ));
         }
+        self.stage(
+            sealed_at_s,
+            Moment::Epoch,
+            recovery_window_days,
+            declaration_activation_epochs,
+            limits,
+            entries,
+        )
+    }
+
+    pub fn project_pull(
+        &self,
+        at: &str,
+        recovery_window_days: i64,
+        declaration_activation_epochs: i64,
+        limits: &Limits,
+        entries: &[Value],
+    ) -> Result<Projection> {
+        let at_s = crate::timestamp::log_seconds(at)?;
+        self.stage(
+            at_s,
+            Moment::Pull,
+            recovery_window_days,
+            declaration_activation_epochs,
+            limits,
+            entries,
+        )
+    }
+
+    fn stage(
+        &self,
+        sealed_at_s: i64,
+        moment: Moment,
+        recovery_window_days: i64,
+        declaration_activation_epochs: i64,
+        limits: &Limits,
+        entries: &[Value],
+    ) -> Result<Projection> {
         crate::parameters::validate_value("recovery_window_days", recovery_window_days)?;
         crate::parameters::validate_value(
             "declaration_activation_epochs",
@@ -424,10 +466,12 @@ impl Declarations {
                     superseded: window.competitors,
                 });
             }
-            if state
-                .pending
-                .as_ref()
-                .is_some_and(|pending| epoch_number >= pending.activation_height)
+            // WIST-1 §5.2 Sources of a pull: a pending head stays pending at every pull.
+            if moment == Moment::Epoch
+                && state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| epoch_number >= pending.activation_height)
             {
                 let pending = state.pending.take().unwrap();
                 state.current = pending.head.clone();
@@ -563,7 +607,7 @@ impl Declarations {
                     effects
                         .transitions
                         .push(transition(TransitionKind::FreshIdentityPending));
-                    if activation_height > epoch_number {
+                    if moment == Moment::Pull || activation_height > epoch_number {
                         state.pending = Some(Pending {
                             head: declaration,
                             activation_height,
@@ -651,6 +695,12 @@ impl Declarations {
             sealed_at_s,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moment {
+    Epoch,
+    Pull,
 }
 
 fn failure(detail: impl Into<String>) -> Error {

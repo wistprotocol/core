@@ -22,6 +22,8 @@ mod logbook;
 mod materialization;
 #[path = "conformance/parameters.rs"]
 mod parameters;
+#[path = "conformance/pull_state.rs"]
+mod pull_state;
 #[path = "conformance/recovery.rs"]
 mod recovery;
 #[path = "conformance/sealing.rs"]
