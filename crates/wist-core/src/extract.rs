@@ -503,8 +503,107 @@ fn renormalize_escapes(s: &str) -> Option<String> {
     Some(out)
 }
 
+const SUB_DELIMS: &[u8] = b"!$&'()*+,;=";
+
+fn unreserved_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"-._~".contains(&b)
+}
+
+fn uri_char(c: char, brackets: bool) -> bool {
+    c.is_ascii() && {
+        let b = c as u8;
+        unreserved_byte(b)
+            || SUB_DELIMS.contains(&b)
+            || b":/?#@%".contains(&b)
+            || (brackets && b"[]".contains(&b))
+    }
+}
+
+fn reg_name_char(c: char) -> bool {
+    !c.is_ascii() || unreserved_byte(c as u8) || SUB_DELIMS.contains(&(c as u8)) || c == '%'
+}
+
+fn host_span(candidate: &str) -> Result<Option<(usize, usize)>, ()> {
+    let bytes = candidate.as_bytes();
+    let scheme_end = bytes
+        .first()
+        .filter(|b| b.is_ascii_alphabetic())
+        .and_then(|_| {
+            let length = bytes
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || b"+.-".contains(b))
+                .count();
+            (bytes.get(length) == Some(&b':')).then_some(length + 1)
+        });
+    let start = match scheme_end {
+        Some(end) => end,
+        None => {
+            let first = candidate
+                .find(['/', '?', '#'])
+                .map_or(candidate, |end| &candidate[..end]);
+            if first.contains(':') {
+                return Err(());
+            }
+            0
+        }
+    };
+    if !candidate[start..].starts_with("//") {
+        return Ok(None);
+    }
+    let start = start + 2;
+    let end = candidate[start..]
+        .find(['/', '?', '#'])
+        .map_or(candidate.len(), |offset| start + offset);
+    let authority = &candidate[start..end];
+    if authority.contains('@') {
+        return Err(());
+    }
+    if authority.starts_with('[') {
+        return Ok(Some((
+            start,
+            authority.find(']').map_or(end, |close| start + close + 1),
+        )));
+    }
+    Ok(Some((
+        start,
+        authority.find(':').map_or(end, |colon| start + colon),
+    )))
+}
+
+fn broken_escape(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().any(|(index, b)| {
+        *b == b'%'
+            && !(bytes.get(index + 1).is_some_and(u8::is_ascii_hexdigit)
+                && bytes.get(index + 2).is_some_and(u8::is_ascii_hexdigit))
+    })
+}
+
+fn uri_form(candidate: &str) -> bool {
+    let Ok(span) = host_span(candidate) else {
+        return false;
+    };
+    let (host, outside) = match span {
+        None => ("", candidate.to_string()),
+        Some((start, end)) => (
+            &candidate[start..end],
+            format!("{}{}", &candidate[..start], &candidate[end..]),
+        ),
+    };
+    if !outside.chars().all(|c| uri_char(c, false))
+        || outside.matches('#').count() > 1
+        || broken_escape(&outside)
+    {
+        return false;
+    }
+    if host.starts_with('[') {
+        return host.ends_with(']') && host.chars().all(|c| uri_char(c, true));
+    }
+    host.chars().all(reg_name_char)
+}
+
 pub fn normalize_url(candidate: &str, base: &str) -> Option<String> {
-    if candidate.chars().any(|c| (c as u32) < 0x20) {
+    if candidate.chars().any(|c| (c as u32) < 0x20) || !uri_form(candidate) {
         return None;
     }
     let r = split_uri_ref(candidate);
@@ -722,7 +821,7 @@ mod tests {
         let arabic = "<a href=\"https://example.org/x?y=&#٦٥;z\">t</a>".as_bytes();
         assert_eq!(
             extract_links(arabic, BASE, "example.com").0,
-            vec!["https://example.org/x?y=&"]
+            Vec::<String>::new()
         );
     }
 }
