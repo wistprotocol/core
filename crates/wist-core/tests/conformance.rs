@@ -1592,9 +1592,12 @@ fn wist2_label_vectors() {
             Some(named) => serde_json::from_value(vector["declarations"][named].clone()).unwrap(),
             None => declaration.clone(),
         };
+        let envelope: serde_json::Value = match case["envelope_json"].as_str() {
+            Some(text) => serde_json::from_str(text).unwrap(),
+            None => case["envelope"].clone(),
+        };
         let result =
-            label::validate_label(&case["envelope"], &judged_under, url_cap, clock.0, clock.1)
-                .map(|_| ());
+            label::validate_label(&envelope, &judged_under, url_cap, clock.0, clock.1).map(|_| ());
         assert_eq!(
             wist_core::envelope::verify_envelope(&case["envelope"], "label", &author).is_ok(),
             case["author_signature"].as_bool().unwrap(),
@@ -1606,7 +1609,7 @@ fn wist2_label_vectors() {
             Ok(()) => {
                 assert!(case["code"].is_null(), "{name}");
                 assert_eq!(
-                    label::label_id(&case["envelope"]["label"]).unwrap(),
+                    label::label_id(&envelope["label"]).unwrap(),
                     case["label_id"],
                     "{name}"
                 );

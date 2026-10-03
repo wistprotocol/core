@@ -1,5 +1,10 @@
 use crate::objects::Sig;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+// WIST-1 §4: a number is the double it denotes, so `5.0` and `5e0` are the integer 5.
+fn integer_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<i64>, D::Error> {
+    crate::objects::safe_integer(deserializer).map(|value| Some(value as i64))
+}
 
 /// WIST-2 §3.3.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,7 +17,7 @@ pub struct Label {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::objects::present"
+        deserialize_with = "integer_value"
     )]
     pub value: Option<i64>,
     pub asserted_at: String,
