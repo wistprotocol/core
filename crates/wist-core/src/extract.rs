@@ -603,7 +603,7 @@ pub fn normalize_url(candidate: &str, base: &str) -> Option<String> {
         return None;
     }
     let (host_raw, port_part) = split_host_port(&authority);
-    let host = crate::host::canonical_host(&host_raw).ok()?;
+    let host = crate::host::canonical_host(&renormalize_escapes(&host_raw)?).ok()?;
     let port = match parse_port(port_part) {
         PortResult::Invalid => return None,
         PortResult::Absent => None,
