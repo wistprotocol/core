@@ -8,6 +8,8 @@ mod catalogs;
 mod collections;
 #[path = "conformance/declarations.rs"]
 mod declarations;
+#[path = "conformance/item_roots.rs"]
+mod item_roots;
 #[path = "conformance/items.rs"]
 mod items;
 #[path = "conformance/key_directory.rs"]
@@ -20,6 +22,8 @@ mod parameters;
 mod recovery;
 #[path = "conformance/snapshot_keys.rs"]
 mod snapshot_keys;
+#[path = "conformance/trees.rs"]
+mod trees;
 
 pub fn spec_dir() -> PathBuf {
     std::env::var_os("WIST_SPEC_DIR")

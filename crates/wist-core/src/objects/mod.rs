@@ -5,9 +5,11 @@ pub mod label;
 pub mod log_anchor;
 pub mod payload;
 pub mod publisher;
+pub mod publisher_item;
 pub mod registry_update;
 pub mod snapshot;
 pub mod status;
+pub mod tree_file;
 
 pub use catalog::{Catalog, CatalogEnvelope};
 pub use feed::{Feed, FeedEnvelope};
@@ -19,6 +21,7 @@ pub use label::{
 pub use log_anchor::{Anchor, GenesisKey, LogAnchorEnvelope, Predecessor};
 pub use payload::{Payload, PayloadContent, PayloadLinks, PayloadSummary};
 pub use publisher::{Collection, Match, Publisher, PublisherEnvelope, PublisherKey, ScopeEntry};
+pub use publisher_item::{InclusionProof, PublisherItem};
 pub use registry_update::{
     KeyAddDetails, KeyAlgorithm, KeyRemoveDetails, ParameterChangeDetails,
     PayloadWithdrawalDetails, RegistryAction, RegistryDetails, RegistryUpdate,
@@ -32,6 +35,7 @@ pub use snapshot::{
     SuffixListEntry, WithdrawalEntry,
 };
 pub use status::{PublisherState, Status, StatusRejection};
+pub use tree_file::{Bucket, InnerFile, TreeEntry, TreeFile};
 
 use serde::{Deserialize, Deserializer, Serialize};
 

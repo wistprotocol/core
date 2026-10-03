@@ -182,6 +182,19 @@ pub fn leaf(item: &Value) -> Result<[u8; 32], Error> {
     Ok(hasher.finalize().into())
 }
 
+pub fn root(items: &[Value]) -> Result<[u8; 32], Error> {
+    let mut keyed = items
+        .iter()
+        .map(|item| {
+            let leaf = leaf(item)?;
+            Ok((key(item["url"].as_str().expect("a url leaf() read")), leaf))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    keyed.sort_by_key(|(key, _)| *key);
+    let leaves: Vec<[u8; 32]> = keyed.into_iter().map(|(_, leaf)| leaf).collect();
+    Ok(crate::merkle::merkle_root(&leaves))
+}
+
 pub(crate) fn hash_formed(value: &Value, prefix: &str) -> bool {
     value
         .as_str()
