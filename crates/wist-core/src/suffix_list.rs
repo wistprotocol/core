@@ -37,10 +37,11 @@ impl SuffixList {
             .map_err(|e| Error::Host(format!("suffix list is not UTF-8: {e}")))?;
         let mut rules = Vec::new();
         for line in text.split('\n') {
-            let Some(rule) = line.split_whitespace().next() else {
-                continue;
-            };
-            if rule.starts_with("//") {
+            let rule = line
+                .split(['\t', '\x0b', '\x0c', '\r', ' '])
+                .next()
+                .unwrap_or_default();
+            if rule.is_empty() || rule.starts_with("//") {
                 continue;
             }
             let (exception, spelled) = match rule.strip_prefix('!') {
