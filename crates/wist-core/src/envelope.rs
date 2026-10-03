@@ -69,10 +69,10 @@ mod tests {
     fn sign_envelope_roundtrips_with_verify() {
         let sk = crate::crypto::SigningKey::from_seed(&[7u8; 32]);
         let inner = serde_json::json!({"b": 1, "a": "x"});
-        let env = sign_envelope(&inner, "delta", "k1", &sk).unwrap();
+        let env = sign_envelope(&inner, "catalog", "k1", &sk).unwrap();
         assert_eq!(env["sig"]["alg"], "Ed25519");
         assert_eq!(env["sig"]["key_id"], "k1");
-        verify_envelope(&env, "delta", &sk.public()).unwrap();
+        verify_envelope(&env, "catalog", &sk.public()).unwrap();
     }
 
     #[test]
@@ -99,7 +99,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "vectors/wist1/envelope.json"]
     fn sign_envelope_reproduces_wist1_vector() {
         let dir = spec_dir().join("vectors/wist1");
         let kp: serde_json::Value =
@@ -109,8 +108,8 @@ mod tests {
         let seed_bytes = crate::crypto::hex_decode(kp["seed_hex"].as_str().unwrap()).unwrap();
         let sk = crate::crypto::SigningKey::from_seed(&seed_bytes.try_into().unwrap());
         let signed = sign_envelope(
-            &env["delta"],
-            "delta",
+            &env["catalog"],
+            "catalog",
             env["sig"]["key_id"].as_str().unwrap(),
             &sk,
         )

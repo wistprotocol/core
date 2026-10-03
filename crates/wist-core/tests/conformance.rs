@@ -2,10 +2,14 @@ use std::path::PathBuf;
 
 #[path = "conformance/aggregator_keys.rs"]
 mod aggregator_keys;
+#[path = "conformance/catalogs.rs"]
+mod catalogs;
 #[path = "conformance/collections.rs"]
 mod collections;
 #[path = "conformance/declarations.rs"]
 mod declarations;
+#[path = "conformance/items.rs"]
+mod items;
 #[path = "conformance/key_directory.rs"]
 mod key_directory;
 #[path = "conformance/logbook.rs"]
@@ -84,11 +88,20 @@ fn spec_checkout_present() {
 }
 
 #[test]
-#[ignore = "vectors/wist1/envelope.json"]
+fn wist1_canonical_bytes() {
+    let env = read_json("vectors/wist1/envelope.json");
+    let expected = std::fs::read(spec_dir().join("vectors/wist1/catalog.canonical")).unwrap();
+    assert_eq!(
+        wist_core::jcs::canonicalize(&env["catalog"]).unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn wist1_signature_and_deterministic_resign() {
     let env = read_json("vectors/wist1/envelope.json");
     let keys = read_json("vectors/wist1/keypair.json");
-    let canonical = wist_core::jcs::canonicalize(&env["delta"]).unwrap();
+    let canonical = wist_core::jcs::canonicalize(&env["catalog"]).unwrap();
 
     let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
     wist_core::crypto::verify(&pk, &canonical, env["sig"]["value"].as_str().unwrap()).unwrap();
@@ -102,14 +115,184 @@ fn wist1_signature_and_deterministic_resign() {
 }
 
 #[test]
-#[ignore = "vectors/wist1/envelope.json"]
-fn wist1_delta_id() {
+fn wist1_catalog_id() {
     let env = read_json("vectors/wist1/envelope.json");
     let expected = std::fs::read_to_string(spec_dir().join("vectors/wist1/id.txt")).unwrap();
     assert_eq!(
-        wist_core::delta::delta_id(&env["delta"]).unwrap(),
+        wist_core::catalog::catalog_id(&env["catalog"]).unwrap(),
         expected.trim()
     );
+    assert_eq!(read_json("examples/catalog.json"), env);
+}
+
+#[test]
+fn verify_envelope_rejects_missing_and_tampered() {
+    let keys = read_json("vectors/wist1/keypair.json");
+    let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
+    let doc = read_json("examples/catalog.json");
+    wist_core::envelope::verify_envelope(&doc, "catalog", &pk).unwrap();
+
+    assert!(wist_core::envelope::verify_envelope(&doc, "delta", &pk).is_err());
+
+    let mut no_sig_value = doc.clone();
+    no_sig_value["sig"].as_object_mut().unwrap().remove("value");
+    assert!(wist_core::envelope::verify_envelope(&no_sig_value, "catalog", &pk).is_err());
+
+    let mut bad_sig = doc.clone();
+    let mut sig = bad_sig["sig"]["value"].as_str().unwrap().to_owned();
+    let flipped = if sig.ends_with('A') { 'B' } else { 'A' };
+    sig.replace_range(sig.len() - 1.., &flipped.to_string());
+    bad_sig["sig"]["value"] = sig.into();
+    assert!(wist_core::envelope::verify_envelope(&bad_sig, "catalog", &pk).is_err());
+
+    let mut tampered_field = doc.clone();
+    tampered_field["catalog"]["size"] = 2.into();
+    assert!(wist_core::envelope::verify_envelope(&tampered_field, "catalog", &pk).is_err());
+
+    let other = wist_core::crypto::SigningKey::from_seed(&[9u8; 32]).public();
+    assert!(wist_core::envelope::verify_envelope(&doc, "catalog", &other).is_err());
+}
+
+#[test]
+fn example_payload_reproduces_the_example_items_commitment() {
+    let payload = read_json("examples/payload.json");
+    let item = read_json("examples/item.json");
+    let page: wist_core::objects::PageItem = serde_json::from_value(item.clone()).unwrap();
+    let salt = payload["salt"].as_str().unwrap();
+    assert_eq!(
+        wist_core::item::commitment(salt, &payload["content"]).unwrap(),
+        page.payload.commitment
+    );
+    wist_core::item::judge_payload(&page, &payload, &wist_core::item::SizeCaps::suite()).unwrap();
+
+    let mut tampered = payload.clone();
+    let extract = tampered["content"]["extract"].as_str().unwrap().to_owned() + "x";
+    tampered["content"]["extract"] = extract.into();
+    assert_ne!(
+        wist_core::item::commitment(salt, &tampered["content"]).unwrap(),
+        page.payload.commitment
+    );
+    assert_eq!(
+        wist_core::item::judge_payload(&page, &tampered, &wist_core::item::SizeCaps::suite()),
+        Err("WIST1-E10")
+    );
+    assert!(wist_core::item::commitment("AAAA", &payload["content"]).is_err());
+}
+
+#[test]
+fn catalog_and_item_examples_parse_typed() {
+    use wist_core::objects as o;
+    let envelope: o::CatalogEnvelope =
+        serde_json::from_value(read_json("examples/catalog.json")).unwrap();
+    assert_eq!(envelope.catalog.size, 1);
+    let item: o::Item = serde_json::from_value(read_json("examples/item.json")).unwrap();
+    assert!(matches!(item, o::Item::Page(_)));
+    let _: o::Payload = serde_json::from_value(read_json("examples/payload.json")).unwrap();
+}
+
+#[test]
+fn typed_catalogs_and_items_deny_unknown_members() {
+    use wist_core::objects as o;
+    let mut catalog = read_json("examples/catalog.json");
+    catalog["catalog"]["items"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<o::CatalogEnvelope>(catalog).is_err());
+
+    let mut envelope = read_json("examples/catalog.json");
+    envelope["surprise"] = 1.into();
+    assert!(serde_json::from_value::<o::CatalogEnvelope>(envelope).is_err());
+
+    for (path, member) in [
+        ("", "change_type"),
+        ("/payload", "salt"),
+        ("/meta", "title"),
+    ] {
+        let mut item = read_json("examples/item.json");
+        item.pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(member.into(), 1.into());
+        assert!(serde_json::from_value::<o::Item>(item).is_err(), "{member}");
+    }
+
+    let mut removed = serde_json::json!({
+        "publisher": "example.com",
+        "url": "https://example.com/blog/post-1",
+        "observed_at": "2026-08-02T12:00:00Z",
+        "removed": true
+    });
+    assert!(matches!(
+        serde_json::from_value::<o::Item>(removed.clone()).unwrap(),
+        o::Item::Removed(_)
+    ));
+    removed["meta"] = serde_json::json!({"lang": "en"});
+    assert!(serde_json::from_value::<o::Item>(removed).is_err());
+}
+
+#[test]
+fn typed_catalogs_and_items_require_members_and_refuse_null_optionals() {
+    use wist_core::objects as o;
+    for member in ["size", "root", "tree", "generated_at"] {
+        let mut catalog = read_json("examples/catalog.json");
+        catalog["catalog"].as_object_mut().unwrap().remove(member);
+        assert!(
+            serde_json::from_value::<o::CatalogEnvelope>(catalog).is_err(),
+            "{member}"
+        );
+    }
+    for member in ["payload", "meta", "observed_at"] {
+        let mut item = read_json("examples/item.json");
+        item.as_object_mut().unwrap().remove(member);
+        assert!(serde_json::from_value::<o::Item>(item).is_err(), "{member}");
+    }
+    for member in ["topics", "license"] {
+        let mut item = read_json("examples/item.json");
+        item["meta"][member] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<o::Item>(item).is_err(), "{member}");
+        let mut item = read_json("examples/item.json");
+        item["meta"].as_object_mut().unwrap().remove(member);
+        assert!(serde_json::from_value::<o::Item>(item).is_ok(), "{member}");
+    }
+    let mut payload = read_json("examples/payload.json");
+    payload["content"]["summary"]["abstract"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<o::Payload>(payload).is_err());
+    for (removed, accepted) in [
+        (serde_json::json!(true), true),
+        (serde_json::json!(false), false),
+        (serde_json::Value::Null, false),
+    ] {
+        let item = serde_json::json!({
+            "publisher": "example.com",
+            "url": "https://example.com/blog/post-1",
+            "observed_at": "2026-08-02T12:00:00Z",
+            "removed": removed
+        });
+        assert_eq!(serde_json::from_value::<o::Item>(item).is_ok(), accepted);
+    }
+}
+
+#[test]
+fn typed_integers_are_read_by_their_numeric_value() {
+    use wist_core::objects as o;
+    for spelling in ["263", "263.0", "2.63e2"] {
+        let commitment: o::PayloadCommitment = serde_json::from_str(&format!(
+            "{{\"commitment\":\"hmac-sha256:{}\",\"alg\":\"HMAC-SHA256\",\"bytes\":{spelling}}}",
+            "0".repeat(64)
+        ))
+        .unwrap();
+        assert_eq!(commitment.bytes, 263);
+    }
+    for spelling in ["-1", "1.5", "9007199254740992", "1e400", "\"1\""] {
+        assert!(serde_json::from_str::<o::PayloadCommitment>(&format!(
+            "{{\"commitment\":\"hmac-sha256:{}\",\"alg\":\"HMAC-SHA256\",\"bytes\":{spelling}}}",
+            "0".repeat(64)
+        ))
+        .is_err());
+    }
+    let mut catalog = read_json("examples/catalog.json");
+    catalog["catalog"]["size"] = serde_json::json!(1.0);
+    let envelope: o::CatalogEnvelope = serde_json::from_value(catalog).unwrap();
+    assert_eq!(envelope.catalog.size, 1);
 }
 
 #[test]
@@ -117,6 +300,7 @@ fn example_envelopes_verify() {
     let keys = read_json("vectors/wist1/keypair.json");
     let pk = wist_core::crypto::PublicKey::from_b64u(keys["public_key"].as_str().unwrap()).unwrap();
     for (file, inner) in [
+        ("catalog.json", "catalog"),
         ("publisher.json", "publisher"),
         ("snapshot-manifest.json", "manifest"),
         ("snapshot-index.json", "index"),
@@ -477,12 +661,13 @@ fn string_list(v: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "vectors/wist1/keyset-at-height.json"]
 fn wist1_keyset_at_height_vectors() {
     use wist_core::keyset::{key_set_at, verifies_at, SealedDeclaration};
 
     let vector = read_json("vectors/wist1/keyset-at-height.json");
-    for case in vector["cases"].as_array().unwrap() {
+    let cases = vector["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 3);
+    for case in cases {
         let name = case["name"].as_str().unwrap();
         let declarations: Vec<SealedDeclaration> = case["declarations"]
             .as_array()
@@ -507,14 +692,14 @@ fn wist1_keyset_at_height_vectors() {
 
         let mut verifies = Vec::new();
         let mut rejected = Vec::new();
-        for delta in case["deltas"].as_array().unwrap() {
-            let delta_id = delta["delta_id"].as_str().unwrap().to_string();
-            let height = delta["height"].as_u64().unwrap();
-            let signer = delta["signer"].as_str().unwrap();
+        for catalog in case["catalogs"].as_array().unwrap() {
+            let catalog_id = catalog["catalog_id"].as_str().unwrap().to_string();
+            let height = catalog["height"].as_u64().unwrap();
+            let signer = catalog["signer"].as_str().unwrap();
             if verifies_at(&declarations, height, signer) {
-                verifies.push(delta_id);
+                verifies.push(catalog_id);
             } else {
-                rejected.push(delta_id);
+                rejected.push(catalog_id);
             }
         }
         assert_eq!(

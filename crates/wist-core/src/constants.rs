@@ -10,3 +10,5 @@ pub const REMOVAL_RETENTION_DAYS: u64 = 180;
 pub const CATALOG_FILE_READ_MAX_BYTES: u64 = 16_384;
 /// WIST-3 §3.3, in octets of an Entry's JCS serialization.
 pub const ENTRY_MAX_BYTES: u64 = 65_535;
+/// WIST-1 §7, in octets of `JCS(item)` beyond `url_cap_bytes`.
+pub const ITEM_BOUND_BYTES: u64 = 16_384;

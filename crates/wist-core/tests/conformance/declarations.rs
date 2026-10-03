@@ -64,7 +64,12 @@ fn timestamp(at: i128) -> String {
 }
 
 fn digest(value: &Value) -> String {
-    wist_core::delta::delta_id(value).unwrap()
+    use sha2::Digest;
+    let canonical = wist_core::jcs::canonicalize(value).unwrap();
+    format!(
+        "sha256:{}",
+        wist_core::crypto::hex_encode(&sha2::Sha256::digest(canonical))
+    )
 }
 
 fn summary(domain: &Domain, windows: u64) -> Value {
@@ -526,29 +531,13 @@ fn declaration_field_failures_reject_the_declaration_and_preserve_the_prefix() {
 #[test]
 fn a_catalog_instant_is_bound_by_the_whole_second_key_window() {
     let vector = read_json("vectors/wist1/declaration-fields.json");
-    for case in vector["key_time_cases"].as_array().unwrap() {
+    let cases = vector["key_time_cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 16);
+    for case in cases {
         let declaration = wist_core::declaration::publisher_of(&case["declaration"]).unwrap();
-        let envelope = &case["envelope"];
-        let catalog = &envelope["catalog"];
-        let generated_at = catalog["generated_at"].as_str().unwrap();
-        let verifies = |key: &wist_core::objects::PublisherKey| {
-            wist_core::crypto::PublicKey::from_b64u(&key.x).is_ok_and(|public| {
-                wist_core::envelope::verify_envelope(envelope, "catalog", &public).is_ok()
-            })
-        };
-        let outcome = if wist_core::timestamp::log_seconds(generated_at).is_err() {
-            "WIST1-E14"
-        } else {
-            match wist_core::collection::check_binding(
-                &declaration,
-                catalog["collection"].as_str().unwrap(),
-                envelope["sig"]["key_id"].as_str().unwrap(),
-                generated_at,
-                verifies,
-            ) {
-                Ok(()) => "key_bound_satisfied",
-                Err(code) => code,
-            }
+        let outcome = match wist_core::catalog::authenticate(&case["envelope"], &declaration) {
+            Ok(_) => "key_bound_satisfied",
+            Err(code) => code,
         };
         assert_eq!(outcome, case["expected"], "{}", case["name"]);
     }
@@ -557,7 +546,9 @@ fn a_catalog_instant_is_bound_by_the_whole_second_key_window() {
 #[test]
 fn publisher_instants_relate_as_exact_civil_clock_seconds() {
     let vector = read_json("vectors/wist1/declaration-fields.json");
-    for case in vector["elapsed_cases"].as_array().unwrap() {
+    let elapsed_cases = vector["elapsed_cases"].as_array().unwrap();
+    assert_eq!(elapsed_cases.len(), 5);
+    for case in elapsed_cases {
         let (start, start_fraction) =
             wist_core::publisher_time::seconds(case["start"].as_str().unwrap()).unwrap();
         let (end, end_fraction) =
@@ -572,36 +563,30 @@ fn publisher_instants_relate_as_exact_civil_clock_seconds() {
     let allowance = wist_core::parameters::spec("clock_skew_seconds")
         .and_then(|parameter| parameter.default)
         .unwrap();
-    for case in vector["relation_cases"].as_array().unwrap() {
+    let relation_cases = vector["relation_cases"].as_array().unwrap();
+    assert_eq!(relation_cases.len(), 7);
+    for case in relation_cases {
         let generated_at = case["envelope"]["catalog"]["generated_at"]
             .as_str()
             .unwrap();
-        let satisfied = match case["kind"].as_str().unwrap() {
-            "clock" => {
-                let generated_s = wist_core::timestamp::log_seconds(generated_at).unwrap();
-                wist_core::publisher_time::at_or_after(
-                    case["reference"].as_str().unwrap(),
-                    i128::from(generated_s - allowance),
-                )
-                .unwrap()
-            }
+        let reference = case["reference"].as_str().unwrap();
+        let relation = match case["kind"].as_str().unwrap() {
+            "clock" => wist_core::catalog::check_clock(generated_at, reference, allowance),
             "item" => {
-                assert_eq!(case["reference"], generated_at, "{}", case["name"]);
-                wist_core::publisher_time::compare(
+                assert_eq!(reference, generated_at, "{}", case["name"]);
+                wist_core::item::check_observed_at(
                     case["item"]["observed_at"].as_str().unwrap(),
                     generated_at,
                 )
-                .unwrap()
-                    != std::cmp::Ordering::Greater
             }
             kind => panic!("{kind}"),
         };
-        let outcome = if satisfied {
-            "relation_satisfied"
-        } else {
-            "WIST1-E06"
-        };
-        assert_eq!(outcome, case["expected"], "{}", case["name"]);
+        assert_eq!(
+            relation.map_or_else(|code| code, |()| "relation_satisfied"),
+            case["expected"],
+            "{}",
+            case["name"]
+        );
     }
 }
 

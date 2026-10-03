@@ -1,5 +1,6 @@
-pub mod delta;
+pub mod catalog;
 pub mod feed;
+pub mod item;
 pub mod label;
 pub mod log_anchor;
 pub mod payload;
@@ -8,8 +9,9 @@ pub mod registry_update;
 pub mod snapshot;
 pub mod status;
 
-pub use delta::{ChangeType, Delta, DeltaEnvelope, DeltaMeta, DeltaPayloadCommitment};
+pub use catalog::{Catalog, CatalogEnvelope};
 pub use feed::{Feed, FeedEnvelope};
+pub use item::{Item, ItemMeta, PageItem, PayloadCommitment, RemovedItem};
 pub use label::{
     Dispute, DisputeEnvelope, Label, LabelDefinition, LabelDefinitionEnvelope, LabelEnvelope,
     Treatment,
@@ -47,4 +49,23 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+pub(crate) fn safe_integer<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = f64::deserialize(deserializer)?;
+    if crate::item::safe_integer_value(value) {
+        Ok(value as u64)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a nonnegative integer of the safe range",
+        ))
+    }
 }

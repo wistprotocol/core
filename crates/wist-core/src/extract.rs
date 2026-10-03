@@ -652,7 +652,7 @@ fn host_of_normalized(url: &str) -> &str {
     &rest[..end]
 }
 
-fn external(url: &str, publisher_domain: &str) -> bool {
+pub(crate) fn external(url: &str, publisher_domain: &str) -> bool {
     let host = host_of_normalized(url);
     host != publisher_domain && !host.ends_with(&format!(".{publisher_domain}"))
 }

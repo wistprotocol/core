@@ -1,6 +1,5 @@
 use crate::collection::Limits;
 use crate::crypto::PublicKey;
-use crate::delta_fields;
 use crate::envelope::{canonical_b64u, verify_envelope, version_spelled};
 use crate::objects::publisher::{key_set_fingerprint, thumbprint, NUMERIC_DATE_MAX};
 use crate::objects::{Publisher, PublisherEnvelope, PublisherKey};
@@ -313,9 +312,6 @@ pub fn verify_signed(
     kind: &str,
     observed_at: Option<&str>,
 ) -> Result<(), &'static str> {
-    if kind == "delta" {
-        delta_fields::validate_delta_version(doc)?;
-    }
     if observed_at.is_some_and(|value| !publisher_time::valid(value)) {
         return Err("WIST1-E14");
     }

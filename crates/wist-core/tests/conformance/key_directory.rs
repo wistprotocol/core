@@ -2,7 +2,7 @@
 use super::read_json;
 use serde_json::{json, Value};
 use wist_core::collection::Limits;
-use wist_core::declaration::{evaluate, evaluate_initial, verify_signed, Decision};
+use wist_core::declaration::{evaluate, evaluate_initial, publisher_of, Decision};
 use wist_core::declarations::{Declarations, Position};
 use wist_core::objects::publisher::{key_set_fingerprint, thumbprint};
 use wist_core::objects::PublisherKey;
@@ -45,16 +45,10 @@ fn declaration_outcome(stored: Option<&Value>, fetched: &Value) -> String {
     result.unwrap_or_else(|(code, _)| code).to_string()
 }
 
-fn delta_check(declaration: &Value, envelope: &Value) -> String {
-    let keys = keys_of(declaration);
-    let observed_at = envelope["delta"]["observed_at"].as_str().unwrap();
-    match verify_signed(
-        &keys.iter().collect::<Vec<_>>(),
-        envelope,
-        "delta",
-        Some(observed_at),
-    ) {
-        Ok(()) => "accepted".to_string(),
+fn catalog_check(declaration: &Value, envelope: &Value) -> String {
+    let declaration = publisher_of(declaration).unwrap();
+    match wist_core::catalog::authenticate(envelope, &declaration) {
+        Ok(_) => "accepted".to_string(),
         Err(code) => code.to_string(),
     }
 }
@@ -127,10 +121,11 @@ fn thumbprints_and_fingerprints_match_their_known_answers() {
 }
 
 #[test]
-#[ignore = "vectors/wist1/key-directory.json"]
 fn entry_field_rules_and_key_windows_hold() {
     let vector = vector();
-    for case in vector["entry_cases"].as_array().unwrap() {
+    let entry_cases = vector["entry_cases"].as_array().unwrap();
+    assert_eq!(entry_cases.len(), 12);
+    for case in entry_cases {
         assert_eq!(
             declaration_outcome(None, &case["envelope"]),
             case["expected"].as_str().unwrap(),
@@ -138,9 +133,11 @@ fn entry_field_rules_and_key_windows_hold() {
             case["name"]
         );
     }
-    for case in vector["window_cases"].as_array().unwrap() {
+    let window_cases = vector["window_cases"].as_array().unwrap();
+    assert_eq!(window_cases.len(), 11);
+    for case in window_cases {
         assert_eq!(
-            delta_check(&case["declaration"], &case["envelope"]),
+            catalog_check(&case["declaration"], &case["envelope"]),
             case["expected"].as_str().unwrap(),
             "{}",
             case["name"]
@@ -162,10 +159,10 @@ fn the_rotation_commitment_binds_an_ordinary_rotation() {
 }
 
 #[test]
-#[ignore = "vectors/wist1/key-directory.json"]
 fn histories_activate_reverse_and_resume_as_the_vector_records() {
     let vector = vector();
     let days = vector["recovery_window_days"].as_i64().unwrap();
+    let (mut rejections, mut probes) = (0, 0);
     for (name, history) in vector["histories"].as_object().unwrap() {
         let prefix = replay(&vector, history);
         for row in history["expected_states"].as_array().unwrap() {
@@ -183,6 +180,7 @@ fn histories_activate_reverse_and_resume_as_the_vector_records() {
             if case["history"] != *name {
                 continue;
             }
+            rejections += 1;
             let height = case["prefix_height"].as_u64().unwrap() as usize;
             let state = &prefix[height];
             let entries = vec![json!({"type": "publisher_declaration", "body": case["candidate"]})];
@@ -221,20 +219,22 @@ fn histories_activate_reverse_and_resume_as_the_vector_records() {
                 ),
             }
         }
-        for case in vector["delta_probes"].as_array().unwrap() {
+        for case in vector["catalog_probes"].as_array().unwrap() {
             if case["history"] != *name {
                 continue;
             }
+            probes += 1;
             let height = case["prefix_height"].as_u64().unwrap() as usize;
             let current = prefix[height].domains()["example.com"].current().envelope();
             assert_eq!(
-                delta_check(current, &case["envelope"]),
+                catalog_check(current, &case["envelope"]),
                 case["expected"].as_str().unwrap(),
                 "{}",
                 case["name"]
             );
         }
     }
+    assert_eq!((rejections, probes), (6, 9));
 }
 
 #[test]

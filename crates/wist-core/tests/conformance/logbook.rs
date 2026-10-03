@@ -736,7 +736,7 @@ fn each_log_of_the_deduplication_vector_seals_the_shared_delta_under_its_own_key
         let sealed = epochs.iter().any(|epoch| {
             epoch["entries"].as_array().unwrap().iter().any(|entry| {
                 entry["type"] == "publisher_delta"
-                    && wist_core::delta::delta_id(&entry["body"]["delta"]).unwrap() == delta_id
+                    && sha256_jcs(&entry["body"]["delta"]) == delta_id
             })
         });
         assert!(sealed, "{}: the shared Delta is not sealed", log["log_id"]);
@@ -748,6 +748,15 @@ fn each_log_of_the_deduplication_vector_seals_the_shared_delta_under_its_own_key
         .map(|source| source.as_str().unwrap())
         .collect();
     assert_eq!(sources.len(), vector["logs"].as_array().unwrap().len());
+}
+
+fn sha256_jcs(value: &Value) -> String {
+    use sha2::Digest;
+    let canonical = wist_core::jcs::canonicalize(value).unwrap();
+    format!(
+        "sha256:{}",
+        wist_core::crypto::hex_encode(&sha2::Sha256::digest(canonical))
+    )
 }
 
 fn collect_histories(value: &Value, found: &mut Vec<Vec<Value>>) {
