@@ -1564,6 +1564,27 @@ fn label_outcome(result: &Result<(), wist_core::label::Rejection>) -> &'static s
 }
 
 #[test]
+fn wist3_snapshot_index_manifests_fail_their_schema_where_the_vector_says() {
+    let vector = read_json("vectors/wist3/snapshot-index.json");
+    let mut refused = 0;
+    for case in vector["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let chosen = case["index"]["index"]["snapshots"][0]["manifest_url"]
+            .as_str()
+            .unwrap();
+        let read = serde_json::from_value::<wist_core::objects::SnapshotManifestEnvelope>(
+            case["manifests"][chosen].clone(),
+        );
+        let fails_schema = case["response"]
+            .as_str()
+            .is_some_and(|response| response.starts_with("re-fetch the Snapshot"));
+        assert_eq!(read.is_err(), fails_schema, "{name}");
+        refused += usize::from(fails_schema);
+    }
+    assert_eq!(refused, 2);
+}
+
+#[test]
 fn wist2_label_vectors() {
     use wist_core::label::{self, SealedLabel};
     let vector = read_json("vectors/wist2/labels.json");

@@ -51,7 +51,11 @@ pub struct SnapshotFile {
     pub sha256: String,
     pub bytes: u64,
     pub tier: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::objects::present"
+    )]
     pub shard: Option<u64>,
 }
 
@@ -65,7 +69,11 @@ pub struct SnapshotManifest {
     pub root_hash: String,
     pub content_digest: String,
     pub state: SnapshotStateFile,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::objects::present"
+    )]
     pub shards: Option<SnapshotShards>,
     pub files: Vec<SnapshotFile>,
 }
