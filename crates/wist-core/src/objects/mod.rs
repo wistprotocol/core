@@ -30,13 +30,16 @@ pub use registry_update::{
     RegistryUpdateEnvelope, SuffixListDetails,
 };
 pub use snapshot::{
-    AggregatorKeyEntry, DeclarationEntry, DisputeEntry, LabelEntry, ParameterEntry,
-    PendingDeclarationEntry, RecordEntry, RecoveryWindowEntry, SnapshotFile, SnapshotIndex,
-    SnapshotIndexEntry, SnapshotIndexEnvelope, SnapshotManifest, SnapshotManifestEnvelope,
-    SnapshotShards, SnapshotState, SnapshotStateEnvelope, SnapshotStateFile, StateEntry,
-    SuffixListEntry, WithdrawalEntry,
+    AggregatorKeyEntry, CollectionEntry, DeclarationEntry, DisputeEntry, LabelEntry,
+    ParameterEntry, PendingDeclarationEntry, RecordEntry, RecoveryWindowEntry, RemovalEntry,
+    SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope, SnapshotManifest,
+    SnapshotManifestEnvelope, SnapshotShards, SnapshotState, SnapshotStateEnvelope,
+    SnapshotStateFile, StateEntry, SuffixListEntry, WithdrawalEntry,
 };
-pub use status::{PublisherState, Status, StatusRejection};
+pub use status::{
+    CollectionStatus, Deferral, PublisherState, RejectionCondition, Status, StatusRejection,
+    WaitingStatus,
+};
 pub use tree_file::{Bucket, InnerFile, TreeEntry, TreeFile};
 
 use serde::{Deserialize, Deserializer, Serialize};

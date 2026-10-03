@@ -18,6 +18,8 @@ mod items;
 mod key_directory;
 #[path = "conformance/logbook.rs"]
 mod logbook;
+#[path = "conformance/materialization.rs"]
+mod materialization;
 #[path = "conformance/parameters.rs"]
 mod parameters;
 #[path = "conformance/recovery.rs"]
@@ -140,7 +142,7 @@ fn verify_envelope_rejects_missing_and_tampered() {
     let doc = read_json("examples/catalog.json");
     wist_core::envelope::verify_envelope(&doc, "catalog", &pk).unwrap();
 
-    assert!(wist_core::envelope::verify_envelope(&doc, "delta", &pk).is_err());
+    assert!(wist_core::envelope::verify_envelope(&doc, "item", &pk).is_err());
 
     let mut no_sig_value = doc.clone();
     no_sig_value["sig"].as_object_mut().unwrap().remove("value");
@@ -417,29 +419,201 @@ fn an_epochs_entries_must_fill_the_leaf_range_its_checkpoint_states() {
     assert_eq!(err.code(), Some("WIST3-E03"));
 }
 
-#[test]
-#[ignore = "vectors/wist3/snapshot-records.json"]
-fn wist3_snapshot_records_digest() {
-    let v = read_json("vectors/wist3/snapshot-records.json");
-    let records: Vec<_> = v["records"].as_array().unwrap().clone();
-    for r in &records {
-        wist_core::snapshot::check_record_shape(r).unwrap();
+fn record_of(entry: &wist_core::objects::RecordEntry) -> wist_core::sealing::Record {
+    wist_core::sealing::Record {
+        item: entry.item.clone(),
+        item_id: wist_core::item::item_id(&entry.item).unwrap(),
+        collection: entry.collection.clone(),
+        catalog: entry.catalog_id.clone(),
+        generated_at: entry.generated_at.clone(),
     }
-    let digest = wist_core::snapshot::content_digest(&records).unwrap();
-    assert_eq!(digest, v["content_digest"].as_str().unwrap());
+}
 
+#[test]
+fn wist3_snapshot_records_digest() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::num::NonZeroU64;
+    use wist_core::materialization::{self, ContentTuple, LinkRow};
+    use wist_core::objects::{PageItem, Payload, PublisherEnvelope, StateEntry};
+    use wist_core::snapshot::{content_digest, shard_of, shard_path, TIER_FILES};
+    let v = read_json("vectors/wist3/snapshot-records.json");
+    let records: Vec<ContentTuple> = serde_json::from_value(v["records"].clone()).unwrap();
+    let fields: BTreeSet<String> = serde_json::to_value(&records[0])
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    let stated: BTreeSet<String> = serde_json::from_value(v["record_fields"].clone()).unwrap();
+    assert_eq!(fields, stated);
+    let digest = content_digest(&records).unwrap();
+    assert_eq!(digest, v["content_digest"].as_str().unwrap());
     let mut reversed = records.clone();
     reversed.reverse();
-    assert_eq!(
-        wist_core::snapshot::content_digest(&reversed).unwrap(),
-        digest
-    );
-
+    assert_eq!(content_digest(&reversed).unwrap(), digest);
+    for (index, record) in records.iter().enumerate() {
+        for field in ["url", "publisher", "item_id", "observed_at", "attested_at"] {
+            let mut moved = records.clone();
+            let mut tuple = serde_json::to_value(&moved[index]).unwrap();
+            tuple[field] = format!("{}x", tuple[field].as_str().unwrap()).into();
+            moved[index] = serde_json::from_value(tuple).unwrap();
+            assert_ne!(
+                content_digest(&moved).unwrap(),
+                digest,
+                "{} {field}",
+                record.url
+            );
+        }
+    }
     let manifest = read_json("examples/snapshot-manifest.json");
     assert_eq!(
         manifest["manifest"]["content_digest"].as_str().unwrap(),
         digest
     );
+
+    let tuples: Vec<StateEntry> = serde_json::from_value(v["tuples"].clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&tuples).unwrap(),
+        v["tuples"],
+        "the tuples round-trip"
+    );
+    let mut declarations: BTreeMap<String, PublisherEnvelope> = BTreeMap::new();
+    declarations.insert(
+        "example.com".into(),
+        serde_json::from_value(read_json("examples/publisher.json")).unwrap(),
+    );
+    for (domain, declaration) in v["declarations"].as_object().unwrap() {
+        declarations.insert(
+            domain.clone(),
+            serde_json::from_value(declaration.clone()).unwrap(),
+        );
+    }
+    let collections: BTreeMap<(String, String), &serde_json::Value> = tuples
+        .iter()
+        .filter_map(|tuple| match tuple {
+            StateEntry::Collection(entry) => Some((
+                (entry.publisher.clone(), entry.collection.clone()),
+                &entry.envelope,
+            )),
+            _ => None,
+        })
+        .collect();
+    let mut derived = Vec::new();
+    for tuple in &tuples {
+        let StateEntry::Record(entry) = tuple else {
+            continue;
+        };
+        let envelope = collections[&(entry.publisher.clone(), entry.collection.clone())];
+        let catalog = &envelope["catalog"];
+        assert_eq!(
+            wist_core::catalog::catalog_id(catalog).unwrap(),
+            entry.catalog_id,
+            "{}",
+            entry.url
+        );
+        assert_eq!(catalog["generated_at"], entry.generated_at.as_str());
+        assert_eq!(catalog["publisher"], entry.publisher.as_str());
+        wist_core::catalog::authenticate(envelope, &declarations[&entry.publisher].publisher)
+            .unwrap_or_else(|code| panic!("{}: {code}", entry.url));
+        let root = wist_core::item::root(std::slice::from_ref(&entry.item)).unwrap();
+        assert_eq!(
+            catalog["root"],
+            format!("sha256:{}", wist_core::crypto::hex_encode(&root))
+        );
+        derived.push(ContentTuple::of(&entry.publisher, &entry.url, &record_of(entry)).unwrap());
+    }
+    assert_eq!(derived, records);
+    let held = wist_core::sealing::Records::from_state(&tuples).unwrap();
+    let materialized = materialization::materialized(
+        held.records(),
+        |host| declarations.contains_key(host),
+        |_| false,
+    )
+    .unwrap();
+    assert_eq!(materialized, records);
+    let example: Vec<serde_json::Value> = read_json("examples/snapshot-state.json")["state"]
+        ["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tuple| {
+            matches!(tuple[0].as_str(), Some("collection" | "record")) && tuple[1] == "example.com"
+        })
+        .cloned()
+        .collect();
+    let carried: Vec<serde_json::Value> = v["tuples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tuple| tuple[1] == "example.com")
+        .cloned()
+        .collect();
+    assert_eq!(carried, example);
+
+    let payloads = v["payloads"].as_object().unwrap();
+    assert_eq!(payloads.len(), records.len());
+    let mut links = Vec::new();
+    for (publisher, url, record) in held.records() {
+        let page: PageItem = serde_json::from_value(record.item.clone()).unwrap();
+        let payload = &payloads[&record.item_id];
+        assert_eq!(
+            wist_core::item::judge_payload(&page, payload, &wist_core::item::SizeCaps::suite()),
+            Ok(()),
+            "{publisher} {url}"
+        );
+        let payload: Payload = serde_json::from_value(payload.clone()).unwrap();
+        links.extend(materialization::links(url, &payload));
+    }
+    let expected_links: Vec<LinkRow> = serde_json::from_value(v["links"].clone()).unwrap();
+    assert_eq!(links, expected_links);
+
+    let sharded = &v["sharded"];
+    let count = NonZeroU64::new(sharded["count"].as_u64().unwrap()).unwrap();
+    for (domain, shard) in sharded["shard_of"].as_object().unwrap() {
+        assert_eq!(shard_of(domain, count), shard.as_u64().unwrap(), "{domain}");
+    }
+    let digests: Vec<String> = (0..count.get())
+        .map(|shard| {
+            let held: Vec<ContentTuple> = records
+                .iter()
+                .filter(|record| shard_of(&record.publisher, count) == shard)
+                .cloned()
+                .collect();
+            content_digest(&held).unwrap()
+        })
+        .collect();
+    assert_eq!(serde_json::to_value(&digests).unwrap(), sharded["digests"]);
+    assert!(digests.contains(&content_digest(&[]).unwrap()));
+    let files: Vec<serde_json::Value> = (0..count.get())
+        .flat_map(|shard| {
+            TIER_FILES.iter().map(move |(file, tier)| {
+                serde_json::json!({"path": shard_path(shard, file), "tier": tier, "shard": shard})
+            })
+        })
+        .collect();
+    assert_eq!(serde_json::Value::from(files), sharded["files"]);
+    for (rows, keyed_by) in [
+        ("label_rows", "labeler"),
+        ("labeler_rows", "labeler"),
+        ("dispute_rows", "disputant"),
+    ] {
+        for row in sharded[rows].as_array().unwrap() {
+            assert_eq!(
+                shard_of(row[keyed_by].as_str().unwrap(), count),
+                row["shard"].as_u64().unwrap(),
+                "{rows}: {row}"
+            );
+        }
+    }
+    assert!(sharded["label_rows"].as_array().unwrap().iter().any(|row| {
+        let subject = wist_core::label::subject_host(row["subject"].as_str().unwrap());
+        let publisher = declarations
+            .keys()
+            .find(|domain| subject == domain.as_str())
+            .unwrap();
+        shard_of(publisher, count) != row["shard"].as_u64().unwrap()
+    }));
 }
 
 #[test]
@@ -456,7 +630,6 @@ fn state_digest_matches_manifest() {
 }
 
 #[test]
-#[ignore = "examples/snapshot-state.json"]
 fn every_example_parses_typed() {
     use wist_core::objects as o;
     fn p<T: serde::de::DeserializeOwned>(file: &str) -> T {
@@ -1384,7 +1557,6 @@ fn label_outcome(result: &Result<(), wist_core::label::Rejection>) -> &'static s
 }
 
 #[test]
-#[ignore = "vectors/wist2/labels.json"]
 fn wist2_label_vectors() {
     use wist_core::label::{self, SealedLabel};
     let vector = read_json("vectors/wist2/labels.json");
@@ -1406,12 +1578,24 @@ fn wist2_label_vectors() {
         .map(|line| line[3..].split('`').next().unwrap())
         .collect();
     assert_eq!(terms, label::WIST_TERMS);
+    let author =
+        wist_core::crypto::PublicKey::from_b64u(declaration.publisher.keys[0].x.as_str()).unwrap();
     let mut outcomes = std::collections::BTreeSet::new();
     for case in vector["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
+        let judged_under: wist_core::objects::PublisherEnvelope = match case["declaration"].as_str()
+        {
+            Some(named) => serde_json::from_value(vector["declarations"][named].clone()).unwrap(),
+            None => declaration.clone(),
+        };
         let result =
-            label::validate_label(&case["envelope"], &declaration, url_cap, clock.0, clock.1)
+            label::validate_label(&case["envelope"], &judged_under, url_cap, clock.0, clock.1)
                 .map(|_| ());
+        assert_eq!(
+            wist_core::envelope::verify_envelope(&case["envelope"], "label", &author).is_ok(),
+            case["author_signature"].as_bool().unwrap(),
+            "{name}: author_signature"
+        );
         let got = label_outcome(&result);
         assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
         match result {
@@ -1485,7 +1669,7 @@ fn wist2_label_vectors() {
     assert!(dropped >= 2);
     for case in vector["binding_cases"].as_array().unwrap() {
         assert_eq!(
-            label::binding_applies(case["delta"].as_str(), case["record_anchor"].as_str()),
+            label::binding_applies(case["delta"].as_str(), case["record_item"].as_str()),
             case["applies"].as_bool().unwrap(),
             "{}",
             case["name"]
@@ -1724,16 +1908,20 @@ fn wist3_label_table_vectors() {
 }
 
 #[test]
-#[ignore = "vectors/wist3/materialization-preference.json"]
 fn wist3_materialization_preference_vectors() {
     let vector = read_json("vectors/wist3/materialization-preference.json");
     for case in vector["cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
-        let candidates: Vec<&str> = case["candidates"]
+        let candidates: Vec<(&str, bool)> = case["records"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|c| c.as_str().unwrap())
+            .map(|r| {
+                (
+                    r["publisher"].as_str().unwrap(),
+                    r["withdrawn"].as_bool().unwrap(),
+                )
+            })
             .collect();
         let materialized = wist_core::materialization::preferred(
             case["host"].as_str().unwrap(),

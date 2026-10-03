@@ -2,7 +2,9 @@
 use crate::crypto::PublicKey;
 use crate::error::Error;
 use crate::item::Kind;
-use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope, WithdrawalEntry};
+use crate::objects::{
+    RegistryAction, RegistryDetails, RegistryUpdateEnvelope, StateEntry, WithdrawalEntry,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -29,6 +31,33 @@ impl SealedItems {
             resumed: true,
             items: BTreeMap::new(),
         }
+    }
+
+    /// WIST-4 §5.1: the `record`, `removal` and `withdrawal` tuples show their Items sealed at
+    /// or below the Snapshot's Epoch.
+    pub fn from_state(epoch_number: u64, entries: &[StateEntry]) -> Result<Self, Error> {
+        let mut sealed = Self::resumed();
+        for entry in entries {
+            match entry {
+                StateEntry::Record(entry) => {
+                    let item_id = crate::item::item_id(&entry.item)?;
+                    sealed.seal(&item_id, &entry.publisher, Kind::Page, epoch_number);
+                }
+                StateEntry::Removal(entry) => {
+                    sealed.seal(
+                        &entry.item_id,
+                        &entry.publisher,
+                        Kind::Removed,
+                        epoch_number,
+                    );
+                }
+                StateEntry::Withdrawal(entry) => {
+                    sealed.seal(&entry.item_id, &entry.publisher, Kind::Page, epoch_number);
+                }
+                _ => {}
+            }
+        }
+        Ok(sealed)
     }
 
     pub fn seal(&mut self, item_id: &str, publisher: &str, kind: Kind, height: u64) {
@@ -85,6 +114,22 @@ impl WithdrawalReplay {
         Self::default()
     }
 
+    pub fn from_state(entries: &[StateEntry]) -> Result<Self, Error> {
+        let mut replay = Self::new();
+        for entry in entries {
+            if let StateEntry::Withdrawal(entry) = entry {
+                if replay.withdrawn.contains_key(&entry.item_id) {
+                    return Err(Error::Snapshot(format!(
+                        "two withdrawal tuples of {}",
+                        entry.item_id
+                    )));
+                }
+                replay.adopt(&entry.item_id, &entry.publisher, entry.sealing_height);
+            }
+        }
+        Ok(replay)
+    }
+
     pub fn adopt(&mut self, item_id: &str, publisher: &str, height: u64) {
         self.withdrawn
             .entry(item_id.to_string())
@@ -104,7 +149,7 @@ impl WithdrawalReplay {
         self.withdrawn
             .iter()
             .map(|(item_id, (height, publisher))| WithdrawalEntry {
-                delta_id: item_id.clone(),
+                item_id: item_id.clone(),
                 publisher: publisher.clone(),
                 sealing_height: *height,
             })

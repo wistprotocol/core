@@ -6,8 +6,9 @@ use crate::declaration::publisher_of;
 use crate::declarations::Declarations;
 use crate::error::Error;
 use crate::item::{self, Kind, SizeCaps};
+use crate::materialization::{self, ContentTuple};
 use crate::narrowing::stays;
-use crate::objects::{Catalog, Publisher};
+use crate::objects::{Catalog, CollectionEntry, Publisher, RecordEntry, RemovalEntry, StateEntry};
 use crate::suffix_list::{check_epoch_capacity, EpochCaps, SuffixList};
 use crate::timestamp::{instant, log_seconds};
 use crate::withdrawal::{self, SealedItems, WithdrawalReplay};
@@ -181,7 +182,7 @@ pub struct LatestCatalog {
     pub envelope: Value,
     pub catalog_id: String,
     pub sealing_height: u64,
-    pub base: bool,
+    pub base: Option<bool>,
 }
 
 impl LatestCatalog {
@@ -212,13 +213,126 @@ pub struct Removal {
     pub generated_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UrlState<'a> {
+    Record(&'a Record),
+    Removed(&'a Removal),
+}
+
+impl<'a> UrlState<'a> {
+    pub fn item_id(&self) -> &'a str {
+        match self {
+            UrlState::Record(record) => &record.item_id,
+            UrlState::Removed(removal) => &removal.item_id,
+        }
+    }
+
+    pub fn catalog(&self) -> &'a str {
+        match self {
+            UrlState::Record(record) => &record.catalog,
+            UrlState::Removed(removal) => &removal.catalog,
+        }
+    }
+
+    pub fn generated_at(&self) -> &'a str {
+        match self {
+            UrlState::Record(record) => &record.generated_at,
+            UrlState::Removed(removal) => &removal.generated_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Records {
     records: BTreeMap<(String, String), Record>,
     removals: BTreeMap<(String, String), Removal>,
 }
 
+fn state_error(message: String) -> Error {
+    Error::Snapshot(message)
+}
+
 impl Records {
+    pub fn from_state(entries: &[StateEntry]) -> Result<Self, Error> {
+        let mut records = Records::default();
+        for entry in entries {
+            match entry {
+                StateEntry::Record(entry) => {
+                    if entry.item["url"] != entry.url.as_str()
+                        || item::kind(&entry.item) != Kind::Page
+                    {
+                        return Err(state_error(format!(
+                            "the record tuple of {} {} does not carry an Item of kind page of its URL",
+                            entry.publisher, entry.url
+                        )));
+                    }
+                    let record = Record {
+                        item: entry.item.clone(),
+                        item_id: item::item_id(&entry.item)?,
+                        collection: entry.collection.clone(),
+                        catalog: entry.catalog_id.clone(),
+                        generated_at: entry.generated_at.clone(),
+                    };
+                    let slot = (entry.publisher.clone(), entry.url.clone());
+                    if records.records.insert(slot, record).is_some() {
+                        return Err(state_error(format!(
+                            "two record tuples of {} {}",
+                            entry.publisher, entry.url
+                        )));
+                    }
+                }
+                StateEntry::Removal(entry) => {
+                    let removal = Removal {
+                        item_id: entry.item_id.clone(),
+                        catalog: entry.catalog_id.clone(),
+                        generated_at: entry.generated_at.clone(),
+                    };
+                    let slot = (entry.publisher.clone(), entry.url.clone());
+                    if records.removals.insert(slot, removal).is_some() {
+                        return Err(state_error(format!(
+                            "two removal tuples of {} {}",
+                            entry.publisher, entry.url
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some((publisher, url)) = records
+            .removals
+            .keys()
+            .find(|slot| records.records.contains_key(*slot))
+        {
+            return Err(state_error(format!(
+                "a record tuple and a removal tuple of {publisher} {url}"
+            )));
+        }
+        Ok(records)
+    }
+
+    pub fn state_entries(&self) -> Vec<StateEntry> {
+        let records = self.records().map(|(publisher, url, record)| {
+            StateEntry::Record(RecordEntry {
+                publisher: publisher.to_owned(),
+                url: url.to_owned(),
+                item: record.item.clone(),
+                collection: record.collection.clone(),
+                catalog_id: record.catalog.clone(),
+                generated_at: record.generated_at.clone(),
+            })
+        });
+        let removals = self.removals().map(|(publisher, url, removal)| {
+            StateEntry::Removal(RemovalEntry {
+                publisher: publisher.to_owned(),
+                url: url.to_owned(),
+                item_id: removal.item_id.clone(),
+                catalog_id: removal.catalog.clone(),
+                generated_at: removal.generated_at.clone(),
+            })
+        });
+        records.chain(removals).collect()
+    }
+
     pub fn apply(
         &mut self,
         publisher: &str,
@@ -231,38 +345,53 @@ impl Records {
             .as_str()
             .ok_or_else(|| Error::Envelope("an Item's url is a string".into()))?;
         let item_id = item::item_id(item)?;
+        match item::kind(item) {
+            Kind::Page => Ok(self.insert(
+                publisher,
+                url,
+                Record {
+                    item: item.clone(),
+                    item_id,
+                    collection: collection.to_owned(),
+                    catalog: catalog.to_owned(),
+                    generated_at: generated_at.to_owned(),
+                },
+            )),
+            Kind::Removed => Ok(self.remove_with(
+                publisher,
+                url,
+                Removal {
+                    item_id,
+                    catalog: catalog.to_owned(),
+                    generated_at: generated_at.to_owned(),
+                },
+            )),
+        }
+    }
+
+    pub fn insert(&mut self, publisher: &str, url: &str, record: Record) -> Option<Record> {
+        let slot = (publisher.to_owned(), url.to_owned());
+        self.removals.remove(&slot);
+        self.records.insert(slot, record)
+    }
+
+    pub fn remove_with(&mut self, publisher: &str, url: &str, removal: Removal) -> Option<Record> {
         let slot = (publisher.to_owned(), url.to_owned());
         let previous = self.records.remove(&slot);
-        match item::kind(item) {
-            Kind::Page => {
-                self.removals.remove(&slot);
-                self.records.insert(
-                    slot,
-                    Record {
-                        item: item.clone(),
-                        item_id,
-                        collection: collection.to_owned(),
-                        catalog: catalog.to_owned(),
-                        generated_at: generated_at.to_owned(),
-                    },
-                );
-            }
-            Kind::Removed => {
-                self.removals.insert(
-                    slot,
-                    Removal {
-                        item_id,
-                        catalog: catalog.to_owned(),
-                        generated_at: generated_at.to_owned(),
-                    },
-                );
-            }
-        }
-        Ok(previous)
+        self.removals.insert(slot, removal);
+        previous
     }
 
     pub fn remove(&mut self, publisher: &str, url: &str) -> Option<Record> {
         self.records.remove(&(publisher.to_owned(), url.to_owned()))
+    }
+
+    pub fn remove_collection(&mut self, publisher: &str, collection: &str) -> Vec<String> {
+        let gone = self.leaving(publisher, |_, record| record.collection == collection);
+        for url in &gone {
+            self.remove(publisher, url);
+        }
+        gone
     }
 
     pub fn record(&self, publisher: &str, url: &str) -> Option<&Record> {
@@ -271,6 +400,12 @@ impl Records {
 
     pub fn removal(&self, publisher: &str, url: &str) -> Option<&Removal> {
         self.removals.get(&(publisher.to_owned(), url.to_owned()))
+    }
+
+    pub fn state(&self, publisher: &str, url: &str) -> Option<UrlState<'_>> {
+        self.record(publisher, url)
+            .map(UrlState::Record)
+            .or_else(|| self.removal(publisher, url).map(UrlState::Removed))
     }
 
     pub fn records(&self) -> impl Iterator<Item = (&str, &str, &Record)> {
@@ -319,6 +454,7 @@ pub struct Replay {
     sealed: SealedItems,
     withdrawals: WithdrawalReplay,
     duties: BTreeMap<String, Duty>,
+    resumed: bool,
 }
 
 struct Context<'a> {
@@ -364,6 +500,89 @@ impl Replay {
         Self::default()
     }
 
+    pub fn resumed(
+        epoch_number: u64,
+        sealed_at: &str,
+        declarations: Declarations,
+        entries: &[StateEntry],
+    ) -> Result<Self, Error> {
+        if declarations.head().map(|(height, _)| height) != Some(epoch_number) {
+            return Err(Error::History(format!(
+                "a Replay resumed at Epoch {epoch_number} needs Declarations headed there"
+            )));
+        }
+        let mut latest = BTreeMap::new();
+        for entry in entries {
+            if let StateEntry::Collection(entry) = entry {
+                let inner = &entry.envelope["catalog"];
+                if inner["publisher"] != entry.publisher.as_str()
+                    || inner["collection"] != entry.collection.as_str()
+                    || log_seconds(inner["generated_at"].as_str().unwrap_or_default()).is_err()
+                {
+                    return Err(state_error(format!(
+                        "the collection tuple of {} {} does not carry a Catalog of that name",
+                        entry.publisher, entry.collection
+                    )));
+                }
+                let slot = (entry.publisher.clone(), entry.collection.clone());
+                let adopted = LatestCatalog {
+                    envelope: entry.envelope.clone(),
+                    catalog_id: catalog::catalog_id(inner)?,
+                    sealing_height: entry.sealing_height,
+                    base: None,
+                };
+                if latest.insert(slot, adopted).is_some() {
+                    return Err(state_error(format!(
+                        "two collection tuples of {} {}",
+                        entry.publisher, entry.collection
+                    )));
+                }
+            }
+        }
+        Ok(Replay {
+            declarations,
+            next_height: epoch_number + 1,
+            sealed_at_s: Some(log_seconds(sealed_at)?),
+            latest,
+            records: Records::from_state(entries)?,
+            sealed: SealedItems::from_state(epoch_number, entries)?,
+            withdrawals: WithdrawalReplay::from_state(entries)?,
+            duties: BTreeMap::new(),
+            resumed: true,
+        })
+    }
+
+    pub fn state_entries(&self) -> Vec<StateEntry> {
+        let collections = self
+            .latest_catalogs()
+            .map(|(publisher, collection, latest)| {
+                StateEntry::Collection(CollectionEntry {
+                    publisher: publisher.to_owned(),
+                    collection: collection.to_owned(),
+                    envelope: latest.envelope.clone(),
+                    sealing_height: latest.sealing_height,
+                })
+            });
+        collections
+            .chain(self.records.state_entries())
+            .chain(
+                self.withdrawals
+                    .entries()
+                    .into_iter()
+                    .map(StateEntry::Withdrawal),
+            )
+            .collect()
+    }
+
+    pub fn materialized(&self) -> Result<Vec<ContentTuple>, Error> {
+        let domains = self.declarations.domains();
+        materialization::materialized(
+            self.records.records(),
+            |host| domains.contains_key(host),
+            |item_id| self.withdrawals.is_withdrawn(item_id),
+        )
+    }
+
     pub fn declarations(&self) -> &Declarations {
         &self.declarations
     }
@@ -388,6 +607,11 @@ impl Replay {
     }
 
     pub fn payload_duties(&self, at: &str) -> Result<Vec<PayloadDuty>, Error> {
+        if self.resumed {
+            return Err(Error::History(
+                "the state tuples carry no Epoch that sealed an Item, so a resumed Replay holds no Payload window".into(),
+            ));
+        }
         let at_s = log_seconds(at)?;
         let mut duties = Vec::new();
         for (item_id, duty) in &self.duties {
@@ -649,7 +873,7 @@ impl Replay {
                 envelope: body.clone(),
                 catalog_id: catalog::catalog_id(inner)?,
                 sealing_height: context.epoch.height,
-                base,
+                base: Some(base),
             },
         );
         if base {
@@ -827,5 +1051,76 @@ fn judgment(failed: Vec<Failure>) -> Judgment {
         Judgment::Valid
     } else {
         Judgment::Ignored(failed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::objects::RemovalEntry;
+
+    fn removal_tuple(url: &str) -> StateEntry {
+        StateEntry::Removal(RemovalEntry {
+            publisher: "example.com".into(),
+            url: url.into(),
+            item_id: format!("sha256:{}", "a".repeat(64)),
+            catalog_id: format!("sha256:{}", "b".repeat(64)),
+            generated_at: "2026-10-01T00:00:00Z".into(),
+        })
+    }
+
+    fn record_tuple(url: &str, item_url: &str) -> StateEntry {
+        StateEntry::Record(RecordEntry {
+            publisher: "example.com".into(),
+            url: url.into(),
+            item: serde_json::json!({
+                "publisher": "example.com",
+                "url": item_url,
+                "observed_at": "2026-10-01T00:00:00Z",
+                "payload": {"commitment": "hmac-sha256:00", "alg": "HMAC-SHA256", "bytes": 1}
+            }),
+            collection: "default".into(),
+            catalog_id: format!("sha256:{}", "b".repeat(64)),
+            generated_at: "2026-10-01T00:00:00Z".into(),
+        })
+    }
+
+    #[test]
+    fn records_from_state_round_trip_their_tuples() {
+        let tuples = vec![
+            record_tuple("https://example.com/a", "https://example.com/a"),
+            removal_tuple("https://example.com/b"),
+        ];
+        let records = Records::from_state(&tuples).unwrap();
+        assert_eq!(
+            serde_json::to_value(records.state_entries()).unwrap(),
+            serde_json::to_value(&tuples).unwrap()
+        );
+        assert!(matches!(
+            records.state("example.com", "https://example.com/b"),
+            Some(UrlState::Removed(_))
+        ));
+    }
+
+    #[test]
+    fn tuples_no_replay_produces_are_refused() {
+        let url = "https://example.com/a";
+        for tuples in [
+            vec![record_tuple(url, url), removal_tuple(url)],
+            vec![removal_tuple(url), removal_tuple(url)],
+            vec![record_tuple(url, url), record_tuple(url, url)],
+            vec![record_tuple(url, "https://example.com/other")],
+        ] {
+            assert!(Records::from_state(&tuples).is_err(), "{tuples:?}");
+        }
+    }
+
+    #[test]
+    fn a_resumed_replay_needs_declarations_headed_at_its_epoch() {
+        let mut declarations = Declarations::default();
+        assert!(Replay::resumed(3, "2026-10-01T00:00:00Z", declarations.clone(), &[]).is_err());
+        declarations.seed_head(3, "root", None);
+        let replay = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations, &[]).unwrap();
+        assert!(replay.payload_duties("2026-10-01T00:00:00Z").is_err());
     }
 }

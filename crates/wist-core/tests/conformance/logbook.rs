@@ -720,43 +720,148 @@ fn histories_that_carry_checkpoints_bind_their_cumulative_trees() {
     }
 }
 
+fn log_state(state: Option<wist_core::sealing::UrlState<'_>>) -> Value {
+    use wist_core::sealing::UrlState;
+    match state {
+        None => Value::Null,
+        Some(UrlState::Record(record)) => serde_json::json!({
+            "state": "record",
+            "item": record.item_id,
+            "collection": record.collection,
+            "catalog": record.catalog,
+            "generated_at": record.generated_at,
+        }),
+        Some(UrlState::Removed(removal)) => serde_json::json!({
+            "state": "removed",
+            "item": removal.item_id,
+            "catalog": removal.catalog,
+            "generated_at": removal.generated_at,
+        }),
+    }
+}
+
+pub fn combined_state(combined: Option<wist_core::several_logs::Combined<'_, String>>) -> Value {
+    match combined {
+        None => Value::Null,
+        Some(combined) => serde_json::json!({
+            "state": log_state(Some(combined.state)),
+            "logs": combined.logs,
+        }),
+    }
+}
+
+pub fn url_state(replay: &wist_core::sealing::Replay, publisher: &str, url: &str) -> Value {
+    log_state(replay.records().state(publisher, url))
+}
+
 #[test]
-#[ignore = "vectors/multilog/dedup.json"]
-fn each_log_of_the_deduplication_vector_seals_the_shared_delta_under_its_own_key() {
+fn each_log_of_the_deduplication_vector_seals_the_shared_item_and_both_combine_into_one_state() {
+    use wist_core::sealing::{Epoch, Judgment, Outcome, Parameters, Replay};
     let vector = read_json("vectors/multilog/dedup.json");
-    let delta_id = vector["delta_id"].as_str().unwrap();
-    for log in vector["logs"].as_array().unwrap() {
+    let item = &vector["item"];
+    let item_id = vector["item_id"].as_str().unwrap();
+    let catalog_id = vector["catalog_id"].as_str().unwrap();
+    assert_eq!(wist_core::item::item_id(item).unwrap(), item_id);
+    let page: wist_core::objects::PageItem = serde_json::from_value(item.clone()).unwrap();
+    assert_eq!(
+        wist_core::item::judge_payload(
+            &page,
+            &vector["payload"],
+            &wist_core::item::SizeCaps::suite()
+        ),
+        Ok(())
+    );
+    let publisher = item["publisher"].as_str().unwrap();
+    let url = item["url"].as_str().unwrap();
+    let logs = vector["logs"].as_array().unwrap();
+    let mut replays = Vec::new();
+    let mut catalogs = Vec::new();
+    let mut item_entries = Vec::new();
+    for log in logs {
+        let log_id = log["log_id"].as_str().unwrap();
         let anchor = &log["anchor"]["anchor"];
+        assert_eq!(anchor["log_id"], log_id);
         let key = aggregator_key(
             anchor["genesis_key"]["key_id"].as_str().unwrap(),
             anchor["genesis_key"]["public_key"].as_str().unwrap(),
         );
+        wist_core::envelope::verify_envelope(&log["anchor"], "anchor", &key.public_key)
+            .unwrap_or_else(|e| panic!("{log_id}: {e}"));
         let epochs = log["epochs"].as_array().unwrap();
-        walk_history(log["log_id"].as_str().unwrap(), epochs, &key);
-        let sealed = epochs.iter().any(|epoch| {
-            epoch["entries"].as_array().unwrap().iter().any(|entry| {
-                entry["type"] == "publisher_delta"
-                    && sha256_jcs(&entry["body"]["delta"]) == delta_id
-            })
-        });
-        assert!(sealed, "{}: the shared Delta is not sealed", log["log_id"]);
+        walk_history(log_id, epochs, &key);
+        let head = Checkpoint::parse(log["checkpoint"].as_str().unwrap()).unwrap();
+        assert_eq!(head.root_token(), log["root"].as_str().unwrap(), "{log_id}");
+        assert_eq!(head.tree_size(), log["tree_size"].as_u64().unwrap());
+        let mut replay = Replay::new();
+        let parameters = Parameters::suite();
+        for epoch in epochs {
+            let checkpoint = Checkpoint::parse(epoch["checkpoint"].as_str().unwrap()).unwrap();
+            let entries = epoch["entries"].as_array().unwrap();
+            for entry in entries {
+                match entry["type"].as_str().unwrap() {
+                    "publisher_declaration" => {
+                        assert_eq!(entry["body"], vector["publisher_declaration"], "{log_id}")
+                    }
+                    "publisher_catalog" => catalogs.push(entry["body"].clone()),
+                    "publisher_item" => item_entries.push(entry.clone()),
+                    other => panic!("{log_id}: an Entry of type {other}"),
+                }
+            }
+            let root = checkpoint.root_token();
+            let outcome = replay
+                .epoch(&Epoch {
+                    height: checkpoint.epoch_number(),
+                    root: &root,
+                    sealed_at: checkpoint.sealed_at(),
+                    parameters: &parameters,
+                    suffix_list: None,
+                    log_key: &|key_id| (key_id == key.key_id).then(|| key.public_key.clone()),
+                    entries,
+                })
+                .unwrap();
+            let Outcome::Accepted {
+                entries: judged, ..
+            } = outcome
+            else {
+                panic!("{log_id}: Epoch {} rejected", checkpoint.epoch_number());
+            };
+            assert!(judged
+                .iter()
+                .flatten()
+                .all(|judgment| *judgment == Judgment::Valid));
+        }
+        assert_eq!(
+            url_state(&replay, publisher, url),
+            vector["expected"]["log_states"][log_id],
+            "{log_id}"
+        );
+        replays.push((log_id.to_owned(), replay));
     }
-    let sources: Vec<&str> = vector["expected"]["merged_records"][0]["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|source| source.as_str().unwrap())
-        .collect();
-    assert_eq!(sources.len(), vector["logs"].as_array().unwrap().len());
-}
-
-fn sha256_jcs(value: &Value) -> String {
-    use sha2::Digest;
-    let canonical = wist_core::jcs::canonicalize(value).unwrap();
-    format!(
-        "sha256:{}",
-        wist_core::crypto::hex_encode(&sha2::Sha256::digest(canonical))
+    assert_eq!(catalogs.len(), logs.len());
+    for catalog in &catalogs {
+        assert_eq!(
+            wist_core::catalog::catalog_id(&catalog["catalog"]).unwrap(),
+            catalog_id
+        );
+        assert_eq!(catalog["catalog"], catalogs[0]["catalog"]);
+    }
+    assert_ne!(catalogs[0]["sig"]["key_id"], catalogs[1]["sig"]["key_id"]);
+    assert_eq!(item_entries.len(), logs.len());
+    for entry in &item_entries {
+        assert_eq!(
+            wist_core::jcs::canonicalize(entry).unwrap(),
+            wist_core::jcs::canonicalize(&item_entries[0]).unwrap()
+        );
+        assert_eq!(entry["body"]["item"], *item);
+        assert_eq!(entry["body"]["catalog"], catalog_id);
+    }
+    let combined = wist_core::several_logs::combine(
+        replays
+            .iter()
+            .map(|(log_id, replay)| (log_id.clone(), replay.records().state(publisher, url))),
     )
+    .unwrap();
+    assert_eq!(combined_state(combined), vector["expected"]["combined"]);
 }
 
 fn collect_histories(value: &Value, found: &mut Vec<Vec<Value>>) {

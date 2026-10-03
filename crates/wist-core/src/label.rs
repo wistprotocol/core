@@ -62,7 +62,7 @@ pub fn dispute_id(dispute: &Value) -> Result<String, Rejection> {
     digest_of(dispute)
 }
 
-fn is_delta_id(value: &str) -> bool {
+fn is_sha256_id(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -159,7 +159,7 @@ fn sig_fields(doc: &Value) -> Result<(), Rejection> {
     Ok(())
 }
 
-/// WIST-2 §3.3 and WIST-1 §7 check order; `asserted_at` is checked as a Delta's `observed_at`
+/// WIST-2 §3.3 and WIST-1 §7 check order; `asserted_at` is checked as a Catalog's `generated_at`
 /// against `clock_s` (WIST-1 §3.4).
 pub fn validate_label(
     doc: &Value,
@@ -206,7 +206,7 @@ pub fn validate_label(
         }
     }
     if let Some(delta) = &label.delta {
-        if !url_subject || !is_delta_id(delta) {
+        if !url_subject || !is_sha256_id(delta) {
             return Err(Rejection::Fields);
         }
     }
@@ -284,11 +284,11 @@ pub fn label_tuple(current: &SealedLabel, sealed_at: &str) -> Option<LabelEntry>
 }
 
 /// WIST-2 §3.3.
-pub fn binding_applies(delta: Option<&str>, record_anchor: Option<&str>) -> bool {
-    match (delta, record_anchor) {
+pub fn binding_applies(delta: Option<&str>, record_item_id: Option<&str>) -> bool {
+    match (delta, record_item_id) {
         (_, None) => false,
         (None, Some(_)) => true,
-        (Some(delta), Some(anchor)) => delta == anchor,
+        (Some(delta), Some(item_id)) => delta == item_id,
     }
 }
 
@@ -328,7 +328,7 @@ pub fn validate_dispute(
     let publisher = &declaration.publisher;
     if !supported_major(&dispute.wist_version)
         || dispute.disputant != publisher.domain
-        || !is_delta_id(&dispute.label)
+        || !is_sha256_id(&dispute.label)
         || !is_canonical_host(&dispute.log)
         || dispute
             .reason

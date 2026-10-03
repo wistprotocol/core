@@ -32,6 +32,7 @@ pub mod proof;
 pub mod publisher_item;
 pub mod publisher_time;
 pub mod sealing;
+pub mod several_logs;
 pub mod snapshot;
 pub mod suffix_list;
 pub mod tiles;

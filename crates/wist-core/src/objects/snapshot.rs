@@ -125,9 +125,36 @@ pub struct SuffixListEntry {
     pub sealing_height: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionEntry {
+    pub publisher: String,
+    pub collection: String,
+    pub envelope: Value,
+    pub sealing_height: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordEntry {
+    pub publisher: String,
+    pub url: String,
+    pub item: Value,
+    pub collection: String,
+    pub catalog_id: String,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalEntry {
+    pub publisher: String,
+    pub url: String,
+    pub item_id: String,
+    pub catalog_id: String,
+    pub generated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithdrawalEntry {
-    pub delta_id: String,
+    pub item_id: String,
     pub publisher: String,
     pub sealing_height: u64,
 }
@@ -154,13 +181,6 @@ pub struct DisputeEntry {
     pub sealing_height: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct RecordEntry {
-    pub publisher: String,
-    pub url: String,
-    pub delta_id: String,
-}
-
 /// WIST-3 §7 inventory; variants follow the table's order.
 #[derive(Debug, Clone)]
 pub enum StateEntry {
@@ -170,10 +190,12 @@ pub enum StateEntry {
     Parameter(ParameterEntry),
     RecoveryWindow(RecoveryWindowEntry),
     SuffixList(SuffixListEntry),
+    Collection(CollectionEntry),
+    Record(RecordEntry),
+    Removal(RemovalEntry),
     Withdrawal(WithdrawalEntry),
     Label(LabelEntry),
     Dispute(DisputeEntry),
-    Record(RecordEntry),
 }
 
 fn field<T: serde::de::DeserializeOwned, E: de::Error>(tail: &[Value], i: usize) -> Result<T, E> {
@@ -258,10 +280,40 @@ impl<'de> Deserialize<'de> for StateEntry {
                     sealing_height: field(tail, 1)?,
                 }))
             }
+            "collection" => {
+                check_arity::<D::Error>(&kind, tail, 4)?;
+                Ok(StateEntry::Collection(CollectionEntry {
+                    publisher: field(tail, 0)?,
+                    collection: field(tail, 1)?,
+                    envelope: field(tail, 2)?,
+                    sealing_height: field(tail, 3)?,
+                }))
+            }
+            "record" => {
+                check_arity::<D::Error>(&kind, tail, 6)?;
+                Ok(StateEntry::Record(RecordEntry {
+                    publisher: field(tail, 0)?,
+                    url: field(tail, 1)?,
+                    item: field(tail, 2)?,
+                    collection: field(tail, 3)?,
+                    catalog_id: field(tail, 4)?,
+                    generated_at: field(tail, 5)?,
+                }))
+            }
+            "removal" => {
+                check_arity::<D::Error>(&kind, tail, 5)?;
+                Ok(StateEntry::Removal(RemovalEntry {
+                    publisher: field(tail, 0)?,
+                    url: field(tail, 1)?,
+                    item_id: field(tail, 2)?,
+                    catalog_id: field(tail, 3)?,
+                    generated_at: field(tail, 4)?,
+                }))
+            }
             "withdrawal" => {
                 check_arity::<D::Error>(&kind, tail, 3)?;
                 Ok(StateEntry::Withdrawal(WithdrawalEntry {
-                    delta_id: field(tail, 0)?,
+                    item_id: field(tail, 0)?,
                     publisher: field(tail, 1)?,
                     sealing_height: field(tail, 2)?,
                 }))
@@ -288,14 +340,6 @@ impl<'de> Deserialize<'de> for StateEntry {
                     reason: field(tail, 2)?,
                     asserted_at: field(tail, 3)?,
                     sealing_height: field(tail, 4)?,
-                }))
-            }
-            "record" => {
-                check_arity::<D::Error>(&kind, tail, 3)?;
-                Ok(StateEntry::Record(RecordEntry {
-                    publisher: field(tail, 0)?,
-                    url: field(tail, 1)?,
-                    delta_id: field(tail, 2)?,
                 }))
             }
             other => Err(de::Error::custom(format!(
@@ -345,8 +389,32 @@ impl Serialize for StateEntry {
             StateEntry::SuffixList(e) => {
                 serde_json::json!(["suffix_list", e.identifier, e.sealing_height])
             }
+            StateEntry::Collection(e) => serde_json::json!([
+                "collection",
+                e.publisher,
+                e.collection,
+                e.envelope,
+                e.sealing_height
+            ]),
+            StateEntry::Record(e) => serde_json::json!([
+                "record",
+                e.publisher,
+                e.url,
+                e.item,
+                e.collection,
+                e.catalog_id,
+                e.generated_at
+            ]),
+            StateEntry::Removal(e) => serde_json::json!([
+                "removal",
+                e.publisher,
+                e.url,
+                e.item_id,
+                e.catalog_id,
+                e.generated_at
+            ]),
             StateEntry::Withdrawal(e) => {
-                serde_json::json!(["withdrawal", e.delta_id, e.publisher, e.sealing_height])
+                serde_json::json!(["withdrawal", e.item_id, e.publisher, e.sealing_height])
             }
             StateEntry::Label(e) => serde_json::json!([
                 "label",
@@ -368,9 +436,6 @@ impl Serialize for StateEntry {
                 e.asserted_at,
                 e.sealing_height
             ]),
-            StateEntry::Record(e) => {
-                serde_json::json!(["record", e.publisher, e.url, e.delta_id])
-            }
         };
         value.serialize(serializer)
     }
@@ -398,7 +463,7 @@ mod tests {
     #[test]
     fn state_entry_round_trips_every_kind() {
         let pk = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
-        let delta_id = format!("sha256:{}", "c".repeat(64));
+        let id = format!("sha256:{}", "c".repeat(64));
         let cases = [
             serde_json::json!([
                 "aggregator_key",
@@ -419,8 +484,8 @@ mod tests {
                 {"policy": "head"},
                 9
             ]),
-            serde_json::json!(["withdrawal", delta_id, "example.com", 3]),
-            serde_json::json!(["suffix_list", delta_id, 4]),
+            serde_json::json!(["withdrawal", id, "example.com", 3]),
+            serde_json::json!(["suffix_list", id, 4]),
             serde_json::json!([
                 "label",
                 "labeler.example.net",
@@ -429,26 +494,44 @@ mod tests {
                 Value::Null,
                 "2026-08-02T12:00:00Z",
                 "2026-09-02T12:00:00Z",
-                delta_id,
-                delta_id,
+                id,
+                id,
                 12
             ]),
             serde_json::json!([
                 "dispute",
-                delta_id,
+                id,
                 "example.com",
                 Value::Null,
                 "2026-08-02T13:00:00Z",
                 13
             ]),
             serde_json::json!([
+                "collection",
+                "example.com",
+                "default",
+                {"catalog": {"publisher": "example.com"}, "sig": {"key_id": "k"}},
+                5
+            ]),
+            serde_json::json!([
                 "record",
                 "example.com",
                 "https://example.com/blog/post-1",
-                delta_id
+                {"publisher": "example.com", "url": "https://example.com/blog/post-1"},
+                "default",
+                id,
+                "2026-08-02T12:00:00Z"
+            ]),
+            serde_json::json!([
+                "removal",
+                "example.com",
+                "https://example.com/blog/post-2",
+                id,
+                id,
+                "2026-08-02T12:00:00Z"
             ]),
         ];
-        assert_eq!(cases.len(), 9);
+        assert_eq!(cases.len(), 11);
         for tuple in cases {
             let entry: StateEntry =
                 serde_json::from_value(tuple.clone()).unwrap_or_else(|e| panic!("{tuple}: {e}"));
@@ -461,6 +544,18 @@ mod tests {
         for tuple in [
             serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
             serde_json::json!(["withdrawal", "sha256:00", "example.com"]),
+            serde_json::json!([
+                "record",
+                "example.com",
+                "https://example.com/a",
+                "sha256:00"
+            ]),
+            serde_json::json!([
+                "removal",
+                "example.com",
+                "https://example.com/a",
+                "sha256:00"
+            ]),
             serde_json::json!([]),
             serde_json::json!(["aggregator_key", "key-1", "pk", 10, Value::Null]),
         ] {
