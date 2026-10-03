@@ -176,3 +176,93 @@ fn the_items_of_an_accepted_catalog_are_judged_one_by_one_in_list_order() {
         }
     }
 }
+
+fn built_walk(listed: &[Value], bounds: &TreeBounds) -> (wist_core::tree::Built, Walk) {
+    let built = wist_core::tree::build(listed, bounds).unwrap();
+    let catalog = Catalog {
+        wist_version: "1.0.0".into(),
+        publisher: "example.com".into(),
+        collection: "journal".into(),
+        generated_at: "2026-10-01T12:00:00Z".into(),
+        size: listed.len() as u64,
+        root: format!(
+            "sha256:{}",
+            wist_core::crypto::hex_encode(&wist_core::item::root(listed).unwrap())
+        ),
+        tree: built.tree.clone(),
+    };
+    let walked = walk(&catalog, bounds, |hex| match built.files.get(hex) {
+        Some(octets) => TreeFetch::Octets(octets.clone()),
+        None => TreeFetch::Failed,
+    });
+    (built, walked)
+}
+
+#[test]
+fn a_built_tree_walks_to_the_list_of_every_accepted_tree_vector() {
+    let vector = read_json("vectors/wist2/catalog-tree.json");
+    let mut rebuilt = 0;
+    for case in vector["cases"].as_array().unwrap() {
+        let catalog: Catalog = serde_json::from_value(case["catalog"].clone()).unwrap();
+        let bounds = bounds(&case["parameters"]);
+        let Walk::Listed(listed) = walk(&catalog, &bounds, served(&case["tree_files"])) else {
+            continue;
+        };
+        let (built, walked) = built_walk(&listed, &bounds);
+        assert_eq!(walked, Walk::Listed(listed), "{}", case["name"]);
+        let written_by_the_reference_writer = [
+            "empty Collection: one bucket with no Items",
+            "root bucket",
+            "sixteen Items whose one bucket would exceed tree_file_cap_bytes, divided by the reference writer",
+        ];
+        if written_by_the_reference_writer.contains(&case["name"].as_str().unwrap()) {
+            assert_eq!(built.tree, catalog.tree, "{}", case["name"]);
+        }
+        rebuilt += 1;
+    }
+    assert_eq!(rebuilt, 17);
+}
+
+#[test]
+fn a_built_tree_divides_a_bucket_above_sixteen_items_into_files_within_the_bounds() {
+    let listed: Vec<Value> = (0..300)
+        .map(|n| {
+            json!({
+                "publisher": "example.com",
+                "url": format!("https://example.com/journal/{n}"),
+                "observed_at": "2026-09-01T00:00:00Z",
+                "removed": true,
+            })
+        })
+        .collect();
+    let bounds = TreeBounds::suite();
+    let (built, walked) = built_walk(&listed, &bounds);
+    let Walk::Listed(walked) = walked else {
+        panic!("the built tree is refused");
+    };
+    let mut ordered = listed.clone();
+    ordered.sort_by_key(|item| wist_core::item::key(item["url"].as_str().unwrap()));
+    assert_eq!(walked, ordered);
+    assert!(built.files.len() > 17);
+    for (hex, octets) in &built.files {
+        match read_file(hex, octets, &bounds).unwrap() {
+            wist_core::objects::TreeFile::Bucket(bucket) => {
+                assert!(bucket.items.len() <= wist_core::tree::BUCKET_ITEMS_MAX)
+            }
+            wist_core::objects::TreeFile::Inner(inner) => {
+                assert!(inner.children.len() <= wist_core::tree::CHILDREN_MAX)
+            }
+        }
+    }
+}
+
+#[test]
+fn a_tree_is_not_built_for_a_list_holding_two_items_of_one_url() {
+    let item = json!({
+        "publisher": "example.com",
+        "url": "https://example.com/journal/a",
+        "observed_at": "2026-09-01T00:00:00Z",
+        "removed": true,
+    });
+    assert!(wist_core::tree::build(&[item.clone(), item], &TreeBounds::suite()).is_err());
+}

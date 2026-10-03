@@ -2,12 +2,15 @@ use crate::crypto::hex_encode;
 use crate::error::Error;
 use crate::item::{hash_formed, key, members, root, safe_integer};
 use crate::objects::{Catalog, TreeEntry, TreeFile};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 const REFUSED: &str = "WIST2-E07";
 
 pub const CHILDREN_MAX: usize = 16;
+
+pub const BUCKET_ITEMS_MAX: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TreeBounds {
@@ -215,4 +218,96 @@ pub fn walk(
         return Walk::Refused(REFUSED);
     }
     Walk::Listed(listed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Built {
+    pub tree: String,
+    pub files: BTreeMap<String, Vec<u8>>,
+}
+
+fn digit(key: &[u8; 32], position: usize) -> u8 {
+    let byte = key[position / 2];
+    if position.is_multiple_of(2) {
+        byte >> 4
+    } else {
+        byte & 0x0f
+    }
+}
+
+fn store(
+    octets: Vec<u8>,
+    bounds: &TreeBounds,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<String, Error> {
+    if octets.len() as u64 > bounds.tree_file_cap_bytes {
+        return Err(Error::Envelope(format!(
+            "a tree file of {} octets exceeds tree_file_cap_bytes at tree_depth_max",
+            octets.len()
+        )));
+    }
+    let hex = hex_encode(&Sha256::digest(&octets));
+    files.insert(hex.clone(), octets);
+    Ok(hex)
+}
+
+fn bucket(keyed: &[([u8; 32], &Value)]) -> Result<Vec<u8>, Error> {
+    let items: Vec<&Value> = keyed.iter().map(|(_, item)| *item).collect();
+    crate::jcs::canonicalize(&json!({ "items": items }))
+}
+
+fn emit(
+    keyed: &[([u8; 32], &Value)],
+    prefix: &str,
+    level: u64,
+    bounds: &TreeBounds,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<String, Error> {
+    if keyed.len() <= BUCKET_ITEMS_MAX || level >= bounds.tree_depth_max {
+        let octets = bucket(keyed)?;
+        if octets.len() as u64 <= bounds.tree_file_cap_bytes || level >= bounds.tree_depth_max {
+            return store(octets, bounds, files);
+        }
+    }
+    let position = prefix.len();
+    let mut children = Vec::new();
+    for group in
+        keyed.chunk_by(|(left, _), (right, _)| digit(left, position) == digit(right, position))
+    {
+        let child = format!("{prefix}{:x}", digit(&group[0].0, position));
+        let file = emit(group, &child, level + 1, bounds, files)?;
+        children.push(json!({
+            "prefix": child,
+            "count": group.len(),
+            "file": format!("sha256:{file}"),
+        }));
+    }
+    store(
+        crate::jcs::canonicalize(&json!({ "children": children }))?,
+        bounds,
+        files,
+    )
+}
+
+pub fn build(items: &[Value], bounds: &TreeBounds) -> Result<Built, Error> {
+    let mut keyed = items
+        .iter()
+        .map(|item| {
+            let url = item
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::Envelope("an Item's url is a string".into()))?;
+            Ok((key(url), item))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    keyed.sort_by_key(|(key, _)| *key);
+    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(Error::Envelope("a list holds two Items of one key".into()));
+    }
+    let mut files = BTreeMap::new();
+    let root = emit(&keyed, "", 1, bounds, &mut files)?;
+    Ok(Built {
+        tree: format!("sha256:{root}"),
+        files,
+    })
 }
