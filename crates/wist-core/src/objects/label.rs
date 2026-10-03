@@ -56,6 +56,7 @@ pub struct Dispute {
     pub disputant: String,
     pub label: String,
     pub log: String,
+    #[serde(deserialize_with = "crate::objects::safe_integer")]
     pub height: u64,
     #[serde(
         default,

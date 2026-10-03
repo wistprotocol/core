@@ -1716,14 +1716,17 @@ fn wist2_dispute_vectors() {
         let name = case["name"].as_str().unwrap();
         let declaration: wist_core::objects::PublisherEnvelope =
             serde_json::from_value(case["declaration"].clone()).unwrap();
+        let envelope: serde_json::Value = match case["envelope_json"].as_str() {
+            Some(text) => serde_json::from_str(text).unwrap(),
+            None => case["envelope"].clone(),
+        };
         let result =
-            label::validate_dispute(&case["envelope"], &declaration, lookup, clock.0, clock.1)
-                .map(|_| ());
+            label::validate_dispute(&envelope, &declaration, lookup, clock.0, clock.1).map(|_| ());
         let got = label_outcome(&result);
         assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
         match result {
             Ok(()) => assert_eq!(
-                label::dispute_id(&case["envelope"]["dispute"]).unwrap(),
+                label::dispute_id(&envelope["dispute"]).unwrap(),
                 case["dispute_id"],
                 "{name}"
             ),
