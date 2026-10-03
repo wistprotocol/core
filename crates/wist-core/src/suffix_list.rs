@@ -258,8 +258,9 @@ pub struct EpochCaps {
     pub labeler_epoch_entries_max: u64,
 }
 
-/// WIST-3 §3.2: `entries` pairs each Entry type with the Canonical Host of its Publisher,
-/// Labeler or disputant.
+/// WIST-3 §3.2: `entries` pairs each Entry type with its `catalog.publisher`, `item.publisher`,
+/// `label.labeler` or `dispute.disputant`; one that is not a Canonical Host counts toward no
+/// domain.
 pub fn check_epoch_capacity<'a>(
     entries: impl IntoIterator<Item = (&'a str, &'a str)>,
     list: Option<&SuffixList>,
@@ -268,7 +269,11 @@ pub fn check_epoch_capacity<'a>(
     let mut per_domain: BTreeMap<String, u64> = BTreeMap::new();
     let mut per_labeler: BTreeMap<String, u64> = BTreeMap::new();
     for (kind, host) in entries {
-        if !matches!(kind, "publisher_delta" | "label" | "dispute") {
+        let labeled = matches!(kind, "label" | "dispute");
+        if !labeled && !matches!(kind, "publisher_catalog" | "publisher_item") {
+            continue;
+        }
+        if crate::host::canonical_host(host).ok().as_deref() != Some(host) {
             continue;
         }
         let unit = registrable_domain(host, list).domain;
@@ -280,7 +285,7 @@ pub fn check_epoch_capacity<'a>(
                 caps.domain_epoch_entries_max
             )));
         }
-        if kind != "publisher_delta" {
+        if labeled {
             let count = per_labeler.entry(unit.clone()).or_default();
             *count += 1;
             if *count > caps.labeler_epoch_entries_max {
@@ -342,9 +347,9 @@ mod tests {
             labeler_epoch_entries_max: 1,
         };
         let shared = [
-            ("publisher_delta", "a.example.com"),
-            ("publisher_delta", "b.example.com"),
-            ("publisher_delta", "c.example.com"),
+            ("publisher_catalog", "a.example.com"),
+            ("publisher_item", "b.example.com"),
+            ("publisher_item", "c.example.com"),
         ];
         assert!(check_epoch_capacity(shared, Some(&list), caps).is_err());
         assert!(check_epoch_capacity(shared, None, caps).is_ok());
@@ -352,5 +357,22 @@ mod tests {
         assert!(check_epoch_capacity(labels, Some(&list), caps).is_err());
         let separate = [("label", "a.github.io"), ("label", "b.github.io")];
         assert!(check_epoch_capacity(separate, Some(&list), caps).is_ok());
+    }
+
+    #[test]
+    fn a_member_that_is_not_a_canonical_host_and_other_entry_types_count_toward_no_domain() {
+        let caps = EpochCaps {
+            domain_epoch_entries_max: 1,
+            labeler_epoch_entries_max: 1,
+        };
+        let uncounted = [
+            ("publisher_item", "a.example.com"),
+            ("label", "A.example.com"),
+            ("dispute", "a.example.com."),
+            ("publisher_catalog", "not a host"),
+            ("publisher_declaration", "a.example.com"),
+            ("registry_update", "a.example.com"),
+        ];
+        assert!(check_epoch_capacity(uncounted, None, caps).is_ok());
     }
 }

@@ -3,7 +3,6 @@ use crate::crypto::PublicKey;
 use crate::envelope::{canonical_b64u, verify_envelope, version_spelled};
 use crate::objects::publisher::{key_set_fingerprint, thumbprint, NUMERIC_DATE_MAX};
 use crate::objects::{Publisher, PublisherEnvelope, PublisherKey};
-use crate::publisher_time;
 use serde_json::Value;
 use sha2::Digest;
 
@@ -303,45 +302,6 @@ pub fn url_host(url: &str) -> &str {
         .split(['/', ':'])
         .next()
         .unwrap_or_default()
-}
-
-/// WIST-1 §5.1/§5.2: `observed_at` is `None` for Feeds, which no `nbf`/`exp` window bounds.
-pub fn verify_signed(
-    keys: &[&PublisherKey],
-    doc: &Value,
-    kind: &str,
-    observed_at: Option<&str>,
-) -> Result<(), &'static str> {
-    if observed_at.is_some_and(|value| !publisher_time::valid(value)) {
-        return Err("WIST1-E14");
-    }
-    if !canonical_b64u(doc["sig"]["value"].as_str().ok_or("WIST1-E14")?, 64) {
-        return Err("WIST1-E14");
-    }
-    for key in keys {
-        if !canonical_b64u(&key.x, 32) || key.kid != thumbprint(&key.x) {
-            return Err("WIST1-E14");
-        }
-    }
-    let key_id = doc["sig"]["key_id"].as_str().unwrap_or_default();
-    let mut eligible = false;
-    for key in keys.iter().filter(|key| key.kid == key_id) {
-        let Ok(public) = PublicKey::from_b64u(&key.x) else {
-            continue;
-        };
-        if observed_at.is_some_and(|at| key.admits(at) != Some(true)) {
-            continue;
-        }
-        eligible = true;
-        if verify_envelope(doc, kind, &public).is_ok() {
-            return Ok(());
-        }
-    }
-    if eligible {
-        Err("WIST1-E01")
-    } else {
-        Err("WIST1-E02")
-    }
 }
 
 /// WIST-1 §5.2: an open recovery window's chain head or a pending head is an alternative

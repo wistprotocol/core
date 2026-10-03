@@ -22,6 +22,8 @@ mod logbook;
 mod parameters;
 #[path = "conformance/recovery.rs"]
 mod recovery;
+#[path = "conformance/sealing.rs"]
+mod sealing;
 #[path = "conformance/snapshot_keys.rs"]
 mod snapshot_keys;
 #[path = "conformance/trees.rs"]
@@ -782,64 +784,195 @@ fn wist2_page_keyset_vectors() {
     }
 }
 
+fn records_through(sealed_items: &[serde_json::Value], height: u64) -> wist_core::sealing::Records {
+    let mut records = wist_core::sealing::Records::default();
+    for sealed in sealed_items {
+        if sealed["height"].as_u64().unwrap() <= height {
+            records
+                .apply(
+                    sealed["publisher"].as_str().unwrap(),
+                    &sealed["item"],
+                    sealed["collection"].as_str().unwrap(),
+                    sealed["catalog"].as_str().unwrap(),
+                    sealed["generated_at"].as_str().unwrap(),
+                )
+                .unwrap();
+        }
+    }
+    records
+}
+
+fn sorted_tuples(mut tuples: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    tuples.sort_by_key(|t| t.to_string());
+    tuples
+}
+
+fn record_tuples(records: &wist_core::sealing::Records) -> Vec<serde_json::Value> {
+    sorted_tuples(
+        records
+            .records()
+            .map(|(publisher, url, record)| {
+                serde_json::json!([
+                    "record",
+                    publisher,
+                    url,
+                    record.item,
+                    record.collection,
+                    record.catalog,
+                    record.generated_at
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn removal_tuples(records: &wist_core::sealing::Records) -> Vec<serde_json::Value> {
+    sorted_tuples(
+        records
+            .removals()
+            .map(|(publisher, url, removal)| {
+                serde_json::json!([
+                    "removal",
+                    publisher,
+                    url,
+                    removal.item_id,
+                    removal.catalog,
+                    removal.generated_at
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn withdrawal_tuples(replay: &wist_core::withdrawal::WithdrawalReplay) -> Vec<serde_json::Value> {
+    sorted_tuples(
+        replay
+            .entries()
+            .into_iter()
+            .map(|entry| {
+                serde_json::to_value(wist_core::objects::StateEntry::Withdrawal(entry)).unwrap()
+            })
+            .collect(),
+    )
+}
+
+fn sealed_kind(sealed: &serde_json::Value) -> wist_core::item::Kind {
+    match sealed["kind"].as_str().unwrap() {
+        "page" => wist_core::item::Kind::Page,
+        "removed" => wist_core::item::Kind::Removed,
+        other => panic!("an Item of kind {other}"),
+    }
+}
+
+fn act_outcome(
+    disposition: wist_core::withdrawal::Disposition,
+    label: &str,
+) -> (Option<&'static str>, Option<u64>) {
+    use wist_core::withdrawal::Disposition;
+    match disposition {
+        Disposition::Accepted {
+            withdrawn_height, ..
+        } => (None, Some(withdrawn_height)),
+        Disposition::Rejected(code) => (Some(code), None),
+        Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),
+    }
+}
+
+fn resumed_withdrawals(
+    resume: &serde_json::Value,
+    sealed_items: &[serde_json::Value],
+) -> (
+    wist_core::withdrawal::WithdrawalReplay,
+    wist_core::withdrawal::SealedItems,
+) {
+    use wist_core::item::Kind;
+    let snapshot_height = resume["snapshot_height"].as_u64().unwrap();
+    let mut withdrawals = wist_core::withdrawal::WithdrawalReplay::new();
+    let mut sealed = wist_core::withdrawal::SealedItems::resumed();
+    for tuple in resume["adopted"].as_array().unwrap() {
+        let (item_id, publisher) = (tuple[1].as_str().unwrap(), tuple[2].as_str().unwrap());
+        let height = tuple[3].as_u64().unwrap();
+        withdrawals.adopt(item_id, publisher, height);
+        sealed.seal(item_id, publisher, Kind::Page, height);
+    }
+    for tuple in resume["record_tuples"].as_array().unwrap() {
+        let item_id = wist_core::item::item_id(&tuple[3]).unwrap();
+        sealed.seal(
+            &item_id,
+            tuple[1].as_str().unwrap(),
+            Kind::Page,
+            snapshot_height,
+        );
+    }
+    for tuple in resume["removal_tuples"].as_array().unwrap() {
+        sealed.seal(
+            tuple[3].as_str().unwrap(),
+            tuple[1].as_str().unwrap(),
+            Kind::Removed,
+            snapshot_height,
+        );
+    }
+    for item in sealed_items {
+        let height = item["height"].as_u64().unwrap();
+        if height > snapshot_height {
+            sealed.seal(
+                item["item_id"].as_str().unwrap(),
+                item["publisher"].as_str().unwrap(),
+                sealed_kind(item),
+                height,
+            );
+        }
+    }
+    (withdrawals, sealed)
+}
+
 #[test]
-#[ignore = "vectors/wist4/withdrawal.json"]
 fn wist4_withdrawal_vectors() {
-    use wist_core::withdrawal::{Disposition, SealedDelta, WithdrawalReplay};
+    use wist_core::withdrawal::{Disposition, SealedItems, WithdrawalReplay};
     let vector = read_json("vectors/wist4/withdrawal.json");
     let log_key =
         wist_core::crypto::PublicKey::from_b64u(vector["log_key"]["public_key"].as_str().unwrap())
             .unwrap();
     let log_key_id = vector["log_key"]["key_id"].as_str().unwrap();
-    let sealed: Vec<(String, String, u64)> = vector["sealed_deltas"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|d| {
-            (
-                d["delta_id"].as_str().unwrap().into(),
-                d["publisher"].as_str().unwrap().into(),
-                d["height"].as_u64().unwrap(),
-            )
-        })
-        .collect();
+    let key = |key_id: &str| (key_id == log_key_id).then(|| log_key.clone());
+    let sealed_items = vector["sealed_items"].as_array().unwrap();
+    let mut complete = SealedItems::new();
+    for sealed in sealed_items {
+        let item = &sealed["item"];
+        assert_eq!(wist_core::item::item_id(item).unwrap(), sealed["item_id"]);
+        assert_eq!(wist_core::item::kind(item), sealed_kind(sealed));
+        assert_eq!(item["publisher"], sealed["publisher"]);
+        assert_eq!(item["url"], sealed["url"]);
+        complete.seal(
+            sealed["item_id"].as_str().unwrap(),
+            sealed["publisher"].as_str().unwrap(),
+            sealed_kind(sealed),
+            sealed["height"].as_u64().unwrap(),
+        );
+    }
+    let replay_acts = |replay: &mut WithdrawalReplay, cases: &[serde_json::Value]| {
+        cases
+            .iter()
+            .map(|case| {
+                let label = case["label"].as_str().unwrap();
+                let disposition = replay.apply_raw(
+                    case["height"].as_u64().unwrap(),
+                    case["envelope_json"].as_str().unwrap().as_bytes(),
+                    key,
+                    &complete,
+                );
+                act_outcome(disposition, label)
+            })
+            .collect::<Vec<_>>()
+    };
+    let act_cases = vector["act_cases"].as_array().unwrap();
     let mut replay = WithdrawalReplay::new();
     let mut codes = std::collections::BTreeSet::new();
-    for case in vector["act_cases"].as_array().unwrap() {
+    for (case, (code, withdrawn)) in act_cases.iter().zip(replay_acts(&mut replay, act_cases)) {
         let label = case["label"].as_str().unwrap();
-        let disposition = replay.apply_raw(
-            case["height"].as_u64().unwrap(),
-            case["envelope_json"].as_str().unwrap().as_bytes(),
-            |key_id| (key_id == log_key_id).then(|| log_key.clone()),
-            |delta_id| {
-                sealed.iter().find(|(id, _, _)| id == delta_id).map_or(
-                    SealedDelta::Absent,
-                    |(_, publisher, height)| SealedDelta::Known {
-                        publisher: publisher.clone(),
-                        height: *height,
-                    },
-                )
-            },
-        );
-        match disposition {
-            Disposition::Accepted {
-                withdrawn_height, ..
-            } => {
-                assert!(case["code"].is_null(), "{label}");
-                assert_eq!(
-                    Some(withdrawn_height),
-                    case["withdrawn_height"].as_u64(),
-                    "{label}"
-                );
-                codes.insert(None);
-            }
-            Disposition::Rejected(code) => {
-                assert_eq!(Some(code), case["code"].as_str(), "{label}");
-                assert!(case["withdrawn_height"].is_null(), "{label}");
-                codes.insert(Some(code));
-            }
-            Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),
-        }
+        assert_eq!(code, case["code"].as_str(), "{label}");
+        assert_eq!(withdrawn, case["withdrawn_height"].as_u64(), "{label}");
+        codes.insert(code);
     }
     assert_eq!(
         codes,
@@ -847,49 +980,30 @@ fn wist4_withdrawal_vectors() {
             .into_iter()
             .collect()
     );
-    let tuples: Vec<serde_json::Value> = replay
-        .entries()
-        .into_iter()
-        .map(|entry| {
-            serde_json::to_value(wist_core::objects::StateEntry::Withdrawal(entry)).unwrap()
-        })
-        .collect();
-    let mut expected = vector["state_tuples"].as_array().unwrap().clone();
-    expected.sort_by_key(|t| t.to_string());
-    let mut got = tuples;
-    got.sort_by_key(|t| t.to_string());
-    assert_eq!(got, expected);
-    let mut resumed = WithdrawalReplay::new();
-    for entry in replay.entries() {
-        resumed.adopt(&entry.delta_id, &entry.publisher, entry.sealing_height);
-    }
-    assert_eq!(resumed.entries().len(), replay.entries().len());
-    let mut records: Vec<serde_json::Value> = vector["sealed_deltas"]
-        .as_array()
-        .unwrap()
+    assert_eq!(
+        withdrawal_tuples(&replay),
+        sorted_tuples(vector["state_tuples"].as_array().unwrap().clone())
+    );
+    let last = sealed_items
         .iter()
-        .map(|d| {
-            serde_json::to_value(wist_core::objects::StateEntry::Record(
-                wist_core::objects::RecordEntry {
-                    publisher: d["publisher"].as_str().unwrap().into(),
-                    url: d["url"].as_str().unwrap().into(),
-                    delta_id: d["delta_id"].as_str().unwrap().into(),
-                },
-            ))
-            .unwrap()
-        })
-        .collect();
-    records.sort_by_key(|t| t.to_string());
-    let mut expected_records = vector["record_tuples"].as_array().unwrap().clone();
-    expected_records.sort_by_key(|t| t.to_string());
-    assert_eq!(records, expected_records);
-    let materialized: Vec<&str> = vector["sealed_deltas"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|d| d["delta_id"].as_str().unwrap())
+        .map(|s| s["height"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    let records = records_through(sealed_items, last);
+    assert_eq!(
+        record_tuples(&records),
+        sorted_tuples(vector["record_tuples"].as_array().unwrap().clone())
+    );
+    assert_eq!(
+        removal_tuples(&records),
+        sorted_tuples(vector["removal_tuples"].as_array().unwrap().clone())
+    );
+    let mut materialized: Vec<&str> = records
+        .records()
+        .map(|(_, _, record)| record.item_id.as_str())
         .filter(|id| !replay.is_withdrawn(id))
         .collect();
+    materialized.sort_unstable();
     let expected_materialized: Vec<&str> = vector["materialized"]
         .as_array()
         .unwrap()
@@ -897,81 +1011,101 @@ fn wist4_withdrawal_vectors() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(materialized, expected_materialized);
-    let resume = &vector["resume"];
-    let mut resumed = WithdrawalReplay::new();
-    for tuple in resume["adopted"].as_array().unwrap() {
-        resumed.adopt(
-            tuple[1].as_str().unwrap(),
-            tuple[2].as_str().unwrap(),
-            tuple[3].as_u64().unwrap(),
-        );
-    }
-    let walked: Vec<(String, String, u64)> = resume["walked_deltas"]
-        .as_array()
-        .unwrap()
+    let pages: std::collections::BTreeMap<&str, wist_core::objects::PageItem> = sealed_items
         .iter()
-        .map(|d| {
+        .filter(|sealed| sealed["kind"] == "page")
+        .map(|sealed| {
             (
-                d["delta_id"].as_str().unwrap().into(),
-                d["publisher"].as_str().unwrap().into(),
-                d["height"].as_u64().unwrap(),
+                sealed["item_id"].as_str().unwrap(),
+                serde_json::from_value(sealed["item"].clone()).unwrap(),
             )
         })
         .collect();
-    for case in resume["act_cases"].as_array().unwrap() {
-        let label = case["label"].as_str().unwrap();
-        let disposition = resumed.apply_raw(
-            case["height"].as_u64().unwrap(),
-            case["envelope_json"].as_str().unwrap().as_bytes(),
-            |key_id| (key_id == log_key_id).then(|| log_key.clone()),
-            |delta_id| {
-                walked.iter().find(|(id, _, _)| id == delta_id).map_or(
-                    SealedDelta::Unverifiable,
-                    |(_, publisher, height)| SealedDelta::Known {
-                        publisher: publisher.clone(),
-                        height: *height,
-                    },
-                )
-            },
+    let payloads = vector["payloads"].as_object().unwrap();
+    assert_eq!(
+        payloads.keys().map(String::as_str).collect::<Vec<_>>(),
+        pages.keys().copied().collect::<Vec<_>>()
+    );
+    for (identifier, payload) in payloads {
+        assert_eq!(
+            wist_core::item::judge_payload(
+                &pages[identifier.as_str()],
+                payload,
+                &wist_core::item::SizeCaps::suite()
+            ),
+            Ok(()),
+            "{identifier}"
         );
-        match disposition {
-            Disposition::Accepted {
-                withdrawn_height, ..
-            } => {
-                assert!(case["code"].is_null(), "{label}");
-                assert_eq!(
-                    Some(withdrawn_height),
-                    case["withdrawn_height"].as_u64(),
-                    "{label}"
-                );
-            }
-            Disposition::Rejected(code) => assert_eq!(Some(code), case["code"].as_str(), "{label}"),
-            Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),
+    }
+    let resume = &vector["resume"];
+    let mut resumes = vec![(resume, "replay_state_tuples")];
+    resumes.push((&resume["resumed_again"], ""));
+    for (resume, replay_tuples) in resumes {
+        let snapshot_height = resume["snapshot_height"].as_u64().unwrap();
+        let held = records_through(sealed_items, snapshot_height);
+        assert_eq!(
+            record_tuples(&held),
+            sorted_tuples(resume["record_tuples"].as_array().unwrap().clone())
+        );
+        assert_eq!(
+            removal_tuples(&held),
+            sorted_tuples(resume["removal_tuples"].as_array().unwrap().clone())
+        );
+        let prefix: Vec<serde_json::Value> = act_cases
+            .iter()
+            .filter(|case| case["height"].as_u64().unwrap() <= snapshot_height)
+            .cloned()
+            .collect();
+        let mut replaying = WithdrawalReplay::new();
+        replay_acts(&mut replaying, &prefix);
+        assert_eq!(
+            withdrawal_tuples(&replaying),
+            sorted_tuples(resume["adopted"].as_array().unwrap().clone())
+        );
+        let (mut resumed, sealed) = resumed_withdrawals(resume, sealed_items);
+        let cases = resume["act_cases"].as_array().unwrap();
+        let replayed = replay_acts(&mut replaying, cases);
+        for (case, replayed) in cases.iter().zip(replayed) {
+            let label = case["label"].as_str().unwrap();
+            let disposition = resumed.apply_raw(
+                case["height"].as_u64().unwrap(),
+                case["envelope_json"].as_str().unwrap().as_bytes(),
+                key,
+                &sealed,
+            );
+            let (code, withdrawn) = act_outcome(disposition, label);
+            assert_eq!(code, case["code"].as_str(), "{label}");
+            assert_eq!(withdrawn, case["withdrawn_height"].as_u64(), "{label}");
+            assert_eq!(replayed.0, case["replay_code"].as_str(), "{label}: replay");
+            assert_eq!(
+                replayed.1,
+                case["replay_withdrawn_height"].as_u64(),
+                "{label}: replay"
+            );
+        }
+        assert_eq!(
+            withdrawal_tuples(&resumed),
+            sorted_tuples(resume["state_tuples"].as_array().unwrap().clone())
+        );
+        if !replay_tuples.is_empty() {
+            assert_eq!(
+                withdrawal_tuples(&replaying),
+                sorted_tuples(resume[replay_tuples].as_array().unwrap().clone())
+            );
         }
     }
-    let mut resumed_tuples: Vec<serde_json::Value> = resumed
-        .entries()
-        .into_iter()
-        .map(|entry| {
-            serde_json::to_value(wist_core::objects::StateEntry::Withdrawal(entry)).unwrap()
-        })
-        .collect();
-    resumed_tuples.sort_by_key(|t| t.to_string());
-    let mut expected_resumed = resume["state_tuples"].as_array().unwrap().clone();
-    expected_resumed.sort_by_key(|t| t.to_string());
-    assert_eq!(resumed_tuples, expected_resumed);
     assert_eq!(
         replay.apply_raw(
             9,
             br#"{"update": {"wist_version": "1.0.0", "action": "parameter_change", "subject": "quota_base", "effective_at": "2026-08-05T12:00:00Z", "details": {"parameter": "quota_base", "value": 2}}, "sig": {"key_id": "x", "alg": "Ed25519", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#,
             |_| None,
-            |_| SealedDelta::Absent
+            &complete
         ),
         Disposition::NotWithdrawal
     );
     let duplicate = br#"{"update": {"a": 1, "a": 2}, "sig": {}}"#;
     assert_eq!(
-        replay.apply_raw(9, duplicate, |_| None, |_| SealedDelta::Absent),
+        replay.apply_raw(9, duplicate, |_| None, &complete),
         Disposition::Rejected("WIST1-E05")
     );
 }
@@ -1062,7 +1196,6 @@ fn wist4_parameter_catalog() {
 }
 
 #[test]
-#[ignore = "vectors/wist4/registrable-domain.json"]
 fn wist4_registrable_domain_vectors() {
     use std::collections::BTreeMap;
     use wist_core::suffix_list::{
@@ -1502,7 +1635,6 @@ fn wist2_label_definition_vectors() {
 }
 
 #[test]
-#[ignore = "vectors/wist3/label-tables.json"]
 fn wist3_label_table_vectors() {
     use wist_core::label::{self, LabelEvent, SealedLabelCount};
     use wist_core::suffix_list::{check_epoch_capacity, EpochCaps};
