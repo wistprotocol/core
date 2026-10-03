@@ -115,7 +115,7 @@ pub fn valid_name(name: &str) -> bool {
 
 pub fn subject_host(subject: &str) -> &str {
     match subject.strip_prefix("https://") {
-        Some(rest) => rest.split('/').next().unwrap_or(rest),
+        Some(rest) => rest.split(['/', ':']).next().unwrap_or(rest),
         None => subject,
     }
 }
