@@ -84,6 +84,10 @@ fn parse(value: &str) -> Option<Instant<'_>> {
     })
 }
 
+pub fn seconds(value: &str) -> Option<(i128, &str)> {
+    parse(value).map(|instant| (instant.second, instant.fraction))
+}
+
 pub fn valid(value: &str) -> bool {
     parse(value).is_some()
 }

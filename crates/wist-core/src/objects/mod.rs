@@ -16,7 +16,7 @@ pub use label::{
 };
 pub use log_anchor::{Anchor, GenesisKey, LogAnchorEnvelope, Predecessor};
 pub use payload::{Payload, PayloadContent, PayloadLinks, PayloadSummary};
-pub use publisher::{Publisher, PublisherEnvelope, PublisherKey};
+pub use publisher::{Collection, Match, Publisher, PublisherEnvelope, PublisherKey, ScopeEntry};
 pub use registry_update::{
     KeyAddDetails, KeyAlgorithm, KeyRemoveDetails, ParameterChangeDetails,
     PayloadWithdrawalDetails, RegistryAction, RegistryDetails, RegistryUpdate,

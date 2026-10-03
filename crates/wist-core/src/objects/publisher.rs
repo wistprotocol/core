@@ -74,6 +74,31 @@ pub struct Publisher {
     pub next_keys: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collections: Option<Vec<Collection>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Collection {
+    pub name: String,
+    pub scope: Vec<ScopeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<PublisherKey>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeEntry {
+    pub url: String,
+    pub r#match: Match,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Match {
+    Prefix,
+    Exact,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

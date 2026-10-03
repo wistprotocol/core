@@ -702,6 +702,9 @@ fn histories_that_carry_checkpoints_bind_their_cumulative_trees() {
         "vectors/wist1/recovery-settlement.json",
         "vectors/wist1/key-directory.json",
         "vectors/wist1/declaration-conflicts.json",
+        "vectors/wist1/declaration-fields.json",
+        "vectors/wist1/declaration-hosts.json",
+        "vectors/wist1/recovery-admission.json",
     ] {
         let vector = read_json(path);
         let key = aggregator_key(

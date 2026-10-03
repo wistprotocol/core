@@ -1,3 +1,4 @@
+use crate::collection::Limits;
 use crate::crypto::PublicKey;
 use crate::delta_fields;
 use crate::envelope::{canonical_b64u, verify_envelope, version_spelled};
@@ -9,28 +10,12 @@ use sha2::Digest;
 
 pub type Rejection = (&'static str, String);
 
-/// WIST-1 §3.5 and §3.4: a Delta's predecessor is the Delta its `prev`
-/// names, by the same Publisher for the same URL, observed strictly earlier.
-pub fn verify_delta_predecessor(doc: &Value, predecessor: &Value) -> Result<(), &'static str> {
-    let publisher = delta_publisher(doc)?;
-    let prior = &predecessor["delta"];
-    let prior_id = crate::delta::delta_id(prior).map_err(|_| "WIST1-E07")?;
-    if delta_publisher(predecessor) != Ok(publisher)
-        || doc["delta"]["url"].as_str().is_none()
-        || doc["delta"]["url"] != prior["url"]
-        || Some(prior_id.as_str()) != doc["delta"]["prev"].as_str()
-    {
-        return Err("WIST1-E07");
-    }
-    delta_fields::verify_observation_order(
-        doc["delta"]["observed_at"].as_str().unwrap(),
-        prior["observed_at"].as_str().unwrap(),
-    )
-}
-
 /// WIST-1 §3.1: major `1` alone is implemented; a differing minor or patch never rejects
 /// (`WIST1-E15`).
-pub fn validate_fields(doc: &Value) -> Result<PublisherEnvelope, Rejection> {
+pub fn validate_fields(
+    doc: &Value,
+    limits: Option<&Limits>,
+) -> Result<PublisherEnvelope, Rejection> {
     let canonical = crate::jcs::canonicalize(doc).map_err(|e| ("WIST1-E05", e.to_string()))?;
     let envelope: PublisherEnvelope =
         serde_json::from_slice(&canonical).map_err(|e| ("WIST1-E14", e.to_string()))?;
@@ -66,7 +51,45 @@ pub fn validate_fields(doc: &Value) -> Result<PublisherEnvelope, Rejection> {
             "sig.value: expected canonical base64url encoding of 64 octets".into(),
         ));
     }
+    crate::collection::check_forms(&doc["publisher"], &envelope.publisher, limits)
+        .map_err(|e| ("WIST1-E14", e))?;
+    crate::collection::check_rules(&envelope.publisher, limits).map_err(|e| ("WIST1-E16", e))?;
+    disjoint_key_sets(&envelope.publisher).map_err(|e| ("WIST1-E08", e))?;
+    if limits.is_some() {
+        let entry = serde_json::json!({"type": "publisher_declaration", "body": doc});
+        let octets = crate::jcs::canonicalize(&entry)
+            .map_err(|e| ("WIST1-E05", e.to_string()))?
+            .len() as u64;
+        if octets > crate::constants::ENTRY_MAX_BYTES {
+            return Err((
+                "WIST1-E04",
+                "the publisher_declaration Entry exceeds 65 535 octets".into(),
+            ));
+        }
+    }
     Ok(envelope)
+}
+
+pub(crate) fn check_key_entry(key: &PublisherKey, signed: &Value) -> Result<(), String> {
+    if key.kty != "OKP" || key.crv != "Ed25519" {
+        return Err("key entries must be Ed25519 OKP JSON Web Keys".into());
+    }
+    if signed.get("exp").is_some_and(Value::is_null) {
+        return Err("exp must not be null".into());
+    }
+    if key.nbf > NUMERIC_DATE_MAX || key.exp.is_some_and(|exp| exp > NUMERIC_DATE_MAX) {
+        return Err("nbf and exp must not exceed 253402300799".into());
+    }
+    if key.exp.is_some_and(|exp| exp <= key.nbf) {
+        return Err("exp must be greater than nbf".into());
+    }
+    if !canonical_b64u(&key.x, 32) {
+        return Err("x: expected canonical base64url encoding of 32 octets".into());
+    }
+    if key.kid != thumbprint(&key.x) {
+        return Err("kid is not the entry's JWK thumbprint".into());
+    }
+    Ok(())
 }
 
 fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), String> {
@@ -77,6 +100,7 @@ fn validate_structure(doc: &Value, envelope: &PublisherEnvelope) -> Result<(), S
         "recovery_keys",
         "next_keys",
         "contact",
+        "collections",
     ] {
         if doc["publisher"].get(field).is_some_and(Value::is_null) {
             return Err(format!("{field} must not be null"));
@@ -180,7 +204,7 @@ pub fn inner_hash(doc: &Value) -> Result<String, String> {
 }
 
 pub fn publisher_of(doc: &Value) -> Result<Publisher, String> {
-    validate_fields(doc)
+    validate_fields(doc, None)
         .map(|envelope| envelope.publisher)
         .map_err(|(code, detail)| format!("{code}: {detail}"))
 }
@@ -195,11 +219,19 @@ fn recovery_keys_bytes(p: &Publisher) -> Result<Vec<u8>, String> {
     }
 }
 
-/// WIST-1 §5.2 and ADR-0023: every public key occurs once across `keys`
-/// and `recovery_keys`, identical duplicates included.
 pub fn disjoint_key_sets(p: &Publisher) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
-    for key in p.keys.iter().chain(p.recovery_keys.iter().flatten()) {
+    let collection_keys = p
+        .collections
+        .iter()
+        .flatten()
+        .flat_map(|collection| collection.keys.iter().flatten());
+    for key in p
+        .keys
+        .iter()
+        .chain(p.recovery_keys.iter().flatten())
+        .chain(collection_keys)
+    {
         if !seen.insert(&key.x) {
             return Err(format!("key {} listed twice in Declaration", key.kid));
         }
@@ -214,10 +246,9 @@ fn verify_with(doc: &Value, key: &PublisherKey) -> bool {
         .is_some_and(|public| verify_envelope(doc, "publisher", &public).is_ok())
 }
 
-pub fn evaluate_initial(doc: &Value) -> Result<Publisher, Rejection> {
-    let envelope = validate_fields(doc)?;
+pub fn evaluate_initial(doc: &Value, limits: &Limits) -> Result<Publisher, Rejection> {
+    let envelope = validate_fields(doc, Some(limits))?;
     let publisher = envelope.publisher;
-    disjoint_key_sets(&publisher).map_err(|e| ("WIST1-E08", e))?;
     if publisher.seq != 0 || publisher.prev_declaration.is_some() {
         return Err((
             "WIST1-E08",
@@ -257,42 +288,6 @@ pub fn resolve_signer<'a>(
             "WIST1-E01",
             "declaration signature verification failed".into(),
         ))
-}
-
-pub fn delta_publisher(doc: &Value) -> Result<&str, &'static str> {
-    delta_fields::validate_fields(doc)?;
-    Ok(doc["delta"]["publisher"].as_str().unwrap())
-}
-
-/// WIST-1 §§3.2/5.2 and ADR-0023: a usable signing binding valid at `observed_at` verifies the
-/// Delta, and its source's authority covers the URL.
-pub fn verify_delta_authority(sources: &[&Publisher], doc: &Value) -> Result<(), &'static str> {
-    let domain = delta_publisher(doc)?;
-    let sources: Vec<_> = sources
-        .iter()
-        .filter(|source| source.domain == domain)
-        .collect();
-    let keys: Vec<_> = sources.iter().flat_map(|source| &source.keys).collect();
-    let observed_at = doc["delta"]["observed_at"].as_str();
-    verify_signed(&keys, doc, "delta", observed_at)?;
-    let url = doc["delta"]["url"].as_str().ok_or("WIST1-E03")?;
-    for source in sources {
-        if url_in_scope(
-            url,
-            &source.domain,
-            source.subdomain_scope.as_deref().unwrap_or(&[]),
-        ) && verify_signed(
-            &source.keys.iter().collect::<Vec<_>>(),
-            doc,
-            "delta",
-            observed_at,
-        )
-        .is_ok()
-        {
-            return Ok(());
-        }
-    }
-    Err("WIST1-E03")
 }
 
 pub fn url_in_scope(url: &str, domain: &str, scope: &[String]) -> bool {
@@ -361,8 +356,9 @@ pub fn evaluate_with_heads(
     pending_head: Option<&Value>,
     highest_accepted_seq: u64,
     fetched: &Value,
+    limits: &Limits,
 ) -> Result<Decision, Rejection> {
-    let incoming = validate_fields(fetched)?.publisher;
+    let incoming = validate_fields(fetched, None)?.publisher;
     if incoming.domain != current["publisher"]["domain"] {
         return Err(("WIST2-E04", "declaration domain changed".into()));
     }
@@ -375,6 +371,7 @@ pub fn evaluate_with_heads(
     if pending_head.is_some_and(|head| inner_hash(head).ok().as_deref() == Some(&fetched_hash)) {
         return Ok(Decision::Unchanged);
     }
+    validate_fields(fetched, Some(limits))?;
     if incoming.seq <= highest_accepted_seq {
         return Err((
             "WIST1-E08",
@@ -386,20 +383,35 @@ pub fn evaluate_with_heads(
         .chain(pending_head)
         .find(|head| inner_hash(head).ok().as_deref() == incoming.prev_declaration.as_deref())
         .ok_or(("WIST1-E08", "ineligible Declaration predecessor".into()))?;
-    evaluate(previous, fetched)
+    replacement(previous, fetched, None)
 }
 
 /// WIST-1 §5.2 and ADR-0023: a nonempty recovery set is protected against every non-recovery
 /// signer.
-pub fn evaluate(stored: &Value, fetched: &Value) -> Result<Decision, Rejection> {
+pub fn evaluate(stored: &Value, fetched: &Value, limits: &Limits) -> Result<Decision, Rejection> {
+    replacement(stored, fetched, Some(limits))
+}
+
+pub(crate) fn replacement(
+    stored: &Value,
+    fetched: &Value,
+    limits: Option<&Limits>,
+) -> Result<Decision, Rejection> {
     let stored_p = publisher_of(stored).map_err(|e| ("WIST2-E04", e))?;
-    let fetched_p = validate_fields(fetched)?.publisher;
-    disjoint_key_sets(&fetched_p).map_err(|e| ("WIST1-E08", e))?;
+    let fetched_p = validate_fields(fetched, None)?.publisher;
 
     if fetched_p.domain != stored_p.domain {
         return Err(("WIST2-E04", "declaration domain changed".into()));
     }
 
+    if inner_hash(fetched).map_err(|e| ("WIST2-E04", e))?
+        == inner_hash(stored).map_err(|e| ("WIST2-E04", e))?
+    {
+        return Ok(Decision::Unchanged);
+    }
+    if limits.is_some() {
+        validate_fields(fetched, limits)?;
+    }
     if fetched_p.seq < stored_p.seq {
         return Err((
             "WIST1-E08",
@@ -410,11 +422,6 @@ pub fn evaluate(stored: &Value, fetched: &Value) -> Result<Decision, Rejection> 
         ));
     }
     if fetched_p.seq == stored_p.seq {
-        if inner_hash(fetched).map_err(|e| ("WIST2-E04", e))?
-            == inner_hash(stored).map_err(|e| ("WIST2-E04", e))?
-        {
-            return Ok(Decision::Unchanged);
-        }
         return Err((
             "WIST1-E08",
             format!(
@@ -484,7 +491,7 @@ pub fn evaluate(stored: &Value, fetched: &Value) -> Result<Decision, Rejection> 
 /// WIST-1 §5.2: the signer must be named in the chain head's `keys` or `recovery_keys`.
 pub fn follows_chain_head(head: &Value, candidate: &Value) -> bool {
     matches!(
-        evaluate(head, candidate),
+        replacement(head, candidate, None),
         Ok(Decision::Ordinary | Decision::Recovery)
     )
 }
@@ -502,13 +509,15 @@ mod tests {
 
     fn outcome(case: &Value) -> String {
         let result = if case["stored"].is_null() {
-            evaluate_initial(&case["fetched"]).map(|_| "initial")
+            evaluate_initial(&case["fetched"], &Limits::suite()).map(|_| "initial")
         } else {
-            evaluate(&case["stored"], &case["fetched"]).map(|decision| match decision {
-                Decision::Ordinary => "ordinary_rotation",
-                Decision::Recovery => "recovery_rotation",
-                Decision::FreshIdentity => "fresh_identity",
-                Decision::Unchanged => "idempotent",
+            evaluate(&case["stored"], &case["fetched"], &Limits::suite()).map(|decision| {
+                match decision {
+                    Decision::Ordinary => "ordinary_rotation",
+                    Decision::Recovery => "recovery_rotation",
+                    Decision::FreshIdentity => "fresh_identity",
+                    Decision::Unchanged => "idempotent",
+                }
             })
         };
         result.unwrap_or_else(|(code, _)| code).to_string()
@@ -531,6 +540,32 @@ mod tests {
                     "expected": case["expected"], "name": case["name"]});
                 assert_eq!(outcome(&case), case["expected"], "{name}: {}", case["name"]);
             }
+        }
+    }
+
+    #[test]
+    fn key_eligibility_retains_every_signed_entry_and_reports_the_usable_ones() {
+        let vector: Value = serde_json::from_slice(
+            &std::fs::read(spec_dir().join("vectors/wist1/declaration-key-eligibility.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        for case in vector["cases"].as_array().unwrap() {
+            let fetched = &case["fetched"];
+            let author = PublicKey::from_b64u(case["author_key"].as_str().unwrap()).unwrap();
+            assert!(
+                verify_envelope(fetched, "publisher", &author).is_ok(),
+                "{}",
+                case["name"]
+            );
+            let publisher: Publisher =
+                serde_json::from_value(fetched["publisher"].clone()).unwrap();
+            let usable = serde_json::json!({
+                "keys": usable_keys(&publisher.keys).collect::<Vec<_>>(),
+                "recovery_keys": usable_keys(publisher.recovery_keys.as_deref().unwrap_or(&[]))
+                    .collect::<Vec<_>>(),
+            });
+            assert_eq!(usable, case["expected_usable"], "{}", case["name"]);
         }
     }
 

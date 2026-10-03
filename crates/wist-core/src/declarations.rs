@@ -1,5 +1,6 @@
 //! WIST-1 §5.2 Declaration replay.
-use crate::declaration::{evaluate, evaluate_initial, inner_hash, validate_fields, Decision};
+use crate::collection::Limits;
+use crate::declaration::{evaluate_initial, inner_hash, replacement, validate_fields, Decision};
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -121,14 +122,14 @@ impl Domain {
         self.pending.as_ref()
     }
 
-    pub fn delta_admission_sources(&self) -> Vec<&Declaration> {
+    pub fn admission_sources(&self) -> Vec<&Declaration> {
         self.window.as_ref().map_or_else(
             || vec![self.current()],
             |window| vec![window.before(), window.owner()],
         )
     }
 
-    pub fn delta_sealing_source(&self) -> Option<&Declaration> {
+    pub fn sealing_source(&self) -> Option<&Declaration> {
         self.window.is_none().then(|| self.current())
     }
 }
@@ -156,11 +157,73 @@ pub struct Settlement {
     pub superseded: Vec<Arc<Declaration>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionKind {
+    Initial,
+    Idempotent,
+    OrdinaryRotation,
+    RecoveryRotation,
+    FreshIdentityPending,
+    PendingReplacement,
+    ReversalOrdinaryRotation,
+    ReversalRecoveryRotation,
+    InWindowChain,
+    InWindowCompetitor,
+    Settlement,
+    Activation,
+}
+
+impl TransitionKind {
+    pub fn narrows(self) -> bool {
+        matches!(
+            self,
+            TransitionKind::OrdinaryRotation
+                | TransitionKind::ReversalOrdinaryRotation
+                | TransitionKind::Settlement
+                | TransitionKind::Activation
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransitionKind::Initial => "initial",
+            TransitionKind::Idempotent => "idempotent",
+            TransitionKind::OrdinaryRotation => "ordinary_rotation",
+            TransitionKind::RecoveryRotation => "recovery_rotation",
+            TransitionKind::FreshIdentityPending => "fresh_identity_pending",
+            TransitionKind::PendingReplacement => "pending_replacement",
+            TransitionKind::ReversalOrdinaryRotation => "reversal_ordinary_rotation",
+            TransitionKind::ReversalRecoveryRotation => "reversal_recovery_rotation",
+            TransitionKind::InWindowChain => "in_window_chain",
+            TransitionKind::InWindowCompetitor => "in_window_competitor",
+            TransitionKind::Settlement => "settlement",
+            TransitionKind::Activation => "activation",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Transition {
+    pub domain: String,
+    pub height: u64,
+    pub kind: TransitionKind,
+    pub declaration: Arc<Declaration>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Effects {
     pub settlements: Vec<Settlement>,
     pub activations: Vec<Activation>,
     pub installations: Vec<Installation>,
+    pub transitions: Vec<Transition>,
+}
+
+impl Effects {
+    pub fn narrowings(&self) -> impl Iterator<Item = &Transition> {
+        self.transitions
+            .iter()
+            .filter(|transition| transition.kind.narrows())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +278,7 @@ impl Declarations {
         sealed_at: &str,
         recovery_window_days: i64,
         declaration_activation_epochs: i64,
+        limits: &Limits,
         entries: &[Value],
     ) -> Result<Effects> {
         let continues = match &self.head {
@@ -230,6 +294,7 @@ impl Declarations {
             sealed_at,
             recovery_window_days,
             declaration_activation_epochs,
+            limits,
             entries,
         )?;
         self.domains = projection.domains;
@@ -314,6 +379,7 @@ impl Declarations {
         sealed_at: &str,
         recovery_window_days: i64,
         declaration_activation_epochs: i64,
+        limits: &Limits,
         entries: &[Value],
     ) -> Result<Projection> {
         let sealed_at_s = crate::timestamp::log_seconds(sealed_at)?;
@@ -346,6 +412,12 @@ impl Declarations {
             {
                 let window = state.window.take().unwrap();
                 state.current = window.head.clone();
+                effects.transitions.push(Transition {
+                    domain: domain.clone(),
+                    height: epoch_number,
+                    kind: TransitionKind::Settlement,
+                    declaration: window.head.clone(),
+                });
                 effects.settlements.push(Settlement {
                     domain: domain.clone(),
                     restored: window.head,
@@ -363,6 +435,12 @@ impl Declarations {
                     epoch_number,
                     entry_index: 0,
                 });
+                effects.transitions.push(Transition {
+                    domain: domain.clone(),
+                    height: epoch_number,
+                    kind: TransitionKind::Activation,
+                    declaration: pending.head.clone(),
+                });
                 effects.activations.push(Activation {
                     domain: domain.clone(),
                     activated: pending.head,
@@ -374,7 +452,7 @@ impl Declarations {
             if entry["type"] != "publisher_declaration" {
                 continue;
             }
-            let envelope = validate_fields(&entry["body"]).map_err(rejection)?;
+            let envelope = validate_fields(&entry["body"], None).map_err(rejection)?;
             groups
                 .entry((envelope.publisher.domain, envelope.publisher.seq))
                 .or_default()
@@ -384,12 +462,31 @@ impl Declarations {
             let (index, incoming) = group[0];
             if let Some(state) = staged.get(&domain) {
                 let pending = state.pending.as_ref().map(|pending| &pending.head.hash);
-                let mut unchanged = true;
-                for (_, envelope) in &group {
+                let mut reserved = Vec::new();
+                for (index, envelope) in &group {
                     let hash = inner_hash(envelope).map_err(failure)?;
-                    unchanged &= hash == state.current.hash || pending == Some(&hash);
+                    if hash != state.current.hash && pending != Some(&hash) {
+                        break;
+                    }
+                    reserved.push(Arc::new(Declaration {
+                        envelope: (*envelope).clone(),
+                        hash,
+                        position: Position {
+                            epoch_number,
+                            entry_index: *index,
+                        },
+                        sealed_at_s,
+                    }));
                 }
-                if unchanged {
+                if reserved.len() == group.len() {
+                    effects
+                        .transitions
+                        .extend(reserved.into_iter().map(|declaration| Transition {
+                            domain: domain.clone(),
+                            height: epoch_number,
+                            kind: TransitionKind::Idempotent,
+                            declaration,
+                        }));
                     continue;
                 }
             }
@@ -399,6 +496,7 @@ impl Declarations {
                     return Err(failure("WIST1-E08 conflicting Declaration group"));
                 }
             }
+            validate_fields(incoming, Some(limits)).map_err(rejection)?;
             let declaration = Arc::new(Declaration {
                 envelope: incoming.clone(),
                 hash: inner_hash(incoming).map_err(failure)?,
@@ -428,7 +526,14 @@ impl Declarations {
                     .find(|head| incoming["publisher"]["prev_declaration"] == head.hash)
                     .ok_or_else(|| failure("WIST1-E08 ineligible Declaration predecessor"))?
                     .clone();
-                let decision = evaluate(previous.envelope(), incoming).map_err(rejection)?;
+                let decision =
+                    replacement(previous.envelope(), incoming, None).map_err(rejection)?;
+                let transition = |kind| Transition {
+                    domain: domain.clone(),
+                    height: epoch_number,
+                    kind,
+                    declaration: declaration.clone(),
+                };
                 if let Some(pending) = state
                     .pending
                     .as_mut()
@@ -436,6 +541,9 @@ impl Declarations {
                 {
                     pending.head = declaration.clone();
                     state.highest_accepted_seq = seq;
+                    effects
+                        .transitions
+                        .push(transition(TransitionKind::PendingReplacement));
                     installation.pending = true;
                     installation.decision = Some(decision);
                     effects.installations.push(installation);
@@ -452,6 +560,9 @@ impl Declarations {
                         .ok_or_else(|| failure("activation height overflow"))?;
                     state.highest_accepted_seq = seq;
                     installation.decision = Some(decision);
+                    effects
+                        .transitions
+                        .push(transition(TransitionKind::FreshIdentityPending));
                     if activation_height > epoch_number {
                         state.pending = Some(Pending {
                             head: declaration,
@@ -459,6 +570,9 @@ impl Declarations {
                         });
                         installation.pending = true;
                     } else {
+                        effects
+                            .transitions
+                            .push(transition(TransitionKind::Activation));
                         state.current = declaration.clone();
                         state.reset = Some(declaration.position);
                         installation.resets_identity = true;
@@ -469,13 +583,15 @@ impl Declarations {
                 if let Some(pending) = state.pending.take() {
                     installation.reversed = Some(pending.head);
                 }
-                if let Some(window) = &mut state.window {
+                let kind = if let Some(window) = &mut state.window {
                     if previous.hash == window.head.hash
                         && matches!(decision, Decision::Ordinary | Decision::Recovery)
                     {
                         window.head = declaration.clone();
+                        TransitionKind::InWindowChain
                     } else {
                         window.competitors.push(declaration.clone());
+                        TransitionKind::InWindowCompetitor
                     }
                 } else if decision == Decision::Recovery {
                     let end_s = i128::from(sealed_at_s) + i128::from(recovery_window_days) * 86_400;
@@ -492,12 +608,28 @@ impl Declarations {
                         competitors: Vec::new(),
                     });
                     installation.opens_window = true;
-                }
+                    if installation.reversed.is_some() {
+                        TransitionKind::ReversalRecoveryRotation
+                    } else {
+                        TransitionKind::RecoveryRotation
+                    }
+                } else if installation.reversed.is_some() {
+                    TransitionKind::ReversalOrdinaryRotation
+                } else {
+                    TransitionKind::OrdinaryRotation
+                };
+                effects.transitions.push(transition(kind));
                 state.current = declaration;
                 state.highest_accepted_seq = seq;
                 installation.decision = Some(decision);
             } else {
-                evaluate_initial(incoming).map_err(rejection)?;
+                evaluate_initial(incoming, limits).map_err(rejection)?;
+                effects.transitions.push(Transition {
+                    domain: domain.clone(),
+                    height: epoch_number,
+                    kind: TransitionKind::Initial,
+                    declaration: declaration.clone(),
+                });
                 staged.insert(
                     domain,
                     Domain {

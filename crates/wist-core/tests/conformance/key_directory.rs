@@ -1,6 +1,7 @@
 //! WIST-1 §5.1 and §5.2: the key directory.
 use super::read_json;
 use serde_json::{json, Value};
+use wist_core::collection::Limits;
 use wist_core::declaration::{evaluate, evaluate_initial, verify_signed, Decision};
 use wist_core::declarations::{Declarations, Position};
 use wist_core::objects::publisher::{key_set_fingerprint, thumbprint};
@@ -31,13 +32,15 @@ fn summary(domain: &wist_core::declarations::Domain) -> Value {
 
 fn declaration_outcome(stored: Option<&Value>, fetched: &Value) -> String {
     let result = match stored {
-        None => evaluate_initial(fetched).map(|_| "initial"),
-        Some(stored) => evaluate(stored, fetched).map(|decision| match decision {
-            Decision::Ordinary => "ordinary_rotation",
-            Decision::Recovery => "recovery_rotation",
-            Decision::FreshIdentity => "fresh_identity",
-            Decision::Unchanged => "idempotent",
-        }),
+        None => evaluate_initial(fetched, &Limits::suite()).map(|_| "initial"),
+        Some(stored) => {
+            evaluate(stored, fetched, &Limits::suite()).map(|decision| match decision {
+                Decision::Ordinary => "ordinary_rotation",
+                Decision::Recovery => "recovery_rotation",
+                Decision::FreshIdentity => "fresh_identity",
+                Decision::Unchanged => "idempotent",
+            })
+        }
     };
     result.unwrap_or_else(|(code, _)| code).to_string()
 }
@@ -74,6 +77,7 @@ fn replay(vector: &Value, history: &Value) -> Vec<Declarations> {
                 checkpoint.sealed_at(),
                 days,
                 activation,
+                &Limits::suite(),
                 epoch["entries"].as_array().unwrap(),
             )
             .unwrap();
@@ -186,6 +190,7 @@ fn histories_activate_reverse_and_resume_as_the_vector_records() {
                 case["candidate_sealed_at"].as_str().unwrap(),
                 days,
                 activation,
+                &Limits::suite(),
                 &entries,
             );
             match projection {
