@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod change_list;
 pub mod feed;
 pub mod item;
 pub mod label;
@@ -12,6 +13,7 @@ pub mod status;
 pub mod tree_file;
 
 pub use catalog::{Catalog, CatalogEnvelope};
+pub use change_list::ChangeList;
 pub use feed::{Feed, FeedEnvelope};
 pub use item::{Item, ItemMeta, PageItem, PayloadCommitment, RemovedItem};
 pub use label::{

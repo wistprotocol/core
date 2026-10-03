@@ -6,6 +6,7 @@ pub const WIST_VERSION: &str = "1.0.0";
 
 pub mod aggregator_keys;
 pub mod catalog;
+pub mod change_list;
 pub mod checkpoint;
 pub mod collection;
 pub mod constants;

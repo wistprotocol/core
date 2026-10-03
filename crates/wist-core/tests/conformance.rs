@@ -4,6 +4,8 @@ use std::path::PathBuf;
 mod aggregator_keys;
 #[path = "conformance/catalogs.rs"]
 mod catalogs;
+#[path = "conformance/change_lists.rs"]
+mod change_lists;
 #[path = "conformance/collections.rs"]
 mod collections;
 #[path = "conformance/declarations.rs"]

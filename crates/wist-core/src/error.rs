@@ -30,6 +30,8 @@ pub enum Error {
     Timestamp(String),
     #[error("history: {0}")]
     History(String),
+    #[error("change list: {0}")]
+    ChangeList(String),
     #[error(
         "WIST3-E04 the state file's aggregator_key tuples do not authenticate from the Anchor: {0}"
     )]
@@ -63,7 +65,8 @@ impl Error {
             | Error::Host(m)
             | Error::Parameter(m)
             | Error::Timestamp(m)
-            | Error::History(m) => m.as_str(),
+            | Error::History(m)
+            | Error::ChangeList(m) => m.as_str(),
             Error::KeyTuples(_)
             | Error::KeyTupleCatchUp { .. }
             | Error::UnsealedSignature { .. } => return Some(SNAPSHOT_MISMATCH_CODE),
