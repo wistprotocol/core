@@ -179,6 +179,15 @@ pub enum Outcome {
     },
 }
 
+/// WIST-3 §7, A base.
+pub fn base_against_floor(generated_at: &str, floor: Option<&str>) -> Result<bool, Error> {
+    let Some(floor) = floor else {
+        return Ok(false);
+    };
+    let interval = i128::from(REMOVAL_RETENTION_DAYS) * i128::from(DAY_SECONDS);
+    Ok(i128::from(log_seconds(generated_at)?) > i128::from(log_seconds(floor)?) + interval)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LatestCatalog {
     pub envelope: Value,
@@ -863,12 +872,10 @@ impl Replay {
         let inner = &body["catalog"];
         let publisher = text(inner, "publisher");
         let collection = text(inner, "collection");
-        let generated_s = log_seconds(text(inner, "generated_at"))?;
-        let base = self.latest(publisher, collection).is_some_and(|latest| {
-            i128::from(generated_s)
-                > i128::from(latest.floor_s())
-                    + i128::from(REMOVAL_RETENTION_DAYS) * i128::from(DAY_SECONDS)
-        });
+        let base = base_against_floor(
+            text(inner, "generated_at"),
+            self.latest(publisher, collection).map(LatestCatalog::floor),
+        )?;
         self.latest.insert(
             (publisher.to_owned(), collection.to_owned()),
             LatestCatalog {
@@ -1064,6 +1071,18 @@ fn judgment(failed: Vec<Failure>) -> Judgment {
 mod tests {
     use super::*;
     use crate::objects::RemovalEntry;
+
+    #[test]
+    fn a_catalog_is_a_base_only_more_than_180_days_after_a_floor() {
+        let floor = Some("2026-01-01T00:00:00Z");
+        let base = |generated_at| base_against_floor(generated_at, floor).unwrap();
+        assert!(!base("2026-06-30T00:00:00Z"));
+        assert!(base("2026-06-30T00:00:01Z"));
+        assert!(!base("2026-01-01T00:00:00Z"));
+        assert!(!base_against_floor("2027-01-01T00:00:00Z", None).unwrap());
+        assert!(base_against_floor("not an instant", floor).is_err());
+        assert!(base_against_floor("2026-06-30T00:00:01Z", Some("not an instant")).is_err());
+    }
 
     fn removal_tuple(url: &str) -> StateEntry {
         StateEntry::Removal(RemovalEntry {
