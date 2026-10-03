@@ -662,16 +662,19 @@ fn state_tuple_over_arity_rejected() {
 }
 
 #[test]
-#[ignore = "vectors/wist2/link-extraction.json"]
 fn wist2_link_extraction_vector() {
     let vec = read_json("vectors/wist2/link-extraction.json");
     let cap = vec["links_cap_bytes"].as_u64().unwrap() as usize;
-    for case in vec["cases"].as_array().unwrap() {
+    let link_url_cap = wist_core::item::SizeCaps::suite().link_url_cap_bytes() as usize;
+    let cases = vec["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 26);
+    for case in cases {
         let html = wist_core::crypto::hex_decode(case["html_hex"].as_str().unwrap()).unwrap();
         let (urls, total) = wist_core::extract::extract_links(
             &html,
             case["base_url"].as_str().unwrap(),
             case["publisher_domain"].as_str().unwrap(),
+            link_url_cap,
         );
         let member = wist_core::extract::links_member(&urls, total, cap);
         assert_eq!(member, case["expected"], "{}", case["label"]);
@@ -679,10 +682,11 @@ fn wist2_link_extraction_vector() {
 }
 
 #[test]
-#[ignore = "vectors/wist2/text-extraction.json"]
 fn wist2_text_extraction_vector() {
     let vec = read_json("vectors/wist2/text-extraction.json");
-    for case in vec["extraction"].as_array().unwrap() {
+    let cases = vec["extraction"].as_array().unwrap();
+    assert_eq!(cases.len(), 14);
+    for case in cases {
         let html = wist_core::crypto::hex_decode(case["html_hex"].as_str().unwrap()).unwrap();
         assert_eq!(
             wist_core::extract::extract_text(&html),

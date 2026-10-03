@@ -31,7 +31,7 @@ fn next_char_ref(bytes: &[u8], from: usize) -> Option<(usize, usize, RefBody<'_>
                 }
             }
             if bytes.get(i + 1) == Some(&b'#') {
-                let (base, digit_start) = if matches!(bytes.get(i + 2), Some(b'x') | Some(b'X')) {
+                let (base, digit_start) = if bytes.get(i + 2) == Some(&b'x') {
                     (16u32, i + 3)
                 } else {
                     (10u32, i + 2)
@@ -142,8 +142,16 @@ fn decode_text_entities(s: &str) -> String {
     }
 }
 
+fn is_whitespace(b: u8) -> bool {
+    matches!(b, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
+}
+
+fn trim_whitespace(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_ascii() && is_whitespace(c as u8))
+}
+
 fn at_tag_boundary(low: &[u8], pos: usize) -> bool {
-    pos >= low.len() || matches!(low[pos], b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/' | b'>')
+    pos >= low.len() || is_whitespace(low[pos]) || matches!(low[pos], b'/' | b'>')
 }
 
 fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -166,24 +174,51 @@ fn find_byte_from(hay: &[u8], needle: u8, from: usize) -> Option<usize> {
         .map(|p| p + from)
 }
 
-fn tag_end(html: &[u8], pos: usize) -> usize {
+type Attribute<'a> = (&'a [u8], &'a [u8]);
+
+fn read_attributes<'a>(html: &'a [u8], low: &'a [u8], from: usize) -> (Vec<Attribute<'a>>, usize) {
     let n = html.len();
-    let mut j = pos;
+    let mut attributes = Vec::new();
+    let mut j = from;
     while j < n {
         let c = html[j];
-        if c == b'"' || c == b'\'' {
-            j = match find_byte_from(html, c, j + 1) {
-                Some(end_q) => end_q + 1,
-                None => n,
-            };
+        if c == b'>' {
+            return (attributes, j + 1);
+        }
+        if is_whitespace(c) || c == b'/' {
+            j += 1;
             continue;
         }
-        if c == b'>' {
-            return j;
+        let name_start = j;
+        while j < n && !is_whitespace(html[j]) && !matches!(html[j], b'=' | b'>' | b'/') {
+            j += 1;
         }
-        j += 1;
+        let name = &low[name_start..j];
+        while j < n && is_whitespace(html[j]) {
+            j += 1;
+        }
+        let mut value: &[u8] = &[];
+        if j < n && html[j] == b'=' {
+            j += 1;
+            while j < n && is_whitespace(html[j]) {
+                j += 1;
+            }
+            if j < n && matches!(html[j], b'"' | b'\'') {
+                let quote = html[j];
+                let end = find_byte_from(html, quote, j + 1).unwrap_or(n);
+                value = &html[j + 1..end];
+                j = (end + 1).min(n);
+            } else {
+                let value_start = j;
+                while j < n && !is_whitespace(html[j]) && html[j] != b'>' {
+                    j += 1;
+                }
+                value = &html[value_start..j];
+            }
+        }
+        attributes.push((name, value));
     }
-    n
+    (attributes, n)
 }
 
 const RAWTEXT_TAGS: [&[u8]; 3] = [b"script", b"style", b"textarea"];
@@ -197,6 +232,16 @@ fn find_rawtext_tag(low: &[u8], i: usize) -> Option<&'static [u8]> {
     })
 }
 
+fn comment_close(low: &[u8], i: usize) -> usize {
+    find_from(low, b"-->", i + 4).map_or(low.len(), |e| e + 3)
+}
+
+fn rawtext_close(html: &[u8], low: &[u8], i: usize, tag: &[u8]) -> usize {
+    let (_, start_tag_end) = read_attributes(html, low, i + 1 + tag.len());
+    let close_pat = [b"</".as_slice(), tag].concat();
+    find_from(low, &close_pat, start_tag_end).unwrap_or(html.len())
+}
+
 fn iter_hrefs(html: &[u8]) -> Vec<String> {
     let low = html.to_ascii_lowercase();
     let n = html.len();
@@ -204,85 +249,25 @@ fn iter_hrefs(html: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     while i < n {
         if low[i..].starts_with(b"<!--") {
-            i = find_from(&low, b"-->", i + 4).map(|e| e + 3).unwrap_or(n);
+            i = comment_close(&low, i);
             continue;
         }
         if let Some(tag) = find_rawtext_tag(&low, i) {
-            let open_end = tag_end(html, i + 1 + tag.len());
-            let close_pat = [b"</".as_slice(), tag].concat();
-            i = find_from(&low, &close_pat, open_end).unwrap_or(n);
+            i = rawtext_close(html, &low, i, tag);
             continue;
         }
-        if low.get(i) == Some(&b'<')
-            && low.get(i + 1) == Some(&b'a')
-            && at_tag_boundary(&low, i + 2)
-        {
-            let mut j = i + 2;
-            let mut href_value: Option<Vec<u8>> = None;
-            while j < n {
-                let c = html[j];
-                if c == b'>' {
-                    j += 1;
-                    break;
-                }
-                if matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'/') {
-                    j += 1;
-                    continue;
-                }
-                let name_start = j;
-                while j < n
-                    && !matches!(
-                        html[j],
-                        b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'=' | b'>' | b'/'
-                    )
-                {
-                    j += 1;
-                }
-                let name = &low[name_start..j];
-                while j < n && matches!(html[j], b' ' | b'\t' | b'\n' | 0x0c | b'\r') {
-                    j += 1;
-                }
-                let mut value: Option<Vec<u8>> = None;
-                if j < n && html[j] == b'=' {
-                    j += 1;
-                    while j < n && matches!(html[j], b' ' | b'\t' | b'\n' | 0x0c | b'\r') {
-                        j += 1;
-                    }
-                    if j < n && (html[j] == b'"' || html[j] == b'\'') {
-                        let quote = html[j];
-                        j += 1;
-                        let val_start = j;
-                        match find_byte_from(html, quote, j) {
-                            Some(end_q) => {
-                                value = Some(html[val_start..end_q].to_vec());
-                                j = end_q + 1;
-                            }
-                            None => {
-                                value = Some(html[val_start..n].to_vec());
-                                j = n;
-                            }
-                        }
-                    } else {
-                        let val_start = j;
-                        while j < n
-                            && !matches!(html[j], b' ' | b'\t' | b'\n' | 0x0c | b'\r' | b'>')
-                        {
-                            j += 1;
-                        }
-                        value = Some(html[val_start..j].to_vec());
-                    }
-                }
-                if name == b"href" && href_value.is_none() {
-                    href_value = Some(value.unwrap_or_default());
-                }
-            }
-            if let Some(hv) = href_value {
-                let s = String::from_utf8_lossy(&hv).into_owned();
-                if let Some(decoded) = decode_entities(&s) {
+        if low[i..].starts_with(b"<a") && at_tag_boundary(&low, i + 2) {
+            let (attributes, end) = read_attributes(html, &low, i + 2);
+            i = end;
+            let href = attributes
+                .into_iter()
+                .find(|(name, _)| *name == b"href")
+                .map(|(_, value)| value);
+            if let Some(Ok(candidate)) = href.map(std::str::from_utf8) {
+                if let Some(decoded) = decode_entities(candidate) {
                     out.push(decoded);
                 }
             }
-            i = j;
             continue;
         }
         i += 1;
@@ -657,15 +642,22 @@ pub(crate) fn external(url: &str, publisher_domain: &str) -> bool {
     host != publisher_domain && !host.ends_with(&format!(".{publisher_domain}"))
 }
 
-pub fn extract_links(html: &[u8], base_url: &str, publisher_domain: &str) -> (Vec<String>, u64) {
+pub fn extract_links(
+    html: &[u8],
+    base_url: &str,
+    publisher_domain: &str,
+    link_url_cap_bytes: usize,
+) -> (Vec<String>, u64) {
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
     for candidate in iter_hrefs(html) {
-        let trimmed = candidate.trim();
-        if let Some(url) = normalize_url(trimmed, base_url) {
-            if external(&url, publisher_domain) && seen.insert(url.clone()) {
-                urls.push(url);
-            }
+        let Some(url) = normalize_url(trim_whitespace(&candidate), base_url) else {
+            continue;
+        };
+        let within_cap = crate::jcs::canonicalize(&Value::String(url.clone()))
+            .is_ok_and(|serialized| serialized.len() <= link_url_cap_bytes);
+        if within_cap && external(&url, publisher_domain) && seen.insert(url.clone()) {
+            urls.push(url);
         }
     }
     let total = urls.len() as u64;
@@ -688,52 +680,61 @@ pub fn links_member(urls: &[String], total: u64, cap_bytes: usize) -> Value {
     );
 }
 
-pub fn extract_text(html: &[u8]) -> String {
+fn without_comments_and_rawtext(html: &[u8]) -> Vec<u8> {
     let low = html.to_ascii_lowercase();
     let n = html.len();
-    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n);
     let mut i = 0usize;
     while i < n {
         if low[i..].starts_with(b"<!--") {
-            i = find_from(&low, b"-->", i + 4).map(|e| e + 3).unwrap_or(n);
+            i = comment_close(&low, i);
             out.push(b' ');
-            continue;
-        }
-        if let Some(tag) = find_rawtext_tag(&low, i) {
-            let start_end = tag_end(html, i);
-            let close_pat = [b"</".as_slice(), tag].concat();
-            i = match find_from(&low, &close_pat, start_end) {
-                Some(close) => tag_end(html, close) + 1,
-                None => n,
-            };
+        } else if let Some(tag) = find_rawtext_tag(&low, i) {
+            i = rawtext_close(html, &low, i, tag);
             out.push(b' ');
-            continue;
+        } else {
+            out.push(html[i]);
+            i += 1;
         }
-        let c = html[i];
-        if c == b'<' {
-            let next_byte = html.get(i + 1).copied();
-            let opens_tag = next_byte.is_some_and(|b| b.is_ascii_alphabetic())
-                || matches!(next_byte, Some(b'/') | Some(b'!') | Some(b'?'));
-            if opens_tag {
-                i = tag_end(html, i) + 1;
-                out.push(b' ');
-                continue;
-            }
-        }
-        let search_from = if c == b'<' { i + 1 } else { i };
-        let nxt = find_byte_from(html, b'<', search_from).unwrap_or(n);
-        out.extend_from_slice(&html[i..nxt]);
-        i = nxt;
     }
-    let text = String::from_utf8_lossy(&out).into_owned();
-    let text = decode_text_entities(&text);
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    out
+}
+
+pub fn extract_text(html: &[u8]) -> String {
+    let source = without_comments_and_rawtext(html);
+    let low = source.to_ascii_lowercase();
+    let n = source.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut i = 0usize;
+    while i < n {
+        let opens_tag = source[i] == b'<'
+            && source
+                .get(i + 1)
+                .is_some_and(|&b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?'));
+        if opens_tag {
+            i = read_attributes(&source, &low, i + 1).1;
+            out.push(b' ');
+        } else {
+            out.push(source[i]);
+            i += 1;
+        }
+    }
+    let text = decode_text_entities(&String::from_utf8_lossy(&out));
+    text.split(|c: char| c.is_ascii() && is_whitespace(c as u8))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     const BASE: &str = "https://example.com/blog/post-1";
+    const CAP: usize = 2048;
+
+    fn links(html: &[u8]) -> Vec<String> {
+        extract_links(html, BASE, "example.com", CAP).0
+    }
 
     #[test]
     fn normalize_oracle() {
@@ -804,7 +805,7 @@ mod tests {
             (br#"<a href="https://example.org/x?y=&#xD800;">t</a>"#, &[]),
         ];
         for (html, expected) in cases {
-            let (urls, total) = extract_links(html, BASE, "example.com");
+            let (urls, total) = extract_links(html, BASE, "example.com", CAP);
             assert_eq!(urls, *expected, "html {:?}", String::from_utf8_lossy(html));
             assert_eq!(total, expected.len() as u64);
         }
@@ -815,13 +816,112 @@ mod tests {
         ]
         .concat();
         assert_eq!(
-            extract_links(&long, BASE, "example.com").0,
+            extract_links(&long, BASE, "example.com", CAP).0,
             Vec::<String>::new()
         );
         let arabic = "<a href=\"https://example.org/x?y=&#٦٥;z\">t</a>".as_bytes();
         assert_eq!(
-            extract_links(arabic, BASE, "example.com").0,
+            extract_links(arabic, BASE, "example.com", CAP).0,
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn href_that_is_not_well_formed_utf8_is_discarded() {
+        assert_eq!(
+            links(b"<a href=\"https://example.org/\xff\"><a href=\"https://example.org/ok\">"),
+            ["https://example.org/ok"]
+        );
+    }
+
+    #[test]
+    fn hex_reference_needs_a_lowercase_x() {
+        assert_eq!(
+            links(
+                b"<a href=\"&#X68;ttps://example.org/x\"><a href=\"&#x68;ttps://example.org/y\">"
+            ),
+            ["https://example.org/y"]
+        );
+        assert_eq!(extract_text(b"&#X41;&#x41;"), "&#X41;A");
+    }
+
+    #[test]
+    fn candidate_trim_removes_ascii_whitespace_alone() {
+        assert_eq!(
+            links(b"<a href=\"&#32;https://example.org/sp&#9;&#12;\">"),
+            ["https://example.org/sp"]
+        );
+        assert_eq!(
+            links(b"<a href=\"&#160;https://example.org/nbsp\">"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn link_above_link_url_cap_is_discarded_and_not_counted() {
+        let at_cap = format!("https://example.org/{}", "k".repeat(CAP - 22));
+        let above_cap = format!("https://example.org/{}", "m".repeat(CAP - 21));
+        let html = format!("<a href=\"{above_cap}\"><a href=\"{at_cap}\">");
+        let (urls, total) = extract_links(html.as_bytes(), BASE, "example.com", CAP);
+        assert_eq!(urls, [at_cap]);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn comment_marker_opens_a_comment_inside_any_tag_but_an_a_start_tag() {
+        assert_eq!(
+            links(b"<a title=\"<!--\" href=\"https://example.org/x\">--><a href=\"https://example.org/y\">"),
+            ["https://example.org/x", "https://example.org/y"]
+        );
+        assert_eq!(
+            links(b"<div title=\"<!--\"><a href=\"https://example.org/x\">--><a href=\"https://example.org/y\">"),
+            ["https://example.org/y"]
+        );
+    }
+
+    #[test]
+    fn raw_text_start_tag_ends_by_the_attribute_rule() {
+        assert_eq!(
+            links(b"<script a\"b>z</script><a href=\"https://example.org/d\">"),
+            ["https://example.org/d"]
+        );
+        assert_eq!(
+            links(b"<style x=a\"b>z</style><a href=\"https://example.org/d2\">\""),
+            ["https://example.org/d2"]
+        );
+    }
+
+    #[test]
+    fn text_removes_comments_and_raw_text_inside_any_tag() {
+        assert_eq!(extract_text(b"<p title=\"<!--\">x</p>-->y"), "");
+        assert_eq!(extract_text(b"<a title=\"<!--\" href=\"/x\">x</a>-->y"), "");
+        assert_eq!(
+            extract_text(b"<a title=\"<script>\" href=\"/x\">x</a></script>y"),
+            ""
+        );
+    }
+
+    #[test]
+    fn text_reads_tags_by_the_attribute_rule() {
+        assert_eq!(extract_text(b"<p a\"b>x</p>y"), "x y");
+        assert_eq!(extract_text(b"<script>z</script a\"b>x"), "x");
+        assert_eq!(extract_text(b"<p=\">\"x>y"), "y");
+        assert_eq!(extract_text(b"a<b"), "a");
+    }
+
+    #[test]
+    fn text_collapses_ascii_whitespace_alone() {
+        assert_eq!(
+            extract_text("a \t\n\x0c\r b\u{a0}c\u{2003}d\x0be".as_bytes()),
+            "a b\u{a0}c\u{2003}d\x0be"
+        );
+    }
+
+    #[test]
+    fn text_replaces_each_maximal_subpart_once() {
+        assert_eq!(
+            extract_text(b"a\xe2\x82A \xf0\x80\x80b"),
+            "a\u{fffd}A \u{fffd}\u{fffd}\u{fffd}b"
         );
     }
 }
