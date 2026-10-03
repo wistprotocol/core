@@ -204,9 +204,6 @@ pub struct Fetch<'a> {
     pub collection: &'a str,
     pub last_accepted: Option<&'a Value>,
     pub latest: Option<&'a Value>,
-    /// WIST-1 §7: from the discovery of a recovery rotation until its settlement, the Catalog ID
-    /// and signing key of every Catalog queued under its name or waiting for its Collection.
-    pub recovery: Option<&'a [(String, PublicKey)]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,16 +233,7 @@ pub fn order(fetch: &Fetch<'_>, fetched: &Value, signer: Option<&PublicKey>) -> 
     if fetched["publisher"] != fetch.publisher || fetched["collection"] != fetch.collection {
         return Pull::Refused("WIST2-E04");
     }
-    let reserved = same_id(fetched, fetch.latest)
-        || match fetch.recovery {
-            None => same_id(fetched, fetch.last_accepted),
-            Some(signed) => catalog_id(fetched).is_ok_and(|id| {
-                signed
-                    .iter()
-                    .any(|(queued, key)| *queued == id && Some(key) == signer)
-            }),
-        };
-    if reserved {
+    if same_id(fetched, fetch.latest) || same_id(fetched, fetch.last_accepted) {
         return Pull::Idempotent;
     }
     let instant = |catalog: &Value| {
@@ -261,6 +249,68 @@ pub fn order(fetch: &Fetch<'_>, fetched: &Value, signer: Option<&PublicKey>) -> 
     Pull::Accepted(signer.cloned())
 }
 
+pub struct Window<'a> {
+    pub opened: bool,
+    pub queued: &'a [(Value, PublicKey)],
+    pub waiting: Option<&'a (Value, PublicKey)>,
+}
+
+impl Window<'_> {
+    fn held_under<'k>(&'k self, signer: &'k PublicKey) -> impl Iterator<Item = &'k Value> + 'k {
+        let waiting = self.waiting.filter(|_| !self.opened);
+        self.queued
+            .iter()
+            .chain(waiting)
+            .filter(move |(_, key)| key == signer)
+            .map(|(catalog, _)| catalog)
+    }
+}
+
+pub fn order_in_window(
+    fetch: &Fetch<'_>,
+    window: &Window<'_>,
+    fetched: &Value,
+    signer: &PublicKey,
+) -> Pull {
+    if fetched["publisher"] != fetch.publisher || fetched["collection"] != fetch.collection {
+        return Pull::Refused("WIST2-E04");
+    }
+    let reserved = same_id(fetched, fetch.latest)
+        || window
+            .held_under(signer)
+            .any(|held| same_id(fetched, Some(held)));
+    if reserved {
+        return Pull::Idempotent;
+    }
+    let instant = |catalog: &Value| {
+        catalog["generated_at"]
+            .as_str()
+            .and_then(|at| log_seconds(at).ok())
+    };
+    let at = instant(fetched);
+    if fetch
+        .latest
+        .into_iter()
+        .chain(window.held_under(signer))
+        .any(|held| at <= instant(held))
+    {
+        return Pull::Refused("WIST2-E05");
+    }
+    Pull::Accepted(Some(signer.clone()))
+}
+
+pub fn pull_in_window(
+    fetch: &Fetch<'_>,
+    window: &Window<'_>,
+    octets: &[u8],
+    attempt: &Attempt<'_>,
+) -> Pull {
+    match judged(fetch, octets, attempt) {
+        Ok((envelope, signer)) => order_in_window(fetch, window, &envelope["catalog"], &signer),
+        Err(refused) => refused.map_or(Pull::Failed, Pull::Refused),
+    }
+}
+
 /// WIST-2 §8: an answer above the read bound is a failed fetch, neither refused nor accepted.
 pub fn read(octets: &[u8], attempt: &Attempt<'_>) -> Pull {
     if octets.len() as u64 > CATALOG_FILE_READ_MAX_BYTES {
@@ -272,21 +322,30 @@ pub fn read(octets: &[u8], attempt: &Attempt<'_>) -> Pull {
     }
 }
 
-pub fn pull(fetch: &Fetch<'_>, octets: &[u8], attempt: &Attempt<'_>) -> Pull {
+fn judged(
+    fetch: &Fetch<'_>,
+    octets: &[u8],
+    attempt: &Attempt<'_>,
+) -> Result<(Value, PublicKey), Option<&'static str>> {
     if octets.len() as u64 > CATALOG_FILE_READ_MAX_BYTES {
-        return Pull::Failed;
+        return Err(None);
     }
-    let judged = parse(octets).and_then(|envelope| {
-        check_form(&envelope)?;
-        let signer = judge_checked(
-            &envelope,
-            attempt,
-            Some((fetch.publisher, fetch.collection)),
-        )?;
-        Ok((envelope, signer))
-    });
-    match judged {
+    parse(octets)
+        .and_then(|envelope| {
+            check_form(&envelope)?;
+            let signer = judge_checked(
+                &envelope,
+                attempt,
+                Some((fetch.publisher, fetch.collection)),
+            )?;
+            Ok((envelope, signer))
+        })
+        .map_err(Some)
+}
+
+pub fn pull(fetch: &Fetch<'_>, octets: &[u8], attempt: &Attempt<'_>) -> Pull {
+    match judged(fetch, octets, attempt) {
         Ok((envelope, signer)) => order(fetch, &envelope["catalog"], Some(&signer)),
-        Err(code) => Pull::Refused(code),
+        Err(refused) => refused.map_or(Pull::Failed, Pull::Refused),
     }
 }

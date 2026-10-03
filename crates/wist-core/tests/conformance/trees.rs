@@ -36,15 +36,19 @@ fn disposition(walked: Walk) -> Value {
 fn a_catalog_tree_is_walked_depth_first_and_refused_whole_at_its_first_broken_rule() {
     let vector = read_json("vectors/wist2/catalog-tree.json");
     let cases = vector["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 53);
+    assert_eq!(cases.len(), 54);
     for case in cases {
         let catalog: Catalog = serde_json::from_value(case["catalog"].clone()).unwrap();
-        let walked = walk(
-            &catalog,
-            &bounds(&case["parameters"]),
-            served(&case["tree_files"]),
-        );
-        assert_eq!(disposition(walked), case["expected"], "{}", case["name"]);
+        let mut fetched = Vec::new();
+        let walked = walk(&catalog, &bounds(&case["parameters"]), |hex| {
+            fetched.push(hex.to_owned());
+            served(&case["tree_files"])(hex)
+        });
+        let distinct: std::collections::BTreeSet<&String> = fetched.iter().collect();
+        assert_eq!(distinct.len(), fetched.len(), "{}", case["name"]);
+        let mut outcome = disposition(walked);
+        outcome["fetched"] = json!(fetched);
+        assert_eq!(outcome, case["expected"], "{}", case["name"]);
     }
 }
 
@@ -94,8 +98,8 @@ fn a_suspended_fetch_suspends_the_walk_without_refusing_it() {
     assert_eq!(walked, Walk::Suspended);
     assert_eq!(calls, 2);
     assert_eq!(
-        disposition(walk(&catalog, &bounds, served(files))),
-        case["expected"]
+        disposition(walk(&catalog, &bounds, served(files)))["list"],
+        case["expected"]["list"]
     );
 }
 

@@ -5,7 +5,7 @@ use wist_core::aggregator_keys::{self, Outcome, Registry};
 use wist_core::checkpoint::{self, Checkpoint};
 use wist_core::crypto::PublicKey;
 use wist_core::merkle::{self, LeafHashes};
-use wist_core::objects::{AggregatorKeyEntry, Anchor, StateEntry};
+use wist_core::objects::{AggregatorKeyEntry, Anchor, LogAnchorEnvelope, StateEntry};
 
 const EPOCH_CAP_BYTES: u64 = 268_435_456;
 const CADENCE_SECONDS: i64 = 3600;
@@ -593,4 +593,30 @@ fn the_two_entry_orders_of_one_epochs_add_and_remove_leave_one_registry() {
             < second.iter().position(|a| a == "aggregator_key_remove"),
         "both histories place the addition on the same side of the removal"
     );
+}
+
+#[test]
+fn an_anchor_failing_its_schema_is_rejected_before_its_signature_and_predecessor_null_fails_it() {
+    let vector = vector();
+    let cases = vector["anchor_cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 3);
+    for case in cases {
+        let envelope = &case["anchor"];
+        let outcome = match serde_json::from_value::<LogAnchorEnvelope>(envelope.clone()) {
+            Err(_) => "WIST3-E03",
+            Ok(typed) => {
+                let genesis = &typed.anchor.genesis_key;
+                let public_key = PublicKey::from_b64u(&genesis.public_key).unwrap();
+                let signed = typed.sig.key_id == genesis.key_id
+                    && wist_core::envelope::verify_envelope(envelope, "anchor", &public_key)
+                        .is_ok();
+                if signed {
+                    "accepted"
+                } else {
+                    "signature"
+                }
+            }
+        };
+        assert_eq!(outcome, case["expected"], "{}", case["name"]);
+    }
 }

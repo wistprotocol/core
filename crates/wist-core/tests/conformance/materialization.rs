@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use wist_core::crypto::{hex_decode, SigningKey};
 use wist_core::item::{item_id, judge_payload, SizeCaps};
-use wist_core::materialization::{self, ContentTuple};
+use wist_core::materialization::{self, ContentTuple, LinkRow};
 use wist_core::objects::publisher::thumbprint;
-use wist_core::objects::{PageItem, PublisherEnvelope, StateEntry};
+use wist_core::objects::{PageItem, Payload, PublisherEnvelope, StateEntry};
 use wist_core::sealing::{Records, Removal};
 use wist_core::snapshot::content_digest;
 use wist_core::withdrawal::WithdrawalReplay;
@@ -92,7 +92,7 @@ impl EventReplay {
         .unwrap()
     }
 
-    fn assert_reaches(&self, label: &str, want: &Value) {
+    fn assert_reaches(&self, label: &str, want: &Value, payloads: &Value) {
         let records: Vec<Value> = self
             .records
             .records()
@@ -128,6 +128,19 @@ impl EventReplay {
             want["materialized"],
             "{label}: materialized"
         );
+        let links: Vec<LinkRow> = materialized
+            .iter()
+            .flat_map(|tuple| {
+                let payload: Payload =
+                    serde_json::from_value(payloads[&tuple.item_id].clone()).unwrap();
+                materialization::links(&tuple.url, &payload)
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&links).unwrap(),
+            want["links"],
+            "{label}: links"
+        );
         assert_eq!(
             content_digest(&materialized).unwrap(),
             want["content_digest"].as_str().unwrap(),
@@ -158,6 +171,7 @@ fn record_materialization_cases_replay_every_epoch_and_resume_from_the_snapshot_
         assert_eq!(public, key["x"].as_str().unwrap(), "{name}");
         assert_eq!(thumbprint(&public), key["kid"].as_str().unwrap(), "{name}");
     }
+    assert_eq!(vector["cases"].as_array().unwrap().len(), 3);
     let mut pages = BTreeMap::new();
     let mut epochs_replayed = 0;
     for case in vector["cases"].as_array().unwrap() {
@@ -200,9 +214,9 @@ fn record_materialization_cases_replay_every_epoch_and_resume_from_the_snapshot_
                     resumed.apply(height, event, &publishers);
                 }
             }
-            replay.assert_reaches(&label, want);
+            replay.assert_reaches(&label, want, &vector["payloads"]);
             if let Some(resumed) = &resumed {
-                resumed.assert_reaches(&format!("{label}, resumed"), want);
+                resumed.assert_reaches(&format!("{label}, resumed"), want, &vector["payloads"]);
             }
             if height == snapshot_height {
                 let replayed: Vec<StateEntry> = replay
@@ -258,7 +272,7 @@ fn record_materialization_cases_replay_every_epoch_and_resume_from_the_snapshot_
                     }
                 }
                 let consumer = EventReplay::resumed(&tuples);
-                consumer.assert_reaches(&format!("{label}, resumed"), want);
+                consumer.assert_reaches(&format!("{label}, resumed"), want, &vector["payloads"]);
                 resumed = Some(consumer);
             }
             epochs_replayed += 1;
