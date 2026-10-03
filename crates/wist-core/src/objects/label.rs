@@ -57,7 +57,11 @@ pub struct Dispute {
     pub label: String,
     pub log: String,
     pub height: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::objects::present"
+    )]
     pub reason: Option<String>,
     pub asserted_at: String,
 }
