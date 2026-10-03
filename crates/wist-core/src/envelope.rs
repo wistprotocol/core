@@ -40,6 +40,18 @@ pub fn verify_envelope(doc: &Value, inner_key: &str, key: &PublicKey) -> Result<
     verify(key, &canonical, sig)
 }
 
+pub fn envelope_with_signature(
+    inner: &Value,
+    inner_key: &str,
+    key_id: &str,
+    signature: &[u8; 64],
+) -> Value {
+    serde_json::json!({
+        inner_key: inner,
+        "sig": {"key_id": key_id, "alg": "Ed25519", "value": b64u_encode(signature)}
+    })
+}
+
 pub fn sign_envelope(
     inner: &Value,
     inner_key: &str,
@@ -47,11 +59,12 @@ pub fn sign_envelope(
     sk: &SigningKey,
 ) -> Result<Value, Error> {
     let canonical = jcs::canonicalize(inner)?;
-    let value = sk.sign(&canonical);
-    Ok(serde_json::json!({
-        inner_key: inner,
-        "sig": {"key_id": key_id, "alg": "Ed25519", "value": value}
-    }))
+    Ok(envelope_with_signature(
+        inner,
+        inner_key,
+        key_id,
+        &sk.sign_bytes(&canonical),
+    ))
 }
 
 #[cfg(test)]
@@ -73,6 +86,21 @@ mod tests {
         assert_eq!(env["sig"]["alg"], "Ed25519");
         assert_eq!(env["sig"]["key_id"], "k1");
         verify_envelope(&env, "catalog", &sk.public()).unwrap();
+    }
+
+    #[test]
+    fn an_envelope_assembled_from_a_detached_signature_equals_the_signed_one() {
+        let sk = crate::crypto::SigningKey::from_seed(&[9u8; 32]);
+        let inner = serde_json::json!({"b": [1, 2], "a": "x"});
+        let signature = sk.sign_bytes(&jcs::canonicalize(&inner).unwrap());
+        let assembled = envelope_with_signature(&inner, "catalog", "k1", &signature);
+        assert_eq!(
+            assembled,
+            sign_envelope(&inner, "catalog", "k1", &sk).unwrap()
+        );
+        verify_envelope(&assembled, "catalog", &sk.public()).unwrap();
+        let other = envelope_with_signature(&inner, "catalog", "k1", &[0u8; 64]);
+        assert!(verify_envelope(&other, "catalog", &sk.public()).is_err());
     }
 
     #[test]
