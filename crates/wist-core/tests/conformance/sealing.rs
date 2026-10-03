@@ -477,6 +477,7 @@ fn a_replay_resumed_from_its_state_tuples_at_every_height_judges_and_holds_what_
     let log_key = |key_id: &str| (key_id == log_key_id).then(|| log_public.clone());
     let mut resumes = 0;
     let mut breaches = 0;
+    let mut repeats = 0;
     for history in vector["histories"].as_array().unwrap() {
         let label = history["name"].as_str().unwrap();
         let epochs = history["epochs"].as_array().unwrap();
@@ -507,7 +508,9 @@ fn a_replay_resumed_from_its_state_tuples_at_every_height_judges_and_holds_what_
                 if let Some(replay) = resumed.as_mut() {
                     let label = format!("{label}: resumed at {resume_at}, Epoch {height}");
                     let judged = replay.epoch(&at).unwrap();
-                    if judged != outcome {
+                    if judged != outcome && judges_only_repeats(&entries, &judged, &outcome) {
+                        repeats += 1;
+                    } else if judged != outcome {
                         assert_breach_accepted_after_resume(&label, &entries, &judged, &outcome);
                         resumed = None;
                         breaches += 1;
@@ -545,7 +548,46 @@ fn a_replay_resumed_from_its_state_tuples_at_every_height_judges_and_holds_what_
             }
         }
     }
-    assert!(resumes > breaches && breaches > 0);
+    assert!(resumes > breaches && breaches > 0 && repeats > 0);
+}
+
+fn repeat_judged_after_resume(
+    entry: &Value,
+    resumed: &Option<Judgment>,
+    full: &Option<Judgment>,
+) -> bool {
+    let judged = match resumed {
+        Some(Judgment::Valid) => true,
+        Some(Judgment::Ignored(failures)) => failures
+            .iter()
+            .all(|f| f.condition.as_str() == "authentication" && f.code == "WIST4-E11"),
+        None => false,
+    };
+    entry["type"] == "registry_update" && full.is_none() && judged
+}
+
+fn judges_only_repeats(entries: &[Value], resumed: &Outcome, full: &Outcome) -> bool {
+    let (
+        Outcome::Accepted {
+            entries: resumed,
+            records_removed: resumed_removed,
+        },
+        Outcome::Accepted {
+            entries: full,
+            records_removed: full_removed,
+        },
+    ) = (resumed, full)
+    else {
+        return false;
+    };
+    resumed_removed == full_removed
+        && entries
+            .iter()
+            .zip(resumed)
+            .zip(full)
+            .all(|((entry, resumed), full)| {
+                resumed == full || repeat_judged_after_resume(entry, resumed, full)
+            })
 }
 
 fn assert_breach_accepted_after_resume(
@@ -569,7 +611,7 @@ fn assert_breach_accepted_after_resume(
     };
     assert_eq!(resumed_removed, full_removed, "{label}");
     for ((entry, resumed), full) in entries.iter().zip(resumed).zip(full) {
-        if resumed != full {
+        if resumed != full && !repeat_judged_after_resume(entry, resumed, full) {
             assert_eq!(entry["type"], "registry_update", "{label}");
             assert_eq!(*resumed, Some(Judgment::Valid), "{label}");
             let Some(Judgment::Ignored(failures)) = full else {

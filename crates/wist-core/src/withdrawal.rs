@@ -6,7 +6,7 @@ use crate::objects::{
     RegistryAction, RegistryDetails, RegistryUpdateEnvelope, StateEntry, WithdrawalEntry,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default)]
 struct Sightings {
@@ -100,13 +100,23 @@ pub enum Disposition {
         withdrawn_height: u64,
         changed: bool,
     },
+    Repeated {
+        item_id: String,
+        withdrawn_height: u64,
+    },
     Rejected(&'static str),
     NotWithdrawal,
+}
+
+pub(crate) enum Act {
+    Judged(Disposition),
+    Unauthenticated,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct WithdrawalReplay {
     withdrawn: BTreeMap<String, (u64, String)>,
+    accepted: BTreeSet<String>,
 }
 
 impl WithdrawalReplay {
@@ -177,44 +187,70 @@ impl WithdrawalReplay {
         log_key: impl Fn(&str) -> Option<PublicKey>,
         sealed: &SealedItems,
     ) -> Disposition {
+        match self.act(height, doc, log_key, sealed) {
+            Act::Judged(disposition) => disposition,
+            Act::Unauthenticated => Disposition::Rejected("WIST4-E11"),
+        }
+    }
+
+    pub(crate) fn act(
+        &mut self,
+        height: u64,
+        doc: &Value,
+        log_key: impl Fn(&str) -> Option<PublicKey>,
+        sealed: &SealedItems,
+    ) -> Act {
+        let rejected = |code| Act::Judged(Disposition::Rejected(code));
         if crate::jcs::canonicalize(doc).is_err() {
-            return Disposition::Rejected("WIST1-E05");
+            return rejected("WIST1-E05");
         }
         let envelope: RegistryUpdateEnvelope = match serde_json::from_value(doc.clone()) {
             Ok(envelope) => envelope,
-            Err(_) => return Disposition::Rejected("WIST4-E11"),
+            Err(_) => return rejected("WIST4-E11"),
         };
         if let Err(code) = envelope_fields(&envelope) {
-            return Disposition::Rejected(code);
+            return rejected(code);
         }
         if !matches!(envelope.update.action, RegistryAction::PayloadWithdrawal) {
-            return Disposition::NotWithdrawal;
+            return Act::Judged(Disposition::NotWithdrawal);
         }
         let details = match envelope.update.typed_details() {
             Ok(RegistryDetails::PayloadWithdrawal(details)) => details,
-            _ => return Disposition::Rejected("WIST4-E04"),
+            _ => return rejected("WIST4-E04"),
         };
+        let Ok(update_id) = crate::item::sha256_hex("sha256:", &doc["update"]) else {
+            return rejected("WIST1-E05");
+        };
+        if self.accepted.contains(&update_id) {
+            if let Some(withdrawn_height) = self.withdrawn_height(&details.delta_id) {
+                return Act::Judged(Disposition::Repeated {
+                    item_id: details.delta_id,
+                    withdrawn_height,
+                });
+            }
+        }
         let Some(key) = log_key(&envelope.sig.key_id) else {
-            return Disposition::Rejected("WIST4-E11");
+            return Act::Unauthenticated;
         };
         if crate::envelope::verify_envelope(doc, "update", &key).is_err() {
-            return Disposition::Rejected("WIST4-E11");
+            return Act::Unauthenticated;
         }
         let publisher = envelope.update.subject;
         if sealed.meets_contract(&details.delta_id, &publisher, height) == Some(false) {
-            return Disposition::Rejected("WIST4-E04");
+            return rejected("WIST4-E04");
         }
+        self.accepted.insert(update_id);
         let changed = !self.withdrawn.contains_key(&details.delta_id);
         let (withdrawn_height, _) = self
             .withdrawn
             .entry(details.delta_id.clone())
             .or_insert((height, publisher.clone()));
-        Disposition::Accepted {
+        Act::Judged(Disposition::Accepted {
             item_id: details.delta_id,
             publisher,
             withdrawn_height: *withdrawn_height,
             changed,
-        }
+        })
     }
 }
 
@@ -262,6 +298,133 @@ impl From<Disposition> for Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::SigningKey;
+    use serde_json::json;
+
+    const ITEM: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn log_key() -> SigningKey {
+        SigningKey::from_seed(&[7; 32])
+    }
+
+    fn act(legal_basis: &str) -> Value {
+        let update = json!({
+            "wist_version": "1.0.0",
+            "action": "payload_withdrawal",
+            "subject": "a.example",
+            "effective_at": "2026-08-05T12:00:00Z",
+            "details": {"delta_id": ITEM, "legal_basis": legal_basis, "jurisdiction": "BR"}
+        });
+        crate::envelope::sign_envelope(&update, "update", "log", &log_key()).unwrap()
+    }
+
+    fn unverified(mut act: Value) -> Value {
+        act["sig"]["value"] = json!(SigningKey::from_seed(&[8; 32]).sign(b"other"));
+        act
+    }
+
+    fn sealed() -> SealedItems {
+        let mut sealed = SealedItems::new();
+        sealed.seal(ITEM, "a.example", Kind::Page, 1);
+        sealed
+    }
+
+    fn apply(replay: &mut WithdrawalReplay, height: u64, act: &Value) -> Disposition {
+        let key = log_key().public();
+        replay.apply(
+            height,
+            act,
+            |key_id| (key_id == "log").then(|| key.clone()),
+            &sealed(),
+        )
+    }
+
+    #[test]
+    fn an_accepted_update_under_a_signature_that_does_not_verify_repeats_at_the_earliest_height() {
+        let mut replay = WithdrawalReplay::new();
+        assert!(matches!(
+            apply(&mut replay, 3, &act("order")),
+            Disposition::Accepted {
+                withdrawn_height: 3,
+                ..
+            }
+        ));
+        assert_eq!(
+            apply(&mut replay, 5, &unverified(act("order"))),
+            Disposition::Repeated {
+                item_id: ITEM.into(),
+                withdrawn_height: 3
+            }
+        );
+        assert_eq!(
+            apply(&mut replay, 3, &unverified(act("order"))),
+            Disposition::Repeated {
+                item_id: ITEM.into(),
+                withdrawn_height: 3
+            }
+        );
+        assert_eq!(replay.withdrawn_height(ITEM), Some(3));
+    }
+
+    #[test]
+    fn another_update_withdrawing_a_withdrawn_item_is_judged() {
+        let mut replay = WithdrawalReplay::new();
+        apply(&mut replay, 3, &act("order"));
+        assert_eq!(
+            apply(&mut replay, 5, &unverified(act("second order"))),
+            Disposition::Rejected("WIST4-E11")
+        );
+        assert!(matches!(
+            apply(&mut replay, 5, &act("second order")),
+            Disposition::Accepted {
+                withdrawn_height: 3,
+                changed: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_field_failure_keeps_its_diagnostic_when_the_update_was_accepted() {
+        let mut replay = WithdrawalReplay::new();
+        apply(&mut replay, 3, &act("order"));
+        let mut malformed = act("order");
+        malformed["sig"]["alg"] = json!("Ed448");
+        assert_eq!(
+            apply(&mut replay, 5, &malformed),
+            Disposition::Rejected("WIST4-E11")
+        );
+    }
+
+    #[test]
+    fn an_update_only_ignored_before_is_judged_again() {
+        let mut replay = WithdrawalReplay::new();
+        assert_eq!(
+            apply(&mut replay, 3, &unverified(act("order"))),
+            Disposition::Rejected("WIST4-E11")
+        );
+        assert!(matches!(
+            apply(&mut replay, 4, &act("order")),
+            Disposition::Accepted {
+                withdrawn_height: 4,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_replay_resumed_from_withdrawal_tuples_holds_no_accepted_update() {
+        let tuples = [StateEntry::Withdrawal(WithdrawalEntry {
+            item_id: ITEM.into(),
+            publisher: "a.example".into(),
+            sealing_height: 3,
+        })];
+        let mut replay = WithdrawalReplay::from_state(&tuples).unwrap();
+        assert_eq!(
+            apply(&mut replay, 5, &unverified(act("order"))),
+            Disposition::Rejected("WIST4-E11")
+        );
+    }
 
     #[test]
     fn a_complete_history_breaks_the_contract_of_an_item_it_never_sealed() {

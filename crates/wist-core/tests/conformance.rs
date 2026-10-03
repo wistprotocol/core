@@ -1049,6 +1049,9 @@ fn act_outcome(
     match disposition {
         Disposition::Accepted {
             withdrawn_height, ..
+        }
+        | Disposition::Repeated {
+            withdrawn_height, ..
         } => (None, Some(withdrawn_height)),
         Disposition::Rejected(code) => (Some(code), None),
         Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),

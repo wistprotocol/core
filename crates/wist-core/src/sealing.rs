@@ -107,6 +107,7 @@ pub enum Condition {
     I6,
     I7,
     Envelope,
+    Authentication,
     Contract,
 }
 
@@ -125,6 +126,7 @@ impl Condition {
             Condition::I6 => "I6",
             Condition::I7 => "I7",
             Condition::Envelope => "envelope",
+            Condition::Authentication => "authentication",
             Condition::Contract => "contract",
         }
     }
@@ -1000,25 +1002,29 @@ impl Replay {
     }
 
     fn apply_withdrawal(&mut self, body: &Value, context: &Context<'_>) -> Option<Judgment> {
-        match self.withdrawals.apply(
+        let ignored = |condition, code| Some(Judgment::Ignored(vec![Failure { condition, code }]));
+        match self.withdrawals.act(
             context.epoch.height,
             body,
             context.epoch.log_key,
             &self.sealed,
         ) {
-            withdrawal::Disposition::Accepted { item_id, .. } => {
+            withdrawal::Act::Judged(withdrawal::Disposition::Accepted { item_id, .. }) => {
                 self.duties.remove(&item_id);
                 Some(Judgment::Valid)
             }
-            withdrawal::Disposition::Rejected(code) => {
+            withdrawal::Act::Judged(withdrawal::Disposition::Rejected(code)) => {
                 let condition = if code == "WIST4-E04" {
                     Condition::Contract
                 } else {
                     Condition::Envelope
                 };
-                Some(Judgment::Ignored(vec![Failure { condition, code }]))
+                ignored(condition, code)
             }
-            withdrawal::Disposition::NotWithdrawal => None,
+            withdrawal::Act::Unauthenticated => ignored(Condition::Authentication, "WIST4-E11"),
+            withdrawal::Act::Judged(
+                withdrawal::Disposition::Repeated { .. } | withdrawal::Disposition::NotWithdrawal,
+            ) => None,
         }
     }
 
