@@ -5,8 +5,14 @@ use wist_core::aggregator_keys::{self, Outcome, Registry};
 use wist_core::checkpoint::{self, Checkpoint};
 use wist_core::crypto::PublicKey;
 use wist_core::merkle::{self, LeafHashes};
-use wist_core::objects::{AggregatorKeyEntry, Anchor, LogAnchorEnvelope, StateEntry};
-use wist_core::registry_updates::{update_id, AcceptedUpdates};
+use wist_core::objects::{
+    AggregatorKeyEntry, Anchor, LogAnchorEnvelope, ParameterEntry, StateEntry,
+};
+use wist_core::parameters::{ActPosition, Disposition, Schedule};
+use wist_core::registry_updates::AcceptedUpdates;
+use wist_core::sealing;
+use wist_core::suffix_list::{self, HeldFile, SuffixList, SuffixListReplay};
+use wist_core::timestamp::log_seconds;
 
 const EPOCH_CAP_BYTES: u64 = 268_435_456;
 const CADENCE_SECONDS: i64 = 3600;
@@ -98,6 +104,8 @@ struct EpochReplay {
     valid_at: BTreeSet<String>,
     tuples: BTreeSet<String>,
     updates: BTreeSet<String>,
+    registry_state: BTreeSet<String>,
+    rejection: Option<String>,
     applied: bool,
     checkpoint: Option<Checkpoint>,
     sealed: Registry,
@@ -110,10 +118,93 @@ struct Replay {
     head: Option<u64>,
 }
 
+#[derive(Clone)]
+struct LogState {
+    keys: Registry,
+    schedule: Option<Schedule>,
+    suffix_lists: SuffixListReplay,
+    replay: sealing::Replay,
+    largest: u64,
+}
+
+impl LogState {
+    fn accepted_updates(&self) -> AcceptedUpdates {
+        let mut updates = AcceptedUpdates::new();
+        let sets = [
+            Some(self.keys.accepted_updates()),
+            self.schedule.as_ref().map(Schedule::accepted_updates),
+            Some(self.suffix_lists.accepted_updates()),
+            Some(self.replay.registry_updates()),
+        ];
+        for set in sets.into_iter().flatten() {
+            for entry in set.entries() {
+                updates.accept(&entry.update_id, entry.sealing_height);
+            }
+        }
+        updates
+    }
+
+    fn registry_state(&self, height: u64) -> BTreeSet<String> {
+        let mut amendments: BTreeMap<(String, i64), StateEntry> = BTreeMap::new();
+        for amendment in self.schedule.iter().flat_map(Schedule::accepted) {
+            amendments.insert(
+                (amendment.parameter.clone(), amendment.effective_at_s),
+                StateEntry::Parameter(ParameterEntry {
+                    name: amendment.parameter.clone(),
+                    effective_at: wist_core::timestamp::instant(amendment.effective_at_s).unwrap(),
+                    value: amendment.value,
+                }),
+            );
+        }
+        amendments
+            .into_values()
+            .chain(
+                self.suffix_lists
+                    .entry_at(height)
+                    .map(StateEntry::SuffixList),
+            )
+            .chain(
+                self.accepted_updates()
+                    .entries()
+                    .into_iter()
+                    .map(StateEntry::RegistryUpdate),
+            )
+            .map(|entry| serde_json::to_string(&entry).unwrap())
+            .collect()
+    }
+}
+
+fn suffix_list_texts(history: &Value) -> BTreeMap<String, Vec<u8>> {
+    history["suffix_lists"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|file| {
+            let octets = file["text"].as_str().unwrap().as_bytes().to_vec();
+            assert_eq!(
+                wist_core::suffix_list::identifier(&octets),
+                file["sha256"].as_str().unwrap()
+            );
+            (file["sha256"].as_str().unwrap().to_owned(), octets)
+        })
+        .collect()
+}
+
 fn replay(history: &Value) -> Replay {
     let log_id = history["log_id"].as_str().unwrap().to_string();
-    let mut adopted = genesis_registry(history);
-    let mut adopted_updates = AcceptedUpdates::new();
+    let files = suffix_list_texts(history);
+    let held = |identifier: &str| {
+        files.get(identifier).map_or(HeldFile::Absent, |octets| {
+            HeldFile::Bytes(octets.len() as u64)
+        })
+    };
+    let mut adopted = LogState {
+        keys: genesis_registry(history),
+        schedule: None,
+        suffix_lists: SuffixListReplay::new(),
+        replay: sealing::Replay::new(),
+        largest: 0,
+    };
     let mut epochs = Vec::new();
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut head: Option<u64> = None;
@@ -122,6 +213,8 @@ fn replay(history: &Value) -> Replay {
     for epoch in history["epochs"].as_array().unwrap() {
         let where_ = format!("{} epoch {}", history["name"], epoch["epoch_number"]);
         let height = epoch["epoch_number"].as_u64().unwrap();
+        let sealed_at = epoch["sealed_at"].as_str().unwrap();
+        let at = log_seconds(sealed_at).unwrap();
         let entries = epoch["entries"].as_array().unwrap();
         let verified_size = verified.as_ref().map_or(0, Checkpoint::tree_size);
         let prior = leaves.clone();
@@ -132,45 +225,116 @@ fn replay(history: &Value) -> Replay {
             leaves.len() as u64,
             "{where_}"
         );
-
-        let mut sealed = adopted.clone();
-        let outcomes = sealed.apply_epoch(height, entries.iter().map(|entry| &entry["body"]));
-        let authenticators = sealed.valid_at(height);
-        let codes: Vec<Option<String>> = outcomes
-            .iter()
-            .zip(entries)
-            .map(|(outcome, entry)| match outcome {
-                Outcome::NotKeyAct => {
-                    aggregator_keys::authenticate(&entry["body"], &authenticators)
-                        .err()
-                        .map(|_| "WIST4-E11".to_string())
-                }
-                other => other.code().map(str::to_string),
-            })
-            .collect();
-        let mut sealed_updates = adopted_updates.clone();
-        for (entry, code) in entries.iter().zip(&codes) {
-            if code.is_none() {
-                sealed_updates.accept(&update_id(&entry["body"]).unwrap(), height);
-            }
-        }
-
         let checkpoint = epoch["checkpoint"]
             .as_str()
             .map(|note| Checkpoint::parse(note).unwrap());
+
+        let mut sealed = adopted.clone();
+        let acts: Vec<(usize, &Value)> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry["type"] == "registry_update")
+            .map(|(index, entry)| (index, &entry["body"]))
+            .collect();
+        let outcomes = sealed
+            .keys
+            .apply_epoch(height, acts.iter().map(|(_, body)| *body));
+        let authenticators = sealed.keys.valid_at(height);
+        let log_key = |key_id: &str| {
+            authenticators
+                .iter()
+                .find(|key| key.key_id == key_id)
+                .map(|key| key.public_key.clone())
+        };
+        sealed.largest = sealed
+            .largest
+            .max(wist_core::epoch::epoch_octets(entries).unwrap());
+        let schedule = sealed.schedule.get_or_insert_with(|| Schedule::new(at));
+        let parameters = sealing::Parameters::from_schedule(schedule, at).unwrap();
+        let suffix_list = sealed
+            .suffix_lists
+            .in_force_at_epoch(height)
+            .map(|(identifier, _)| SuffixList::parse(&files[identifier]).unwrap());
+        let root = checkpoint
+            .as_ref()
+            .map_or_else(String::new, Checkpoint::root_token);
+        let outcome = sealed
+            .replay
+            .epoch(&sealing::Epoch {
+                height,
+                root: &root,
+                sealed_at,
+                parameters: &parameters,
+                suffix_list: suffix_list.as_ref(),
+                log_key: &log_key,
+                entries,
+            })
+            .unwrap_or_else(|e| panic!("{where_}: {e}"));
+        let rejection = match outcome {
+            sealing::Outcome::Rejected { codes } => {
+                assert_eq!(codes.len(), 1, "{where_}");
+                Some(codes[0].clone())
+            }
+            sealing::Outcome::Accepted { .. } => None,
+        };
+
+        let mut codes: Vec<Option<String>> = Vec::with_capacity(acts.len());
+        for (outcome, (index, body)) in outcomes.iter().zip(&acts) {
+            let code = match outcome {
+                Outcome::NotKeyAct if rejection.is_some() => rejection.clone(),
+                Outcome::NotKeyAct => match body["update"]["action"].as_str() {
+                    Some("parameter_change") => match schedule.apply_act(
+                        body,
+                        ActPosition {
+                            epoch_number: height,
+                            entry_index: *index as u64,
+                            sealed_at_s: at,
+                        },
+                        sealed.largest,
+                        log_key,
+                    ) {
+                        Disposition::Rejected { code, .. } => Some(code.to_string()),
+                        _ => None,
+                    },
+                    Some("suffix_list_update") => {
+                        match sealed.suffix_lists.apply(height, body, log_key, held) {
+                            suffix_list::Disposition::Rejected(code) => Some(code.to_string()),
+                            _ => None,
+                        }
+                    }
+                    _ => aggregator_keys::authenticate(body, &authenticators)
+                        .err()
+                        .map(|_| "WIST4-E11".to_string()),
+                },
+                other => other.code().map(str::to_string),
+            };
+            codes.push(code);
+        }
+
         if let Some(checkpoint) = &checkpoint {
-            checkpoint::verify(checkpoint, &log_id, &sealed.valid_at(height), &[])
+            checkpoint::verify(checkpoint, &log_id, &authenticators, &[])
                 .unwrap_or_else(|e| panic!("{where_}: the published Checkpoint verifies: {e}"));
             assert_eq!(checkpoint.epoch_number(), height, "{where_}");
-            assert_eq!(checkpoint.sealed_at(), epoch["sealed_at"], "{where_}");
-            let summary = wist_core::epoch::verify_epoch(
+            assert_eq!(checkpoint.sealed_at(), sealed_at, "{where_}");
+            let summary = wist_core::epoch::verify_epoch_tree(
+                verified_size,
+                checkpoint,
+                entries,
+                &LeafHashes(&prior),
+            )
+            .unwrap_or_else(|e| panic!("{where_}: the Epoch fills the tree it states: {e}"));
+            let judged = wist_core::epoch::verify_epoch(
                 verified_size,
                 checkpoint,
                 entries,
                 &LeafHashes(&prior),
                 EPOCH_CAP_BYTES,
-            )
-            .unwrap_or_else(|e| panic!("{where_}: the Epoch fills the tree it states: {e}"));
+            );
+            assert_eq!(
+                judged.err().and_then(|e| e.code().map(str::to_string)),
+                rejection,
+                "{where_}"
+            );
             assert_eq!(summary.leaf_hashes, leaves[prior.len()..], "{where_}");
             assert_eq!(*checkpoint.root(), merkle::merkle_root(&leaves), "{where_}");
             checkpoint::check_sequence(verified.as_ref(), checkpoint, CADENCE_SECONDS)
@@ -186,7 +350,6 @@ fn replay(history: &Value) -> Replay {
                     .unwrap_or_else(|e| panic!("{where_}: {e}"));
             }
             adopted = sealed.clone();
-            adopted_updates = sealed_updates;
             head = Some(height);
             verified = Some(checkpoint.clone());
         }
@@ -194,21 +357,56 @@ fn replay(history: &Value) -> Replay {
         epochs.push(EpochReplay {
             epoch_number: height,
             codes,
-            valid_at: key_ids(&sealed.valid_at(height)),
-            tuples: tuple_set(&adopted),
-            updates: update_tuples(&adopted_updates),
+            valid_at: key_ids(&sealed.keys.valid_at(height)),
+            tuples: tuple_set(&adopted.keys),
+            updates: update_tuples(&adopted.accepted_updates()),
+            registry_state: adopted.registry_state(height),
+            rejection,
             applied: checkpoint.is_some(),
             checkpoint,
-            sealed,
+            sealed: sealed.keys,
         });
     }
 
     Replay {
         log_id,
         epochs,
-        adopted,
+        adopted: adopted.keys,
         head,
     }
+}
+
+#[test]
+fn a_rejected_epoch_applies_its_key_acts_alone_and_accepts_their_ids_alone() {
+    let mut rejected = 0;
+    for history in histories() {
+        let replayed = replay(&history);
+        for (epoch, replayed) in history["epochs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&replayed.epochs)
+        {
+            let where_ = format!("{} epoch {}", history["name"], replayed.epoch_number);
+            assert_eq!(
+                replayed.rejection.as_deref(),
+                epoch["rejection"].as_str(),
+                "{where_}: {}",
+                epoch["why"]
+            );
+            assert_eq!(
+                replayed.registry_state,
+                stated_tuples(&epoch["expected_registry_state"]),
+                "{where_}: {}",
+                epoch["why"]
+            );
+            if replayed.rejection.is_some() {
+                rejected += 1;
+                assert!(replayed.applied, "{where_}: its Checkpoint verifies");
+            }
+        }
+    }
+    assert!(rejected >= 1, "no rejected Epoch was exercised");
 }
 
 #[test]
@@ -268,9 +466,14 @@ fn every_key_act_is_dispositioned_as_its_authentication_height_and_the_admitted_
     }
     assert_eq!(
         seen,
-        [None, Some("WIST4-E04".into()), Some("WIST4-E11".into())]
-            .into_iter()
-            .collect()
+        [
+            None,
+            Some("WIST3-E03".into()),
+            Some("WIST4-E04".into()),
+            Some("WIST4-E11".into())
+        ]
+        .into_iter()
+        .collect()
     );
     assert!(ties >= 2, "the tie-break cases were not exercised");
 }

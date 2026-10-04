@@ -5,6 +5,7 @@ use crate::objects::{
     AggregatorKeyEntry, Anchor, GenesisKey, KeyAddDetails, RegistryAction, RegistryDetails,
     RegistryUpdateEnvelope,
 };
+use crate::registry_updates::AcceptedUpdates;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -30,6 +31,10 @@ pub enum Outcome {
     Conflict {
         reason: &'static str,
     },
+    Repeated {
+        update_id: String,
+        accepted_height: u64,
+    },
     NotKeyAct,
 }
 
@@ -38,7 +43,7 @@ impl Outcome {
         match self {
             Outcome::Ignored { code, .. } => Some(code),
             Outcome::Conflict { .. } => Some(KEY_ACT_CONFLICT_CODE),
-            Outcome::Accepted { .. } | Outcome::NotKeyAct => None,
+            Outcome::Accepted { .. } | Outcome::Repeated { .. } | Outcome::NotKeyAct => None,
         }
     }
 
@@ -112,6 +117,7 @@ pub struct Registry {
     log_id: String,
     genesis_key_id: Option<String>,
     keys: BTreeMap<String, KeyRecord>,
+    updates: AcceptedUpdates,
 }
 
 impl Registry {
@@ -134,6 +140,7 @@ impl Registry {
             log_id: log_id.to_owned(),
             genesis_key_id: Some(genesis.key_id.clone()),
             keys: [(genesis.key_id.clone(), record)].into_iter().collect(),
+            updates: AcceptedUpdates::new(),
         })
     }
 
@@ -261,7 +268,18 @@ impl Registry {
             log_id: log_id.to_owned(),
             genesis_key_id: Some(genesis.key_id.clone()),
             keys,
+            updates: AcceptedUpdates::new(),
         })
+    }
+
+    /// WIST-4 §5.1: a Consumer resumed from a Snapshot holds the IDs of its `registry_update`
+    /// tuples as accepted.
+    pub fn hold_accepted_updates(&mut self, updates: AcceptedUpdates) {
+        self.updates = updates;
+    }
+
+    pub fn accepted_updates(&self) -> &AcceptedUpdates {
+        &self.updates
     }
 
     pub fn genesis_key_id(&self) -> Option<&str> {
@@ -373,19 +391,35 @@ impl Registry {
                 }
             }
         };
+        let Ok(update_id) = crate::registry_updates::update_id(act) else {
+            return Outcome::Ignored {
+                code: "WIST1-E05",
+                reason: "the act carries no update",
+            };
+        };
+        if let Some(accepted_height) = self.updates.accepted_height(&update_id) {
+            return Outcome::Repeated {
+                update_id,
+                accepted_height,
+            };
+        }
         if authenticate(act, authenticators).is_err() {
             return Outcome::Ignored {
                 code: "WIST4-E11",
                 reason: "no key valid at the Epoch before this one signed the act",
             };
         }
-        match details {
+        let outcome = match details {
             RegistryDetails::KeyAdd(details) => self.admit(height, act, &details),
             RegistryDetails::KeyRemove(details) => {
                 self.retire(height, act, &details.key_id, authenticators)
             }
             _ => Outcome::NotKeyAct,
+        };
+        if outcome.is_accepted() {
+            self.updates.accept(&update_id, height);
         }
+        outcome
     }
 
     fn admit(&mut self, height: u64, act: &Value, details: &KeyAddDetails) -> Outcome {
@@ -784,7 +818,10 @@ mod tests {
         let unknown = registry.apply_epoch(2, &[remove_act("genesis", &genesis, "k7")]);
         assert_eq!(unknown[0].code(), Some(KEY_ACT_CONFLICT_CODE));
         registry.apply_epoch(3, &[remove_act("genesis", &genesis, "k2")]);
-        let again = registry.apply_epoch(4, &[remove_act("genesis", &genesis, "k2")]);
+        let mut later = remove_act("genesis", &genesis, "k2")["update"].clone();
+        later["effective_at"] = json!("2026-08-02T13:00:01Z");
+        let later = crate::envelope::sign_envelope(&later, "update", "genesis", &genesis).unwrap();
+        let again = registry.apply_epoch(4, &[later]);
         assert_eq!(again[0].code(), Some(KEY_ACT_CONFLICT_CODE));
         assert_eq!(registry.record("k2").unwrap().removed_height, Some(3));
     }
@@ -1070,13 +1107,131 @@ mod tests {
         let second = signing_key(2);
         registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
         let first_removal = remove_act("genesis", &genesis, "k2");
-        let second_removal = remove_act("k2", &second, "k2");
-        assert_ne!(first_removal, second_removal);
+        let mut later = first_removal["update"].clone();
+        later["effective_at"] = json!("2026-08-02T13:00:01Z");
+        let second_removal =
+            crate::envelope::sign_envelope(&later, "update", "k2", &second).unwrap();
+        assert_ne!(
+            crate::registry_updates::update_id(&first_removal).unwrap(),
+            crate::registry_updates::update_id(&second_removal).unwrap()
+        );
         let outcomes = registry.apply_epoch(2, &[first_removal.clone(), second_removal]);
         assert!(outcomes.iter().all(Outcome::is_accepted));
         let record = registry.record("k2").unwrap();
         assert_eq!(record.removed_height, Some(2));
         assert_eq!(record.removing_act.as_ref(), Some(&first_removal));
+    }
+
+    #[test]
+    fn a_removal_sealed_again_under_its_id_in_one_epoch_is_repeated() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        registry.apply_epoch(1, &[add_act("genesis", &genesis, "k2", &second)]);
+        let removal = remove_act("genesis", &genesis, "k2");
+        let resigned = remove_act("k2", &second, "k2");
+        let outcomes = registry.apply_epoch(2, &[removal.clone(), resigned]);
+        assert!(outcomes[0].is_accepted());
+        assert_eq!(
+            outcomes[1],
+            Outcome::Repeated {
+                update_id: crate::registry_updates::update_id(&removal).unwrap(),
+                accepted_height: 2,
+            }
+        );
+        assert_eq!(outcomes[1].code(), None);
+        assert_eq!(
+            registry.record("k2").unwrap().removing_act.as_ref(),
+            Some(&removal)
+        );
+    }
+
+    #[test]
+    fn a_key_act_sealed_again_at_a_later_height_is_repeated_not_evaluated() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        let addition = add_act("genesis", &genesis, "k2", &second);
+        let removal = remove_act("genesis", &genesis, "k2");
+        registry.apply_epoch(1, std::slice::from_ref(&addition));
+        registry.apply_epoch(2, std::slice::from_ref(&removal));
+        let again = registry.apply_epoch(3, &[addition.clone(), removal.clone()]);
+        assert_eq!(
+            again,
+            [
+                Outcome::Repeated {
+                    update_id: crate::registry_updates::update_id(&addition).unwrap(),
+                    accepted_height: 1,
+                },
+                Outcome::Repeated {
+                    update_id: crate::registry_updates::update_id(&removal).unwrap(),
+                    accepted_height: 2,
+                },
+            ]
+        );
+        let record = registry.record("k2").unwrap();
+        assert_eq!((record.added_height, record.removed_height), (1, Some(2)));
+    }
+
+    #[test]
+    fn a_key_act_sealed_again_rejects_nothing_whatever_its_signature() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        let addition = add_act("genesis", &genesis, "k2", &second);
+        registry.apply_epoch(1, std::slice::from_ref(&addition));
+        let mut unverified = addition.clone();
+        unverified["sig"]["value"] = json!(signing_key(9).sign(b"other"));
+        assert!(matches!(
+            registry.apply_epoch(2, &[unverified])[0],
+            Outcome::Repeated {
+                accepted_height: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_key_act_sealed_again_that_fails_field_validation_keeps_its_code() {
+        let (mut registry, genesis) = genesis_registry();
+        let second = signing_key(2);
+        let addition = add_act("genesis", &genesis, "k2", &second);
+        registry.apply_epoch(1, std::slice::from_ref(&addition));
+        let mut malformed = addition.clone();
+        malformed["sig"]["alg"] = json!("Ed448");
+        assert_eq!(
+            registry.apply_epoch(2, &[malformed])[0].code(),
+            Some("WIST4-E11")
+        );
+    }
+
+    #[test]
+    fn a_registry_holding_registry_update_tuples_reads_a_key_act_sealed_again_as_repeated() {
+        let (mut sealed, genesis) = genesis_registry();
+        let second = signing_key(2);
+        let addition = add_act("genesis", &genesis, "k2", &second);
+        sealed.apply_epoch(1, std::slice::from_ref(&addition));
+        let anchor = anchor(&genesis);
+        let mut resumed = Registry::from_state_tuples(&anchor, 1, &sealed.entries()).unwrap();
+        assert_eq!(
+            resumed
+                .clone()
+                .apply_epoch(2, std::slice::from_ref(&addition))[0]
+                .code(),
+            Some(KEY_ACT_CONFLICT_CODE),
+            "without the registry_update tuples the act is evaluated"
+        );
+        let tuples: Vec<StateEntry> = sealed
+            .accepted_updates()
+            .entries()
+            .into_iter()
+            .map(StateEntry::RegistryUpdate)
+            .collect();
+        resumed.hold_accepted_updates(AcceptedUpdates::from_state(&tuples).unwrap());
+        assert!(matches!(
+            resumed.apply_epoch(2, &[addition])[0],
+            Outcome::Repeated {
+                accepted_height: 1,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -137,7 +137,7 @@ pub enum Disposition {
     },
     Repeated {
         item_id: String,
-        withdrawn_height: u64,
+        withdrawn_height: Option<u64>,
     },
     Rejected(&'static str),
     NotWithdrawal,
@@ -266,12 +266,11 @@ impl WithdrawalReplay {
             return rejected("WIST1-E05");
         };
         if self.accepted.is_accepted(&update_id) {
-            if let Some(withdrawn_height) = self.withdrawn_height(&details.delta_id) {
-                return Act::Judged(Disposition::Repeated {
-                    item_id: details.delta_id,
-                    withdrawn_height,
-                });
-            }
+            let withdrawn_height = self.withdrawn_height(&details.delta_id);
+            return Act::Judged(Disposition::Repeated {
+                item_id: details.delta_id,
+                withdrawn_height,
+            });
         }
         let Some(key) = log_key(&envelope.sig.key_id) else {
             return Act::Unauthenticated;
@@ -397,14 +396,14 @@ mod tests {
             apply(&mut replay, 5, &unverified(act("order"))),
             Disposition::Repeated {
                 item_id: ITEM.into(),
-                withdrawn_height: 3
+                withdrawn_height: Some(3)
             }
         );
         assert_eq!(
             apply(&mut replay, 3, &unverified(act("order"))),
             Disposition::Repeated {
                 item_id: ITEM.into(),
-                withdrawn_height: 3
+                withdrawn_height: Some(3)
             }
         );
         assert_eq!(replay.withdrawn_height(ITEM), Some(3));
@@ -488,10 +487,37 @@ mod tests {
             apply(&mut replay, 5, &unverified(act("order"))),
             Disposition::Repeated {
                 item_id: ITEM.into(),
-                withdrawn_height: 3
+                withdrawn_height: Some(3)
             }
         );
         assert_eq!(replay.accepted_updates().entries().len(), 1);
+    }
+
+    #[test]
+    fn an_accepted_id_without_its_withdrawal_tuple_is_idempotent_and_not_evaluated_again() {
+        let tuples = [StateEntry::RegistryUpdate(
+            crate::objects::RegistryUpdateEntry {
+                update_id: crate::registry_updates::update_id(&act("order")).unwrap(),
+                sealing_height: 3,
+            },
+        )];
+        let mut replay = WithdrawalReplay::from_state(&tuples).unwrap();
+        assert_eq!(
+            apply(&mut replay, 5, &unverified(act("order"))),
+            Disposition::Repeated {
+                item_id: ITEM.into(),
+                withdrawn_height: None
+            }
+        );
+        assert_eq!(
+            apply(&mut replay, 5, &act("order")),
+            Disposition::Repeated {
+                item_id: ITEM.into(),
+                withdrawn_height: None
+            }
+        );
+        assert!(!replay.is_withdrawn(ITEM));
+        assert!(replay.entries().is_empty());
     }
 
     #[test]

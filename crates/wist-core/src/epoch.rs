@@ -147,6 +147,38 @@ pub fn verify_epoch(
     })
 }
 
+/// WIST-3 §3.3, Rejected Epochs: a rejected Epoch's leaves stay in the tree, so this checks the
+/// leaf range and the root alone and leaves every whole-Epoch rejection to the replay.
+pub fn verify_epoch_tree(
+    previous_size: u64,
+    checkpoint: &Checkpoint,
+    entries: &[Value],
+    prior_tree: &dyn HashReader,
+) -> Result<EpochSummary, Error> {
+    if checkpoint.tree_size() < previous_size {
+        return Err(invalid("an Epoch's tree size is below the Epoch before it"));
+    }
+    if checkpoint.tree_size() - previous_size != entries.len() as u64 {
+        return Err(invalid("the Epoch's Entries do not fill its leaf range"));
+    }
+    let mut octets: u64 = 0;
+    let mut hashes = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let bytes = jcs::canonicalize(entry)?;
+        octets += bytes.len() as u64 + 2;
+        hashes.push(merkle::leaf_hash(&bytes));
+    }
+    if merkle::root_after_appending(prior_tree, previous_size, &hashes)? != *checkpoint.root() {
+        return Err(invalid(
+            "the Epoch's Entries do not reproduce the root the Checkpoint states",
+        ));
+    }
+    Ok(EpochSummary {
+        leaf_hashes: hashes,
+        octets,
+    })
+}
+
 pub fn parse_entries(leaf_data: &[Vec<u8>]) -> Result<Vec<Value>, Error> {
     leaf_data
         .iter()
@@ -371,6 +403,45 @@ mod tests {
         verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), octets).unwrap();
         let err = verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), octets - 1).unwrap_err();
         assert_eq!(err.code(), Some("WIST3-E03"));
+    }
+
+    #[test]
+    fn a_rejected_epochs_leaves_still_verify_against_its_checkpoint() {
+        let entries = vec![
+            entry("label", 2),
+            entry("publisher_item", 1),
+            entry("publisher_note", 3),
+        ];
+        let hashes: Vec<[u8; 32]> = entries
+            .iter()
+            .map(|e| merkle::leaf_hash(&jcs::canonicalize(e).unwrap()))
+            .collect();
+        let mut checkpoint = Checkpoint::new(
+            "log.example.org",
+            3,
+            merkle::merkle_root(&hashes),
+            0,
+            "2026-08-02T13:00:00Z",
+        )
+        .unwrap();
+        checkpoint.sign(&SigningKey::from_seed(&[5u8; 32]));
+        assert_eq!(
+            verify_epoch(0, &checkpoint, &entries, &LeafHashes(&[]), 1 << 20)
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E03")
+        );
+        let summary = verify_epoch_tree(0, &checkpoint, &entries, &LeafHashes(&[])).unwrap();
+        assert_eq!(summary.leaf_hashes, hashes);
+        assert_eq!(summary.octets, epoch_octets(&entries).unwrap());
+        let mut other = entries.clone();
+        other.swap(0, 1);
+        assert_eq!(
+            verify_epoch_tree(0, &checkpoint, &other, &LeafHashes(&[]))
+                .unwrap_err()
+                .code(),
+            Some("WIST3-E03")
+        );
     }
 
     #[test]

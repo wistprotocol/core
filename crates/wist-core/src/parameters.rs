@@ -1,5 +1,7 @@
 mod schedule;
-pub use schedule::{Amendment, Schedule, ScheduleReplay, LOG_TIMESTAMP_MAX_S};
+pub use schedule::{
+    ActPosition, Amendment, Disposition, Schedule, ScheduleReplay, LOG_TIMESTAMP_MAX_S,
+};
 
 pub struct ParamSpec {
     pub name: &'static str,

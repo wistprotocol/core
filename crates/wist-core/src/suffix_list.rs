@@ -192,6 +192,10 @@ impl SuffixListReplay {
         &self.updates
     }
 
+    pub fn hold_accepted_updates(&mut self, updates: AcceptedUpdates) {
+        self.updates = updates;
+    }
+
     pub fn apply(
         &mut self,
         height: u64,

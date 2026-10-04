@@ -1,5 +1,9 @@
 use super::{spec, validate_combinations, validate_value};
+use crate::crypto::PublicKey;
+use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope};
+use crate::registry_updates::AcceptedUpdates;
 use crate::Error;
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 pub use crate::timestamp::LOG_TIMESTAMP_MAX_S;
@@ -14,11 +18,33 @@ pub struct Amendment {
     pub effective_at_s: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActPosition {
+    pub epoch_number: u64,
+    pub entry_index: u64,
+    pub sealed_at_s: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Disposition {
+    Accepted(Amendment),
+    Repeated {
+        update_id: String,
+        accepted_height: u64,
+    },
+    Rejected {
+        code: &'static str,
+        reason: String,
+    },
+    NotParameterChange,
+}
+
 #[derive(Debug, Clone)]
 pub struct Schedule {
     first_epoch_s: i64,
     accepted: Vec<Amendment>,
     last_position: Option<(u64, u64)>,
+    updates: AcceptedUpdates,
 }
 
 #[derive(Debug)]
@@ -39,6 +65,7 @@ impl Schedule {
             first_epoch_s,
             accepted: Vec::new(),
             last_position: None,
+            updates: AcceptedUpdates::new(),
         }
     }
 
@@ -60,6 +87,16 @@ impl Schedule {
     /// admission check applies.
     pub fn adopt(&mut self, amendment: Amendment) {
         self.accepted.push(amendment);
+    }
+
+    /// WIST-4 §5.1: a Consumer resumed from a Snapshot holds the IDs of its `registry_update`
+    /// tuples as accepted.
+    pub fn hold_accepted_updates(&mut self, updates: AcceptedUpdates) {
+        self.updates = updates;
+    }
+
+    pub fn accepted_updates(&self) -> &AcceptedUpdates {
+        &self.updates
     }
 
     pub fn first_epoch_s(&self) -> i64 {
@@ -146,6 +183,82 @@ impl Schedule {
             self.accepted.pop();
         }
         result
+    }
+
+    /// WIST-4 §5.1: eligibility and field validation, then the ID, so an occurrence of an
+    /// accepted ID is idempotent whatever its signature, then authentication under `log_key`,
+    /// then §5.
+    pub fn apply_act(
+        &mut self,
+        doc: &Value,
+        at: ActPosition,
+        largest_epoch_bytes: u64,
+        log_key: impl Fn(&str) -> Option<PublicKey>,
+    ) -> Disposition {
+        let rejected = |code: &'static str, reason: &str| Disposition::Rejected {
+            code,
+            reason: reason.to_owned(),
+        };
+        if crate::jcs::canonicalize(doc).is_err() {
+            return rejected("WIST1-E05", "the act is not JSON a Log Entry carries");
+        }
+        let Ok(envelope) = serde_json::from_value::<RegistryUpdateEnvelope>(doc.clone()) else {
+            return rejected("WIST4-E11", "the act is not a Registry Update Envelope");
+        };
+        if let Err(code) = crate::withdrawal::envelope_fields(&envelope) {
+            return rejected(
+                code,
+                "the act's envelope fields are outside the §5.1 contract",
+            );
+        }
+        if envelope.update.action != RegistryAction::ParameterChange {
+            return Disposition::NotParameterChange;
+        }
+        let details = match envelope.update.typed_details() {
+            Ok(RegistryDetails::ParameterChange(details)) => details,
+            _ => {
+                return rejected(
+                    "WIST4-E04",
+                    "the act's details or subject violate the parameter_change contract",
+                )
+            }
+        };
+        let Ok(effective_at_s) = crate::timestamp::log_seconds(&envelope.update.effective_at)
+        else {
+            return rejected("WIST4-E11", "the act's effective_at denotes no instant");
+        };
+        let Ok(update_id) = crate::registry_updates::update_id(doc) else {
+            return rejected("WIST1-E05", "the act carries no update");
+        };
+        if let Some(accepted_height) = self.updates.accepted_height(&update_id) {
+            return Disposition::Repeated {
+                update_id,
+                accepted_height,
+            };
+        }
+        let authentic = log_key(&envelope.sig.key_id)
+            .is_some_and(|key| crate::envelope::verify_envelope(doc, "update", &key).is_ok());
+        if !authentic {
+            return rejected(
+                "WIST4-E11",
+                "no key valid at the act's Epoch signed the act",
+            );
+        }
+        let amendment = Amendment {
+            parameter: details.parameter,
+            value: details.value,
+            epoch_number: at.epoch_number,
+            entry_index: at.entry_index,
+            sealed_at_s: at.sealed_at_s,
+            effective_at_s,
+        };
+        match self.try_accept_with_epoch_size(amendment.clone(), largest_epoch_bytes) {
+            Ok(()) => {
+                self.updates.accept(&update_id, at.epoch_number);
+                Disposition::Accepted(amendment)
+            }
+            Err(error) => rejected("WIST4-E03", &error.to_string()),
+        }
     }
 
     fn validate_from(&self, sealed_at_s: i64) -> Result<(), Error> {
@@ -278,6 +391,181 @@ mod tests {
         );
         assert!(effective + largest * DAY <= LOG_TIMESTAMP_MAX_S);
         assert!(effective + (largest + 1) * DAY > LOG_TIMESTAMP_MAX_S);
+    }
+
+    fn log_key() -> crate::crypto::SigningKey {
+        crate::crypto::SigningKey::from_seed(&[7; 32])
+    }
+
+    fn act(parameter: &str, value: i64, effective_at: &str) -> Value {
+        let update = serde_json::json!({
+            "wist_version": "1.0.0",
+            "action": "parameter_change",
+            "subject": parameter,
+            "effective_at": effective_at,
+            "details": {"parameter": parameter, "value": value}
+        });
+        crate::envelope::sign_envelope(&update, "update", "log", &log_key()).unwrap()
+    }
+
+    fn apply(schedule: &mut Schedule, epoch_number: u64, doc: &Value) -> Disposition {
+        let key = log_key().public();
+        schedule.apply_act(
+            doc,
+            ActPosition {
+                epoch_number,
+                entry_index: 0,
+                sealed_at_s: epoch_number as i64 * 3600,
+            },
+            0,
+            |key_id| (key_id == "log").then(|| key.clone()),
+        )
+    }
+
+    const EFFECTIVE: &str = "1970-01-11T00:00:00Z";
+
+    #[test]
+    fn an_amendment_sealed_again_after_a_later_one_applies_nothing() {
+        let mut schedule = Schedule::new(0);
+        let first = act("catalog_refresh_seconds", 3600, EFFECTIVE);
+        assert!(matches!(
+            apply(&mut schedule, 1, &first),
+            Disposition::Accepted(_)
+        ));
+        assert!(matches!(
+            apply(
+                &mut schedule,
+                2,
+                &act("catalog_refresh_seconds", 7200, EFFECTIVE)
+            ),
+            Disposition::Accepted(_)
+        ));
+        assert_eq!(
+            apply(&mut schedule, 3, &first),
+            Disposition::Repeated {
+                update_id: crate::registry_updates::update_id(&first).unwrap(),
+                accepted_height: 1,
+            }
+        );
+        assert_eq!(
+            schedule.value_at("catalog_refresh_seconds", 10 * DAY),
+            Some(7200)
+        );
+        assert_eq!(schedule.accepted().len(), 2);
+        assert_eq!(schedule.accepted_updates().entries().len(), 2);
+    }
+
+    #[test]
+    fn an_amendment_sealed_again_in_its_own_epoch_is_idempotent() {
+        let mut schedule = Schedule::new(0);
+        let doc = act("quota_base", 101, EFFECTIVE);
+        apply(&mut schedule, 0, &doc);
+        let key = log_key().public();
+        let again = schedule.apply_act(
+            &doc,
+            ActPosition {
+                epoch_number: 0,
+                entry_index: 1,
+                sealed_at_s: 0,
+            },
+            0,
+            |key_id| (key_id == "log").then(|| key.clone()),
+        );
+        assert!(matches!(
+            again,
+            Disposition::Repeated {
+                accepted_height: 0,
+                ..
+            }
+        ));
+        assert_eq!(schedule.accepted().len(), 1);
+    }
+
+    #[test]
+    fn an_amendment_sealed_again_rejects_nothing_whatever_its_signature() {
+        let mut schedule = Schedule::new(0);
+        let doc = act("quota_base", 101, EFFECTIVE);
+        apply(&mut schedule, 0, &doc);
+        let mut unverified = doc.clone();
+        unverified["sig"]["value"] =
+            serde_json::json!(crate::crypto::SigningKey::from_seed(&[8; 32]).sign(b"other"));
+        assert!(matches!(
+            apply(&mut schedule, 1, &unverified),
+            Disposition::Repeated { .. }
+        ));
+        assert!(matches!(
+            apply(&mut Schedule::new(0), 1, &unverified),
+            Disposition::Rejected {
+                code: "WIST4-E11",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_amendment_sealed_again_that_fails_field_validation_keeps_its_code() {
+        let mut schedule = Schedule::new(0);
+        let doc = act("quota_base", 101, EFFECTIVE);
+        apply(&mut schedule, 0, &doc);
+        let mut malformed = doc.clone();
+        malformed["sig"]["alg"] = serde_json::json!("Ed448");
+        assert!(matches!(
+            apply(&mut schedule, 1, &malformed),
+            Disposition::Rejected {
+                code: "WIST4-E11",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_amendment_failing_its_contract_or_section_5_is_rejected_with_its_code() {
+        let mut schedule = Schedule::new(0);
+        let mut other_subject = act("quota_base", 101, EFFECTIVE);
+        other_subject["update"]["subject"] = serde_json::json!("feed_window");
+        let other_subject =
+            crate::envelope::sign_envelope(&other_subject["update"], "update", "log", &log_key())
+                .unwrap();
+        assert!(matches!(
+            apply(&mut schedule, 0, &other_subject),
+            Disposition::Rejected {
+                code: "WIST4-E04",
+                ..
+            }
+        ));
+        assert!(matches!(
+            apply(
+                &mut schedule,
+                0,
+                &act("quota_base", 101, "1970-01-02T00:00:00Z")
+            ),
+            Disposition::Rejected {
+                code: "WIST4-E03",
+                ..
+            }
+        ));
+        assert!(schedule.accepted_updates().entries().is_empty());
+    }
+
+    #[test]
+    fn a_schedule_holding_registry_update_tuples_reads_a_sealing_again_as_repeated() {
+        let doc = act("catalog_refresh_seconds", 3600, EFFECTIVE);
+        let tuples = [crate::objects::StateEntry::RegistryUpdate(
+            crate::objects::RegistryUpdateEntry {
+                update_id: crate::registry_updates::update_id(&doc).unwrap(),
+                sealing_height: 1,
+            },
+        )];
+        let mut schedule = Schedule::new(0);
+        schedule.hold_accepted_updates(AcceptedUpdates::from_state(&tuples).unwrap());
+        assert!(matches!(
+            apply(&mut schedule, 3, &doc),
+            Disposition::Repeated {
+                accepted_height: 1,
+                ..
+            }
+        ));
+        assert!(schedule.accepted().is_empty());
     }
 
     #[test]

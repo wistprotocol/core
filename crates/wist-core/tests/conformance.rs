@@ -1085,10 +1085,10 @@ fn act_outcome(
     match disposition {
         Disposition::Accepted {
             withdrawn_height, ..
-        }
-        | Disposition::Repeated {
-            withdrawn_height, ..
         } => (None, Some(withdrawn_height)),
+        Disposition::Repeated {
+            withdrawn_height, ..
+        } => (None, withdrawn_height),
         Disposition::Rejected(code) => (Some(code), None),
         Disposition::NotWithdrawal => panic!("{label}: not a withdrawal"),
     }
@@ -1361,31 +1361,28 @@ fn wist4_parameter_in_force_vectors() {
 
 fn replay_parameter_acts(
     schedule: &mut wist_core::parameters::Schedule,
-    updates: &mut wist_core::registry_updates::AcceptedUpdates,
     log_key: &wist_core::crypto::PublicKey,
     epoch: &serde_json::Value,
 ) {
+    use wist_core::parameters::{ActPosition, Disposition};
     use wist_core::timestamp::log_seconds;
     let epoch_number = epoch["epoch_number"].as_u64().unwrap();
     let sealed_at_s = log_seconds(epoch["sealed_at"].as_str().unwrap()).unwrap();
     for (entry_index, act) in epoch["acts"].as_array().unwrap().iter().enumerate() {
-        wist_core::envelope::verify_envelope(act, "update", log_key).unwrap();
-        let update_id = wist_core::registry_updates::update_id(act).unwrap();
-        if updates.is_accepted(&update_id) {
-            continue;
-        }
-        let update = &act["update"];
-        let amendment = wist_core::parameters::Amendment {
-            parameter: update["details"]["parameter"].as_str().unwrap().to_owned(),
-            value: update["details"]["value"].as_i64().unwrap(),
-            epoch_number,
-            entry_index: entry_index as u64,
-            sealed_at_s,
-            effective_at_s: log_seconds(update["effective_at"].as_str().unwrap()).unwrap(),
-        };
-        if schedule.try_accept(amendment).is_ok() {
-            updates.accept(&update_id, epoch_number);
-        }
+        let disposition = schedule.apply_act(
+            act,
+            ActPosition {
+                epoch_number,
+                entry_index: entry_index as u64,
+                sealed_at_s,
+            },
+            0,
+            |_| Some(log_key.clone()),
+        );
+        assert!(
+            !matches!(disposition, Disposition::Rejected { .. }),
+            "Epoch {epoch_number} act {entry_index}: {disposition:?}"
+        );
     }
 }
 
@@ -1419,12 +1416,11 @@ fn wist4_a_resumed_consumer_reads_an_amendment_sealed_again_as_idempotent() {
             serde_json::from_value(case["snapshot_tuples"].clone()).unwrap();
 
         let mut schedule = Schedule::new(first_s);
-        let mut updates = AcceptedUpdates::new();
         let mut at_snapshot = None;
         for epoch in epochs {
-            replay_parameter_acts(&mut schedule, &mut updates, &log_key, epoch);
+            replay_parameter_acts(&mut schedule, &log_key, epoch);
             if epoch["epoch_number"].as_u64() == Some(snapshot_epoch) {
-                at_snapshot = Some(updates.clone());
+                at_snapshot = Some(schedule.accepted_updates().clone());
             }
         }
         assert_eq!(
@@ -1461,10 +1457,10 @@ fn wist4_a_resumed_consumer_reads_an_amendment_sealed_again_as_idempotent() {
                     });
                 }
             }
-            let mut updates = updates;
+            schedule.hold_accepted_updates(updates);
             for epoch in epochs {
                 if epoch["epoch_number"].as_u64().unwrap() > snapshot_epoch {
-                    replay_parameter_acts(&mut schedule, &mut updates, &log_key, epoch);
+                    replay_parameter_acts(&mut schedule, &log_key, epoch);
                 }
             }
             schedule.value_at(parameter, query_s)

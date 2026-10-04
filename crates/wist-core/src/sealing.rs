@@ -751,6 +751,19 @@ impl Replay {
         self.disputes.values()
     }
 
+    /// WIST-3 §3.2: every Label ID sealed in an applied Epoch, with its `subject` where the Label
+    /// was valid.
+    pub fn sealed_label_subjects(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.sealed_labels.iter().map(|label_id| {
+            let subject = self
+                .labels
+                .get(label_id)
+                .map(|sealed| sealed.label.subject.as_str())
+                .or_else(|| self.resumed_labels.get(label_id).map(String::as_str));
+            (label_id.as_str(), subject)
+        })
+    }
+
     pub fn sealed_items(&self) -> &SealedItems {
         &self.sealed
     }
@@ -869,28 +882,16 @@ impl Replay {
         self.epoch_stored(epoch, &[])
     }
 
-    /// WIST-3 §3.3: a rejected Epoch preserves the accepted prefix and its state. `stored` holds
-    /// the leaf data of each Entry, by index, whose body is not valid JCS input (WIST-1 §4).
+    /// WIST-3 §3.3, Rejected Epochs: nothing of a rejected Epoch applies here; its key acts and
+    /// their Registry Update IDs are the holder's. `stored` holds the leaf data of each Entry, by
+    /// index, whose body is not valid JCS input (WIST-1 §4).
     pub fn epoch_stored(
         &mut self,
         epoch: &Epoch<'_>,
         stored: &[(usize, &[u8])],
     ) -> Result<Outcome, Error> {
         let sealed_at_s = log_seconds(epoch.sealed_at)?;
-        if epoch.height != self.next_height {
-            return Err(Error::History(format!(
-                "replay expects Epoch {}, not {}",
-                self.next_height, epoch.height
-            )));
-        }
-        if self
-            .sealed_at_s
-            .is_some_and(|previous| sealed_at_s <= previous)
-        {
-            return Err(Error::History(
-                "an Epoch's sealed_at must follow the Epoch before it".into(),
-            ));
-        }
+        self.check_next(epoch.height, sealed_at_s)?;
         let limits = epoch.parameters.limits()?;
         let caps = epoch.parameters.size_caps()?;
         let leaves = leaves(epoch.entries, stored)?;
@@ -903,13 +904,7 @@ impl Replay {
             .collect();
         let (codes, label_ids) = self.rejections(epoch, &leaves, &limits, &mut declarations)?;
         if !codes.is_empty() {
-            self.declarations
-                .seed_head(epoch.height, epoch.root, Some(sealed_at_s));
-            self.next_height = epoch.height + 1;
-            self.sealed_at_s = Some(sealed_at_s);
-            return Ok(Outcome::Rejected {
-                codes: codes.into_iter().collect(),
-            });
+            return Ok(self.rejected(epoch, sealed_at_s, codes.into_iter().collect()));
         }
         let effects = self.declarations.apply_epoch(
             epoch.height,
@@ -1036,6 +1031,44 @@ impl Replay {
             entries,
             records_removed,
         })
+    }
+
+    /// WIST-3 §3.3, Rejected Epochs: for a whole-Epoch rejection the holder establishes itself,
+    /// such as the Epoch-size bound of WIST-4 §5.
+    pub fn reject_epoch(
+        &mut self,
+        epoch: &Epoch<'_>,
+        codes: Vec<String>,
+    ) -> Result<Outcome, Error> {
+        let sealed_at_s = log_seconds(epoch.sealed_at)?;
+        self.check_next(epoch.height, sealed_at_s)?;
+        Ok(self.rejected(epoch, sealed_at_s, codes))
+    }
+
+    fn rejected(&mut self, epoch: &Epoch<'_>, sealed_at_s: i64, codes: Vec<String>) -> Outcome {
+        self.declarations
+            .seed_head(epoch.height, epoch.root, Some(sealed_at_s));
+        self.next_height = epoch.height + 1;
+        self.sealed_at_s = Some(sealed_at_s);
+        Outcome::Rejected { codes }
+    }
+
+    fn check_next(&self, height: u64, sealed_at_s: i64) -> Result<(), Error> {
+        if height != self.next_height {
+            return Err(Error::History(format!(
+                "replay expects Epoch {}, not {}",
+                self.next_height, height
+            )));
+        }
+        if self
+            .sealed_at_s
+            .is_some_and(|previous| sealed_at_s <= previous)
+        {
+            return Err(Error::History(
+                "an Epoch's sealed_at must follow the Epoch before it".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn rejections(
@@ -1535,6 +1568,35 @@ mod tests {
     }
 
     #[test]
+    fn an_epoch_its_holder_rejects_applies_nothing_and_the_replay_goes_on() {
+        let mut replay = Replay::new();
+        let entries = [serde_json::json!({"type": "label", "body": {}})];
+        let outcome = replay
+            .reject_epoch(
+                &empty_epoch(0, "2026-10-01T00:00:00Z", &entries),
+                vec![EPOCH_REJECTED.to_owned()],
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Rejected {
+                codes: vec![EPOCH_REJECTED.to_owned()]
+            }
+        );
+        assert!(replay.sealed_label_subjects().next().is_none());
+        assert!(replay
+            .reject_epoch(&empty_epoch(0, "2026-10-01T00:30:00Z", &[]), Vec::new())
+            .is_err());
+        assert!(replay
+            .reject_epoch(&empty_epoch(1, "2026-10-01T00:00:00Z", &[]), Vec::new())
+            .is_err());
+        let next = replay
+            .epoch(&empty_epoch(1, "2026-10-01T01:00:00Z", &[]))
+            .unwrap();
+        assert!(matches!(next, Outcome::Accepted { .. }));
+    }
+
+    #[test]
     fn stored_text_that_does_not_read_as_its_entry_is_refused() {
         let entries = [serde_json::json!({"type": "label", "body": {"a": 2}})];
         let epoch = empty_epoch(0, "2026-10-01T00:00:00Z", &entries);
@@ -1624,6 +1686,41 @@ mod tests {
             LabelLookup::Unverifiable
         );
         assert_eq!(Replay::new().label_lookup(&id, None), LabelLookup::Absent);
+    }
+
+    #[test]
+    fn sealed_label_subjects_hand_another_replay_the_lookups_of_this_one() {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(3, "root", None);
+        let valid = format!("sha256:{}", "a".repeat(64));
+        let ignored = format!("sha256:{}", "b".repeat(64));
+        let mut held =
+            Replay::resumed(3, "2026-10-01T00:00:00Z", declarations.clone(), &[]).unwrap();
+        held.hold_sealed_label(&valid, Some("https://example.com/a"));
+        held.hold_sealed_label(&ignored, None);
+        assert_eq!(
+            held.sealed_label_subjects().collect::<Vec<_>>(),
+            [
+                (valid.as_str(), Some("https://example.com/a")),
+                (ignored.as_str(), None)
+            ]
+        );
+        let mut handed = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations, &[]).unwrap();
+        for (label_id, subject) in held.sealed_label_subjects() {
+            handed.hold_sealed_label(label_id, subject);
+        }
+        handed.hold_walk_floor(None);
+        assert_eq!(
+            handed.label_lookup(&valid, None),
+            LabelLookup::Known {
+                subject: "https://example.com/a".into()
+            }
+        );
+        assert_eq!(handed.label_lookup(&ignored, None), LabelLookup::Absent);
+        assert_eq!(
+            handed.label_lookup("sha256:other", None),
+            LabelLookup::Absent
+        );
     }
 
     #[test]
