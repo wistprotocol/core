@@ -49,6 +49,7 @@ impl EventReplay {
             "withdrawal" => {
                 let item = text("item");
                 self.withdrawals.adopt(item, &publishers[item], height);
+                assert!(self.withdrawals.accept_update(text("update"), height));
             }
             "base" => {
                 self.records
@@ -217,6 +218,11 @@ fn record_materialization_cases_replay_every_epoch_and_resume_from_the_snapshot_
             replay.assert_reaches(&label, want, &vector["payloads"]);
             if let Some(resumed) = &resumed {
                 resumed.assert_reaches(&format!("{label}, resumed"), want, &vector["payloads"]);
+                assert_eq!(
+                    resumed.withdrawals.accepted_updates(),
+                    replay.withdrawals.accepted_updates(),
+                    "{label}, resumed: accepted Registry Update IDs"
+                );
             }
             if height == snapshot_height {
                 let replayed: Vec<StateEntry> = replay
@@ -230,11 +236,20 @@ fn record_materialization_cases_replay_every_epoch_and_resume_from_the_snapshot_
                             .into_iter()
                             .map(StateEntry::Withdrawal),
                     )
+                    .chain(
+                        replay
+                            .withdrawals
+                            .accepted_updates()
+                            .entries()
+                            .into_iter()
+                            .map(StateEntry::RegistryUpdate),
+                    )
                     .collect();
+                let kinds = ["record", "removal", "withdrawal", "registry_update"];
                 assert_eq!(
-                    tuples_of(&replayed, &["record", "removal", "withdrawal"]),
-                    tuples_of(&tuples, &["record", "removal", "withdrawal"]),
-                    "{label}: record, removal and withdrawal tuples"
+                    tuples_of(&replayed, &kinds),
+                    tuples_of(&tuples, &kinds),
+                    "{label}: record, removal, withdrawal and registry_update tuples"
                 );
                 let declared: BTreeSet<String> = tuples
                     .iter()
@@ -267,7 +282,8 @@ fn record_materialization_cases_replay_every_epoch_and_resume_from_the_snapshot_
                         StateEntry::Declaration(_)
                         | StateEntry::Record(_)
                         | StateEntry::Removal(_)
-                        | StateEntry::Withdrawal(_) => {}
+                        | StateEntry::Withdrawal(_)
+                        | StateEntry::RegistryUpdate(_) => {}
                         other => panic!("{label}: a tuple {other:?}"),
                     }
                 }

@@ -5,13 +5,22 @@ use crate::item::Kind;
 use crate::objects::{
     RegistryAction, RegistryDetails, RegistryUpdateEnvelope, StateEntry, WithdrawalEntry,
 };
+use crate::registry_updates::AcceptedUpdates;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default)]
 struct Sightings {
     pages: BTreeMap<String, u64>,
-    removed: Option<u64>,
+    removed: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealedItem<'a> {
+    pub item_id: &'a str,
+    pub publisher: &'a str,
+    pub kind: Kind,
+    pub height: u64,
 }
 
 /// WIST-4 §5.1: a resumed Consumer accepts an act whose Item nothing it holds shows.
@@ -62,18 +71,33 @@ impl SealedItems {
 
     pub fn seal(&mut self, item_id: &str, publisher: &str, kind: Kind, height: u64) {
         let sightings = self.items.entry(item_id.to_owned()).or_default();
-        match kind {
-            Kind::Page => {
-                let earliest = sightings
-                    .pages
-                    .entry(publisher.to_owned())
-                    .or_insert(height);
-                *earliest = (*earliest).min(height);
-            }
-            Kind::Removed => {
-                sightings.removed = Some(sightings.removed.map_or(height, |at| at.min(height)));
-            }
-        }
+        let by_publisher = match kind {
+            Kind::Page => &mut sightings.pages,
+            Kind::Removed => &mut sightings.removed,
+        };
+        let earliest = by_publisher.entry(publisher.to_owned()).or_insert(height);
+        *earliest = (*earliest).min(height);
+    }
+
+    pub fn sealed(&self) -> impl Iterator<Item = SealedItem<'_>> {
+        self.items.iter().flat_map(|(item_id, sightings)| {
+            let pages = sightings
+                .pages
+                .iter()
+                .map(|(publisher, height)| (publisher, Kind::Page, height));
+            let removed = sightings
+                .removed
+                .iter()
+                .map(|(publisher, height)| (publisher, Kind::Removed, height));
+            pages
+                .chain(removed)
+                .map(|(publisher, kind, height)| SealedItem {
+                    item_id,
+                    publisher,
+                    kind,
+                    height: *height,
+                })
+        })
     }
 
     pub fn meets_contract(&self, item_id: &str, subject: &str, height: u64) -> Option<bool> {
@@ -85,8 +109,11 @@ impl SealedItems {
             return Some(true);
         }
         let shown = sightings.is_some_and(|sightings| {
-            sightings.removed.is_some_and(|sealed| sealed <= height)
-                || sightings.pages.values().any(|sealed| *sealed <= height)
+            sightings
+                .removed
+                .values()
+                .chain(sightings.pages.values())
+                .any(|sealed| *sealed <= height)
         });
         (shown || !self.resumed).then_some(false)
     }
@@ -116,7 +143,7 @@ pub(crate) enum Act {
 #[derive(Debug, Clone, Default)]
 pub struct WithdrawalReplay {
     withdrawn: BTreeMap<String, (u64, String)>,
-    accepted: BTreeSet<String>,
+    accepted: AcceptedUpdates,
 }
 
 impl WithdrawalReplay {
@@ -137,6 +164,7 @@ impl WithdrawalReplay {
                 replay.adopt(&entry.item_id, &entry.publisher, entry.sealing_height);
             }
         }
+        replay.accepted = AcceptedUpdates::from_state(entries)?;
         Ok(replay)
     }
 
@@ -144,6 +172,14 @@ impl WithdrawalReplay {
         self.withdrawn
             .entry(item_id.to_string())
             .or_insert((height, publisher.to_string()));
+    }
+
+    pub fn accepted_updates(&self) -> &AcceptedUpdates {
+        &self.accepted
+    }
+
+    pub fn accept_update(&mut self, update_id: &str, height: u64) -> bool {
+        self.accepted.accept(update_id, height)
     }
 
     pub fn is_withdrawn(&self, item_id: &str) -> bool {
@@ -221,7 +257,7 @@ impl WithdrawalReplay {
         let Ok(update_id) = crate::item::sha256_hex("sha256:", &doc["update"]) else {
             return rejected("WIST1-E05");
         };
-        if self.accepted.contains(&update_id) {
+        if self.accepted.is_accepted(&update_id) {
             if let Some(withdrawn_height) = self.withdrawn_height(&details.delta_id) {
                 return Act::Judged(Disposition::Repeated {
                     item_id: details.delta_id,
@@ -239,7 +275,7 @@ impl WithdrawalReplay {
         if sealed.meets_contract(&details.delta_id, &publisher, height) == Some(false) {
             return rejected("WIST4-E04");
         }
-        self.accepted.insert(update_id);
+        self.accepted.accept(&update_id, height);
         let changed = !self.withdrawn.contains_key(&details.delta_id);
         let (withdrawn_height, _) = self
             .withdrawn
@@ -427,6 +463,30 @@ mod tests {
     }
 
     #[test]
+    fn a_replay_resumed_from_registry_update_tuples_reads_a_sealing_again_as_repeated() {
+        let tuples = [
+            StateEntry::Withdrawal(WithdrawalEntry {
+                item_id: ITEM.into(),
+                publisher: "a.example".into(),
+                sealing_height: 3,
+            }),
+            StateEntry::RegistryUpdate(crate::objects::RegistryUpdateEntry {
+                update_id: crate::registry_updates::update_id(&act("order")).unwrap(),
+                sealing_height: 3,
+            }),
+        ];
+        let mut replay = WithdrawalReplay::from_state(&tuples).unwrap();
+        assert_eq!(
+            apply(&mut replay, 5, &unverified(act("order"))),
+            Disposition::Repeated {
+                item_id: ITEM.into(),
+                withdrawn_height: 3
+            }
+        );
+        assert_eq!(replay.accepted_updates().entries().len(), 1);
+    }
+
+    #[test]
     fn a_complete_history_breaks_the_contract_of_an_item_it_never_sealed() {
         let sealed = SealedItems::new();
         assert_eq!(
@@ -457,6 +517,27 @@ mod tests {
                 Some(false)
             );
         }
+    }
+
+    #[test]
+    fn sealed_items_are_enumerated_per_publisher_and_kind_at_their_earliest_height() {
+        let mut sealed = SealedItems::new();
+        sealed.seal("sha256:a", "a.example", Kind::Page, 4);
+        sealed.seal("sha256:a", "a.example", Kind::Page, 2);
+        sealed.seal("sha256:a", "b.example", Kind::Page, 5);
+        sealed.seal("sha256:r", "a.example", Kind::Removed, 3);
+        let found: Vec<(&str, &str, Kind, u64)> = sealed
+            .sealed()
+            .map(|item| (item.item_id, item.publisher, item.kind, item.height))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("sha256:a", "a.example", Kind::Page, 2),
+                ("sha256:a", "b.example", Kind::Page, 5),
+                ("sha256:r", "a.example", Kind::Removed, 3),
+            ]
+        );
     }
 
     #[test]

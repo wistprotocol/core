@@ -133,6 +133,12 @@ pub struct SuffixListEntry {
     pub sealing_height: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryUpdateEntry {
+    pub update_id: String,
+    pub sealing_height: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectionEntry {
     pub publisher: String,
@@ -198,6 +204,7 @@ pub enum StateEntry {
     Parameter(ParameterEntry),
     RecoveryWindow(RecoveryWindowEntry),
     SuffixList(SuffixListEntry),
+    RegistryUpdate(RegistryUpdateEntry),
     Collection(CollectionEntry),
     Record(RecordEntry),
     Removal(RemovalEntry),
@@ -285,6 +292,13 @@ impl<'de> Deserialize<'de> for StateEntry {
                 check_arity::<D::Error>(&kind, tail, 2)?;
                 Ok(StateEntry::SuffixList(SuffixListEntry {
                     identifier: field(tail, 0)?,
+                    sealing_height: field(tail, 1)?,
+                }))
+            }
+            "registry_update" => {
+                check_arity::<D::Error>(&kind, tail, 2)?;
+                Ok(StateEntry::RegistryUpdate(RegistryUpdateEntry {
+                    update_id: field(tail, 0)?,
                     sealing_height: field(tail, 1)?,
                 }))
             }
@@ -397,6 +411,9 @@ impl Serialize for StateEntry {
             StateEntry::SuffixList(e) => {
                 serde_json::json!(["suffix_list", e.identifier, e.sealing_height])
             }
+            StateEntry::RegistryUpdate(e) => {
+                serde_json::json!(["registry_update", e.update_id, e.sealing_height])
+            }
             StateEntry::Collection(e) => serde_json::json!([
                 "collection",
                 e.publisher,
@@ -494,6 +511,7 @@ mod tests {
             ]),
             serde_json::json!(["withdrawal", id, "example.com", 3]),
             serde_json::json!(["suffix_list", id, 4]),
+            serde_json::json!(["registry_update", id, 5]),
             serde_json::json!([
                 "label",
                 "labeler.example.net",
@@ -539,7 +557,7 @@ mod tests {
                 "2026-08-02T12:00:00Z"
             ]),
         ];
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 12);
         for tuple in cases {
             let entry: StateEntry =
                 serde_json::from_value(tuple.clone()).unwrap_or_else(|e| panic!("{tuple}: {e}"));
@@ -552,6 +570,7 @@ mod tests {
         for tuple in [
             serde_json::json!(["exclusion", "example.com", "/blog/post-1", 3]),
             serde_json::json!(["withdrawal", "sha256:00", "example.com"]),
+            serde_json::json!(["registry_update", "sha256:00"]),
             serde_json::json!([
                 "record",
                 "example.com",

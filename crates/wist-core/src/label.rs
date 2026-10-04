@@ -1,7 +1,7 @@
 use crate::crypto::{hex_encode, PublicKey};
 use crate::objects::{
-    DisputeEntry, DisputeEnvelope, Label, LabelDefinitionEnvelope, LabelEntry, LabelEnvelope,
-    Publisher, PublisherEnvelope,
+    Dispute, DisputeEntry, DisputeEnvelope, Label, LabelDefinitionEnvelope, LabelEntry,
+    LabelEnvelope, Publisher, PublisherEnvelope,
 };
 use crate::publisher_time;
 use serde_json::Value;
@@ -159,21 +159,8 @@ fn sig_fields(doc: &Value) -> Result<(), Rejection> {
     Ok(())
 }
 
-/// WIST-2 §3.3 and WIST-1 §7 check order; `asserted_at` is checked as a Catalog's `generated_at`
-/// against `clock_s` (WIST-1 §3.4).
-pub fn validate_label(
-    doc: &Value,
-    declaration: &PublisherEnvelope,
-    url_cap_bytes: i64,
-    clock_s: i64,
-    clock_skew_seconds: i64,
-) -> Result<LabelEnvelope, Rejection> {
-    let envelope: LabelEnvelope =
-        serde_json::from_value(doc.clone()).map_err(|_| Rejection::Fields)?;
-    sig_fields(doc)?;
-    let label = &envelope.label;
-    let publisher = &declaration.publisher;
-    if !supported_major(&label.wist_version) || label.labeler != publisher.domain {
+fn label_fields(label: &Label, url_cap_bytes: i64) -> Result<(), Rejection> {
+    if !supported_major(&label.wist_version) {
         return Err(Rejection::Fields);
     }
     let url_subject = label.subject.starts_with("https://");
@@ -199,7 +186,6 @@ pub fn validate_label(
     {
         return Err(Rejection::Fields);
     }
-    within_allowance(&label.asserted_at, clock_s, clock_skew_seconds)?;
     if let Some(expires_at) = &label.expires_at {
         if publisher_time::compare(expires_at, &label.asserted_at) != Some(Ordering::Greater) {
             return Err(Rejection::Fields);
@@ -210,6 +196,43 @@ pub fn validate_label(
             return Err(Rejection::Fields);
         }
     }
+    Ok(())
+}
+
+fn dispute_fields(dispute: &Dispute) -> Result<(), Rejection> {
+    if !supported_major(&dispute.wist_version)
+        || !is_sha256_id(&dispute.label)
+        || !is_canonical_host(&dispute.log)
+        || dispute
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.len() > 2048 || !is_normalized_url(reason))
+        || !publisher_time::valid(&dispute.asserted_at)
+    {
+        return Err(Rejection::Fields);
+    }
+    Ok(())
+}
+
+/// WIST-2 §3.3 and WIST-1 §7 check order; `asserted_at` is checked as a Catalog's `generated_at`
+/// against `clock_s` (WIST-1 §3.4).
+pub fn validate_label(
+    doc: &Value,
+    declaration: &PublisherEnvelope,
+    url_cap_bytes: i64,
+    clock_s: i64,
+    clock_skew_seconds: i64,
+) -> Result<LabelEnvelope, Rejection> {
+    let envelope: LabelEnvelope =
+        serde_json::from_value(doc.clone()).map_err(|_| Rejection::Fields)?;
+    sig_fields(doc)?;
+    let label = &envelope.label;
+    let publisher = &declaration.publisher;
+    label_fields(label, url_cap_bytes)?;
+    if label.labeler != publisher.domain {
+        return Err(Rejection::Fields);
+    }
+    within_allowance(&label.asserted_at, clock_s, clock_skew_seconds)?;
     if under_authority(subject_host(&label.subject), publisher) {
         return Err(Rejection::SelfLabel);
     }
@@ -292,6 +315,30 @@ pub fn binding_applies(delta: Option<&str>, record_item_id: Option<&str>) -> boo
     }
 }
 
+/// WIST-2 §3.3: `records` holds `(publisher, item_id, withdrawn)` for each record of `subject`.
+pub fn materialized_binding_applies<'a>(
+    delta: Option<&str>,
+    subject: &str,
+    self_declared: bool,
+    records: impl IntoIterator<Item = (&'a str, &'a str, bool)>,
+) -> bool {
+    let records: Vec<(&str, &str, bool)> = records.into_iter().collect();
+    let chosen = crate::materialization::preferred(
+        crate::declaration::url_host(subject),
+        self_declared,
+        records
+            .iter()
+            .map(|(publisher, _, withdrawn)| (*publisher, *withdrawn)),
+    );
+    let item_id = chosen.and_then(|chosen| {
+        records
+            .iter()
+            .find(|(publisher, _, _)| *publisher == chosen)
+            .map(|(_, item_id, _)| *item_id)
+    });
+    binding_applies(delta, item_id)
+}
+
 /// WIST-3 §7: a Consumer resumed from a Snapshot holds no Label IDs, so an `Unverifiable`
 /// dispute is read as consistent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,28 +373,116 @@ pub fn validate_dispute(
     sig_fields(doc)?;
     let dispute = &envelope.dispute;
     let publisher = &declaration.publisher;
-    if !supported_major(&dispute.wist_version)
-        || dispute.disputant != publisher.domain
-        || !is_sha256_id(&dispute.label)
-        || !is_canonical_host(&dispute.log)
-        || dispute
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.len() > 2048 || !is_normalized_url(reason))
-        || !publisher_time::valid(&dispute.asserted_at)
-    {
+    dispute_fields(dispute)?;
+    if dispute.disputant != publisher.domain {
         return Err(Rejection::Fields);
     }
     within_allowance(&dispute.asserted_at, clock_s, clock_skew_seconds)?;
-    match sealed(&dispute.label) {
-        LabelLookup::Absent => return Err(Rejection::Unsealed),
-        LabelLookup::Known { subject } if !under_authority(subject_host(&subject), publisher) => {
-            return Err(Rejection::Authority)
-        }
-        LabelLookup::Known { .. } | LabelLookup::Unverifiable => {}
-    }
+    disputed(dispute, publisher, sealed)?;
     signer(doc, "dispute", publisher, &dispute.asserted_at)?;
     Ok(envelope)
+}
+
+fn disputed(
+    dispute: &Dispute,
+    publisher: &Publisher,
+    sealed: impl Fn(&str) -> LabelLookup,
+) -> Result<(), Rejection> {
+    match sealed(&dispute.label) {
+        LabelLookup::Absent => Err(Rejection::Unsealed),
+        LabelLookup::Known { subject } if !under_authority(subject_host(&subject), publisher) => {
+            Err(Rejection::Authority)
+        }
+        LabelLookup::Known { .. } | LabelLookup::Unverifiable => Ok(()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    Label,
+    Dispute,
+}
+
+impl EntryKind {
+    pub fn of(entry_type: &str) -> Option<Self> {
+        match entry_type {
+            "label" => Some(EntryKind::Label),
+            "dispute" => Some(EntryKind::Dispute),
+            _ => None,
+        }
+    }
+
+    pub fn member(self) -> &'static str {
+        match self {
+            EntryKind::Label => "label",
+            EntryKind::Dispute => "dispute",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Judging {
+    pub clock_s: i64,
+    pub clock_skew_seconds: i64,
+    pub url_cap_bytes: i64,
+}
+
+/// WIST-3 §3.3: a labeler or disputant with no Declaration in force fails the binding check.
+pub fn judge_entry<'p>(
+    kind: EntryKind,
+    body: &Value,
+    judging: &Judging,
+    in_force: impl Fn(&str) -> Option<&'p Publisher>,
+    sealed: impl Fn(&str) -> LabelLookup,
+) -> Result<(), Rejection> {
+    let members = body.as_object().ok_or(Rejection::Fields)?;
+    if crate::jcs::canonicalize(body).is_err()
+        || members.len() != 2
+        || !members.contains_key(kind.member())
+    {
+        return Err(Rejection::Fields);
+    }
+    sig_fields(body)?;
+    let (author, asserted_at, label, dispute) = match kind {
+        EntryKind::Label => {
+            let envelope: LabelEnvelope =
+                serde_json::from_value(body.clone()).map_err(|_| Rejection::Fields)?;
+            label_fields(&envelope.label, judging.url_cap_bytes)?;
+            let label = envelope.label;
+            (
+                label.labeler.clone(),
+                label.asserted_at.clone(),
+                Some(label),
+                None,
+            )
+        }
+        EntryKind::Dispute => {
+            let envelope: DisputeEnvelope =
+                serde_json::from_value(body.clone()).map_err(|_| Rejection::Fields)?;
+            dispute_fields(&envelope.dispute)?;
+            let dispute = envelope.dispute;
+            (
+                dispute.disputant.clone(),
+                dispute.asserted_at.clone(),
+                None,
+                Some(dispute),
+            )
+        }
+    };
+    if !is_canonical_host(&author) {
+        return Err(Rejection::Fields);
+    }
+    within_allowance(&asserted_at, judging.clock_s, judging.clock_skew_seconds)?;
+    let publisher = in_force(&author).ok_or(Rejection::Binding)?;
+    if let Some(label) = &label {
+        if under_authority(subject_host(&label.subject), publisher) {
+            return Err(Rejection::SelfLabel);
+        }
+    }
+    if let Some(dispute) = &dispute {
+        disputed(dispute, publisher, sealed)?;
+    }
+    signer(body, kind.member(), publisher, &asserted_at)
 }
 
 #[derive(Debug, Clone)]

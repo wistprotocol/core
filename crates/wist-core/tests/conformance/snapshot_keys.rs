@@ -5,6 +5,7 @@ use wist_core::aggregator_keys::{check_catch_up, Registry};
 use wist_core::checkpoint::{self, AggregatorKey, Checkpoint};
 use wist_core::crypto::PublicKey;
 use wist_core::objects::{AggregatorKeyEntry, Anchor, StateEntry};
+use wist_core::registry_updates::{update_id, AcceptedUpdates};
 use wist_core::unsealed::{self, Document};
 use wist_core::Error;
 
@@ -109,6 +110,29 @@ fn replay_history(history: &Value, anchor: &Anchor) -> Vec<Registry> {
         checkpoint::verify(&note, &anchor.log_id, &registry.valid_at(height), &[])
             .unwrap_or_else(|e| panic!("epoch {height}: the published Checkpoint verifies: {e}"));
         states.push(registry.clone());
+    }
+    states
+}
+
+fn accepted_updates(history: &Value, anchor: &Anchor) -> Vec<AcceptedUpdates> {
+    let mut registry = Registry::from_genesis(&anchor.log_id, &anchor.genesis_key).unwrap();
+    let mut updates = AcceptedUpdates::new();
+    let mut states = Vec::new();
+    for epoch in history["epochs"].as_array().unwrap() {
+        let height = epoch["epoch_number"].as_u64().unwrap();
+        let acts: Vec<&Value> = epoch["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| &entry["body"])
+            .collect();
+        let outcomes = registry.apply_epoch(height, acts.iter().copied());
+        for (act, outcome) in acts.iter().zip(outcomes) {
+            if outcome.is_accepted() {
+                updates.accept(&update_id(act).unwrap(), height);
+            }
+        }
+        states.push(updates.clone());
     }
     states
 }
@@ -496,10 +520,23 @@ fn the_removal_a_replaying_consumer_rebuilds_is_the_one_at_the_lower_entry_index
         "the tuple carries the removal at the lower Entry index"
     );
 
+    let updates = &accepted_updates(history, &anchor)[height as usize];
+    assert_eq!(
+        updates.entries().len(),
+        6,
+        "every key act through the Epoch is accepted"
+    );
     let rebuilt: Vec<Value> = states[height as usize]
         .entries()
         .into_iter()
-        .map(|entry| serde_json::to_value(StateEntry::AggregatorKey(entry)).unwrap())
+        .map(StateEntry::AggregatorKey)
+        .chain(
+            updates
+                .entries()
+                .into_iter()
+                .map(StateEntry::RegistryUpdate),
+        )
+        .map(|entry| serde_json::to_value(entry).unwrap())
         .collect();
     assert_eq!(
         wist_core::snapshot::state_digest(&rebuilt).unwrap(),

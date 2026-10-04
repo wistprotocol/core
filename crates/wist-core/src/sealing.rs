@@ -3,12 +3,18 @@ use crate::collection::{names, Limits};
 use crate::constants::REMOVAL_RETENTION_DAYS;
 use crate::crypto::PublicKey;
 use crate::declaration::publisher_of;
+use crate::declaration::url_host;
 use crate::declarations::Declarations;
 use crate::error::Error;
 use crate::item::{self, Kind, SizeCaps};
+use crate::label::{self, EntryKind, Judging, LabelLookup, Rejection, SealedDispute, SealedLabel};
 use crate::materialization::{self, ContentTuple};
 use crate::narrowing::stays;
-use crate::objects::{Catalog, CollectionEntry, Publisher, RecordEntry, RemovalEntry, StateEntry};
+use crate::objects::{
+    Catalog, CollectionEntry, DisputeEnvelope, LabelEnvelope, Publisher, RecordEntry, RemovalEntry,
+    StateEntry,
+};
+use crate::registry_updates::AcceptedUpdates;
 use crate::suffix_list::{check_epoch_capacity, EpochCaps, SuffixList};
 use crate::timestamp::{instant, log_seconds};
 use crate::withdrawal::{self, SealedItems, WithdrawalReplay};
@@ -18,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const DAY_SECONDS: i64 = 86_400;
 const OUT_OF_PLACE: &str = "WIST3-E06";
 const EPOCH_REJECTED: &str = "WIST3-E03";
+const NOT_JCS: &str = "WIST1-E05";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameters {
@@ -109,6 +116,14 @@ pub enum Condition {
     Envelope,
     Authentication,
     Contract,
+    Eligibility,
+    Fields,
+    Clock,
+    SelfLabel,
+    Unsealed,
+    Authority,
+    Binding,
+    Signature,
 }
 
 impl Condition {
@@ -128,6 +143,28 @@ impl Condition {
             Condition::Envelope => "envelope",
             Condition::Authentication => "authentication",
             Condition::Contract => "contract",
+            Condition::Eligibility => "eligibility",
+            Condition::Fields => "fields",
+            Condition::Clock => "clock",
+            Condition::SelfLabel => "self",
+            Condition::Unsealed => "unsealed",
+            Condition::Authority => "authority",
+            Condition::Binding => "binding",
+            Condition::Signature => "signature",
+        }
+    }
+}
+
+impl From<Rejection> for Condition {
+    fn from(rejection: Rejection) -> Self {
+        match rejection {
+            Rejection::Fields => Condition::Fields,
+            Rejection::Clock => Condition::Clock,
+            Rejection::SelfLabel => Condition::SelfLabel,
+            Rejection::Unsealed => Condition::Unsealed,
+            Rejection::Authority => Condition::Authority,
+            Rejection::Binding => Condition::Binding,
+            Rejection::Signature => Condition::Signature,
         }
     }
 }
@@ -465,7 +502,57 @@ pub struct Replay {
     sealed: SealedItems,
     withdrawals: WithdrawalReplay,
     duties: BTreeMap<String, Duty>,
+    labels: BTreeMap<String, SealedLabel>,
+    disputes: BTreeMap<String, SealedDispute>,
+    sealed_labels: BTreeSet<String>,
+    resumed_labels: BTreeMap<String, String>,
     resumed: bool,
+}
+
+struct Leaf {
+    octets: Option<Vec<u8>>,
+    body_eligible: bool,
+    label_eligible: bool,
+}
+
+fn leaves(entries: &[Value], stored: &[(usize, &[u8])]) -> Result<Vec<Leaf>, Error> {
+    let mut leaves: Vec<Leaf> = entries
+        .iter()
+        .map(|entry| {
+            let octets = crate::jcs::canonicalize(entry).ok();
+            let label_eligible = entry["body"]
+                .get("label")
+                .is_some_and(|label| crate::jcs::canonicalize(label).is_ok());
+            Leaf {
+                body_eligible: octets.is_some(),
+                octets,
+                label_eligible,
+            }
+        })
+        .collect();
+    for (index, octets) in stored {
+        let parsed: Value = serde_json::from_slice(octets)
+            .map_err(|e| Error::History(format!("stored Entry {index} is not JSON text: {e}")))?;
+        if entries.get(*index) != Some(&parsed) {
+            return Err(Error::History(format!(
+                "stored Entry {index} does not read as the Entry at its index"
+            )));
+        }
+        leaves[*index] = Leaf {
+            octets: Some(octets.to_vec()),
+            body_eligible: crate::json::member_eligible(octets, &["body"]) == Some(true),
+            label_eligible: crate::json::member_eligible(octets, &["body", "label"]) == Some(true),
+        };
+    }
+    Ok(leaves)
+}
+
+/// WIST-3 §3.2, A Label is sealed once.
+fn carried_label_id(entry: &Value, leaf: &Leaf) -> Option<String> {
+    if entry["type"] != "label" || !leaf.label_eligible {
+        return None;
+    }
+    label::label_id(entry["body"].get("label")?).ok()
 }
 
 struct Context<'a> {
@@ -523,7 +610,11 @@ impl Replay {
             )));
         }
         let mut latest = BTreeMap::new();
+        let mut resumed_labels = BTreeMap::new();
         for entry in entries {
+            if let StateEntry::Label(entry) = entry {
+                resumed_labels.insert(entry.label_id.clone(), entry.subject.clone());
+            }
             if let StateEntry::Collection(entry) = entry {
                 let inner = &entry.envelope["catalog"];
                 if inner["publisher"] != entry.publisher.as_str()
@@ -559,6 +650,10 @@ impl Replay {
             sealed: SealedItems::from_state(epoch_number, entries)?,
             withdrawals: WithdrawalReplay::from_state(entries)?,
             duties: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            disputes: BTreeMap::new(),
+            sealed_labels: resumed_labels.keys().cloned().collect(),
+            resumed_labels,
             resumed: true,
         })
     }
@@ -574,7 +669,13 @@ impl Replay {
                     sealing_height: latest.sealing_height,
                 })
             });
-        collections
+        let updates = self
+            .registry_updates()
+            .entries()
+            .into_iter()
+            .map(StateEntry::RegistryUpdate);
+        updates
+            .chain(collections)
             .chain(self.records.state_entries())
             .chain(
                 self.withdrawals
@@ -592,6 +693,59 @@ impl Replay {
             |host| domains.contains_key(host),
             |item_id| self.withdrawals.is_withdrawn(item_id),
         )
+    }
+
+    pub fn materialized_record(&self, url: &str) -> Option<(&str, &Record)> {
+        let host = url_host(url);
+        let held: Vec<(&str, &Record)> = self
+            .records
+            .records()
+            .filter(|(_, held_url, _)| *held_url == url)
+            .map(|(publisher, _, record)| (publisher, record))
+            .collect();
+        let chosen = materialization::preferred(
+            host,
+            self.declarations.domains().contains_key(host),
+            held.iter().map(|(publisher, record)| {
+                (*publisher, self.withdrawals.is_withdrawn(&record.item_id))
+            }),
+        )?;
+        held.into_iter().find(|(publisher, _)| *publisher == chosen)
+    }
+
+    pub fn labels(&self) -> impl Iterator<Item = &SealedLabel> {
+        self.labels.values()
+    }
+
+    pub fn disputes(&self) -> impl Iterator<Item = &SealedDispute> {
+        self.disputes.values()
+    }
+
+    pub fn sealed_items(&self) -> &SealedItems {
+        &self.sealed
+    }
+
+    pub fn registry_updates(&self) -> &AcceptedUpdates {
+        self.withdrawals.accepted_updates()
+    }
+
+    pub fn accept_registry_update(&mut self, update_id: &str, height: u64) -> bool {
+        self.withdrawals.accept_update(update_id, height)
+    }
+
+    fn label_lookup(&self, label_id: &str) -> LabelLookup {
+        if let Some(sealed) = self.labels.get(label_id) {
+            return LabelLookup::Known {
+                subject: sealed.label.subject.clone(),
+            };
+        }
+        match self.resumed_labels.get(label_id) {
+            Some(subject) => LabelLookup::Known {
+                subject: subject.clone(),
+            },
+            None if self.resumed => LabelLookup::Unverifiable,
+            None => LabelLookup::Absent,
+        }
     }
 
     pub fn declarations(&self) -> &Declarations {
@@ -646,8 +800,17 @@ impl Replay {
         Ok(duties)
     }
 
-    /// WIST-3 §3.3: a rejected Epoch preserves the accepted prefix and its state.
     pub fn epoch(&mut self, epoch: &Epoch<'_>) -> Result<Outcome, Error> {
+        self.epoch_stored(epoch, &[])
+    }
+
+    /// WIST-3 §3.3: a rejected Epoch preserves the accepted prefix and its state. `stored` holds
+    /// the leaf data of each Entry, by index, whose body is not valid JCS input (WIST-1 §4).
+    pub fn epoch_stored(
+        &mut self,
+        epoch: &Epoch<'_>,
+        stored: &[(usize, &[u8])],
+    ) -> Result<Outcome, Error> {
         let sealed_at_s = log_seconds(epoch.sealed_at)?;
         if epoch.height != self.next_height {
             return Err(Error::History(format!(
@@ -665,13 +828,15 @@ impl Replay {
         }
         let limits = epoch.parameters.limits()?;
         let caps = epoch.parameters.size_caps()?;
+        let leaves = leaves(epoch.entries, stored)?;
         let mut declarations: Vec<Value> = epoch
             .entries
             .iter()
-            .filter(|entry| entry["type"] == "publisher_declaration")
-            .cloned()
+            .zip(&leaves)
+            .filter(|(entry, leaf)| entry["type"] == "publisher_declaration" && leaf.body_eligible)
+            .map(|(entry, _)| entry.clone())
             .collect();
-        let codes = self.rejections(epoch, &limits, &mut declarations)?;
+        let (codes, label_ids) = self.rejections(epoch, &leaves, &limits, &mut declarations)?;
         if !codes.is_empty() {
             self.declarations
                 .seed_head(epoch.height, epoch.root, Some(sealed_at_s));
@@ -692,6 +857,7 @@ impl Replay {
         )?;
         self.next_height = epoch.height + 1;
         self.sealed_at_s = Some(sealed_at_s);
+        self.sealed_labels.extend(label_ids);
         let mut records_removed = Vec::new();
         let mut narrowings: Vec<_> = effects.narrowings().collect();
         narrowings.sort_by(|a, b| a.domain.cmp(&b.domain));
@@ -728,9 +894,15 @@ impl Replay {
             windows,
             caps,
         };
+        let ineligible =
+            |condition, code| Some(Judgment::Ignored(vec![Failure { condition, code }]));
         let mut entries = vec![None; epoch.entries.len()];
         for (index, entry) in epoch.entries.iter().enumerate() {
             if entry["type"] == "publisher_catalog" {
+                if !leaves[index].body_eligible {
+                    entries[index] = ineligible(Condition::C1, NOT_JCS);
+                    continue;
+                }
                 let failed = self.judge_catalog(&entry["body"], &context)?;
                 if failed.is_empty() {
                     self.apply_catalog(&entry["body"], &context, &mut records_removed)?;
@@ -740,6 +912,10 @@ impl Replay {
         }
         for (index, entry) in epoch.entries.iter().enumerate() {
             if entry["type"] == "publisher_item" {
+                if !leaves[index].body_eligible {
+                    entries[index] = ineligible(Condition::I1, NOT_JCS);
+                    continue;
+                }
                 let (failed, named) = self.judge_item(&entry["body"], &context)?;
                 if let (true, Some(named)) = (failed.is_empty(), named) {
                     self.apply_item(&entry["body"], &named, &context, &mut records_removed)?;
@@ -749,7 +925,44 @@ impl Replay {
         }
         for (index, entry) in epoch.entries.iter().enumerate() {
             if entry["type"] == "registry_update" {
-                entries[index] = self.apply_withdrawal(&entry["body"], &context);
+                entries[index] = if leaves[index].body_eligible {
+                    self.apply_withdrawal(&entry["body"], &context)
+                } else {
+                    ineligible(Condition::Eligibility, NOT_JCS)
+                };
+            }
+        }
+        let judging = Judging {
+            clock_s: sealed_at_s,
+            clock_skew_seconds: epoch.parameters.get("clock_skew_seconds"),
+            url_cap_bytes: epoch.parameters.get("url_cap_bytes"),
+        };
+        for kind in [EntryKind::Label, EntryKind::Dispute] {
+            for (index, entry) in epoch.entries.iter().enumerate() {
+                if entry["type"] != kind.member() {
+                    continue;
+                }
+                let judged = if leaves[index].body_eligible {
+                    label::judge_entry(
+                        kind,
+                        &entry["body"],
+                        &judging,
+                        |domain| context.in_force(domain),
+                        |label_id| self.label_lookup(label_id),
+                    )
+                } else {
+                    Err(Rejection::Fields)
+                };
+                entries[index] = Some(match judged {
+                    Ok(()) => {
+                        self.apply_label(kind, &entry["body"], epoch.height, index)?;
+                        Judgment::Valid
+                    }
+                    Err(rejection) => Judgment::Ignored(vec![Failure {
+                        condition: rejection.into(),
+                        code: rejection.code(),
+                    }]),
+                });
             }
         }
         Ok(Outcome::Accepted {
@@ -761,14 +974,48 @@ impl Replay {
     fn rejections(
         &self,
         epoch: &Epoch<'_>,
+        leaves: &[Leaf],
         limits: &Limits,
         declarations: &mut [Value],
-    ) -> Result<BTreeSet<String>, Error> {
+    ) -> Result<(BTreeSet<String>, Vec<String>), Error> {
         let mut codes = BTreeSet::new();
-        let formed = epoch.entries.iter().all(|entry| {
-            crate::epoch::entry_group(entry).is_ok() && crate::epoch::entry_leaf(entry).is_ok()
-        });
-        if !formed || crate::epoch::validate_entry_order(epoch.entries).is_err() {
+        let mut order = Vec::with_capacity(leaves.len());
+        for (entry, leaf) in epoch.entries.iter().zip(leaves) {
+            let group = crate::epoch::entry_group(entry).ok();
+            let octets = leaf
+                .octets
+                .as_deref()
+                .filter(|octets| crate::tiles::check_entry_bytes(octets.len() as u64).is_ok());
+            match (group, octets) {
+                (Some(group), Some(octets)) => {
+                    order.push((group, crate::merkle::leaf_hash(octets)));
+                }
+                _ => {
+                    codes.insert(EPOCH_REJECTED.to_owned());
+                }
+            }
+        }
+        if order.windows(2).any(|pair| pair[0] > pair[1]) {
+            codes.insert(EPOCH_REJECTED.to_owned());
+        }
+        if epoch
+            .entries
+            .iter()
+            .zip(leaves)
+            .any(|(entry, leaf)| entry["type"] == "publisher_declaration" && !leaf.body_eligible)
+        {
+            codes.insert(NOT_JCS.to_owned());
+        }
+        let label_ids: Vec<String> = epoch
+            .entries
+            .iter()
+            .zip(leaves)
+            .filter_map(|(entry, leaf)| carried_label_id(entry, leaf))
+            .collect();
+        let distinct: BTreeSet<&String> = label_ids.iter().collect();
+        if distinct.len() != label_ids.len()
+            || distinct.iter().any(|id| self.sealed_labels.contains(*id))
+        {
             codes.insert(EPOCH_REJECTED.to_owned());
         }
         let mut named = BTreeSet::new();
@@ -796,7 +1043,7 @@ impl Replay {
         }
         if crate::epoch::sort_entries(declarations).is_err() {
             codes.insert(EPOCH_REJECTED.to_owned());
-            return Ok(codes);
+            return Ok((codes, label_ids));
         }
         if let Err(error) = self.declarations.project(
             epoch.sealed_at,
@@ -812,7 +1059,7 @@ impl Replay {
                 None => return Err(error),
             }
         }
-        Ok(codes)
+        Ok((codes, label_ids))
     }
 
     fn judge_catalog(&self, body: &Value, context: &Context<'_>) -> Result<Vec<Failure>, Error> {
@@ -1035,6 +1282,50 @@ impl Replay {
         }
     }
 
+    fn apply_label(
+        &mut self,
+        kind: EntryKind,
+        body: &Value,
+        height: u64,
+        index: usize,
+    ) -> Result<(), Error> {
+        let malformed = |e: serde_json::Error| Error::Envelope(format!("a valid {kind:?}: {e}"));
+        let entry_index = index as u64;
+        match kind {
+            EntryKind::Label => {
+                let envelope: LabelEnvelope =
+                    serde_json::from_value(body.clone()).map_err(malformed)?;
+                let label_id = label::label_id(&body["label"])
+                    .map_err(|_| Error::Envelope("a valid Label has an ID".into()))?;
+                self.labels.insert(
+                    label_id.clone(),
+                    SealedLabel {
+                        label: envelope.label,
+                        label_id,
+                        height,
+                        entry_index,
+                    },
+                );
+            }
+            EntryKind::Dispute => {
+                let envelope: DisputeEnvelope =
+                    serde_json::from_value(body.clone()).map_err(malformed)?;
+                let dispute_id = label::dispute_id(&body["dispute"])
+                    .map_err(|_| Error::Envelope("a valid dispute has an ID".into()))?;
+                self.disputes.insert(
+                    dispute_id.clone(),
+                    SealedDispute {
+                        dispute: envelope.dispute,
+                        dispute_id,
+                        height,
+                        entry_index,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn drop_record(
         &mut self,
         publisher: &str,
@@ -1138,6 +1429,134 @@ mod tests {
         ] {
             assert!(Records::from_state(&tuples).is_err(), "{tuples:?}");
         }
+    }
+
+    fn empty_epoch<'a>(height: u64, sealed_at: &'a str, entries: &'a [Value]) -> Epoch<'a> {
+        static SUITE: std::sync::OnceLock<Parameters> = std::sync::OnceLock::new();
+        Epoch {
+            height,
+            root: "root",
+            sealed_at,
+            parameters: SUITE.get_or_init(Parameters::suite),
+            suffix_list: None,
+            log_key: &|_| None,
+            entries,
+        }
+    }
+
+    #[test]
+    fn an_entry_over_one_leaf_rejects_its_epoch_and_the_replay_goes_on() {
+        let pad = "x".repeat(65_536);
+        for kind in ["publisher_declaration", "publisher_catalog", "label"] {
+            let mut replay = Replay::new();
+            let entries = [serde_json::json!({"type": kind, "body": {"pad": pad}})];
+            let outcome = replay
+                .epoch(&empty_epoch(0, "2026-10-01T00:00:00Z", &entries))
+                .unwrap();
+            assert_eq!(
+                outcome,
+                Outcome::Rejected {
+                    codes: vec![EPOCH_REJECTED.to_owned()]
+                },
+                "{kind}"
+            );
+            let next = replay
+                .epoch(&empty_epoch(1, "2026-10-01T01:00:00Z", &[]))
+                .unwrap();
+            assert!(matches!(next, Outcome::Accepted { .. }), "{kind}");
+        }
+    }
+
+    #[test]
+    fn stored_text_that_does_not_read_as_its_entry_is_refused() {
+        let entries = [serde_json::json!({"type": "label", "body": {"a": 2}})];
+        let epoch = empty_epoch(0, "2026-10-01T00:00:00Z", &entries);
+        let other = br#"{"type": "label", "body": {"a": 1}}"#;
+        assert!(Replay::new().epoch_stored(&epoch, &[(0, other)]).is_err());
+        let repeated = br#"{"type": "label", "body": {"a": 1, "a": 2}}"#;
+        let outcome = Replay::new()
+            .epoch_stored(&epoch, &[(0, repeated)])
+            .unwrap();
+        let Outcome::Accepted { entries, .. } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(
+            entries,
+            [Some(Judgment::Ignored(vec![Failure {
+                condition: Condition::Fields,
+                code: "WIST2-E06"
+            }]))]
+        );
+    }
+
+    #[test]
+    fn a_label_id_carried_twice_in_one_epoch_rejects_it() {
+        let label = serde_json::json!({"label": {"labeler": "a.example"}, "sig": {}});
+        let entries = [
+            serde_json::json!({"type": "label", "body": label}),
+            serde_json::json!({"type": "label", "body": {"label": label["label"], "sig": 1}}),
+        ];
+        let mut entries = entries.to_vec();
+        crate::epoch::sort_entries(&mut entries).unwrap();
+        let outcome = Replay::new()
+            .epoch(&empty_epoch(0, "2026-10-01T00:00:00Z", &entries))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Rejected {
+                codes: vec![EPOCH_REJECTED.to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn accepted_registry_update_ids_resume_from_their_tuples() {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(3, "root", None);
+        let mut replay = Replay::new();
+        assert!(replay.accept_registry_update("sha256:a", 2));
+        assert!(!replay.accept_registry_update("sha256:a", 3));
+        let tuples = replay.state_entries();
+        assert_eq!(
+            serde_json::to_value(&tuples).unwrap(),
+            serde_json::json!([["registry_update", "sha256:a", 2]])
+        );
+        let resumed = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations, &tuples).unwrap();
+        assert_eq!(
+            resumed.registry_updates().accepted_height("sha256:a"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_resumed_replay_knows_the_labels_of_its_tuples_and_reads_no_other_as_absent() {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(3, "root", None);
+        let id = format!("sha256:{}", "c".repeat(64));
+        let tuples = [StateEntry::Label(crate::objects::LabelEntry {
+            labeler: "labeler.example".into(),
+            subject: "https://example.com/a".into(),
+            name: "wist:spam".into(),
+            value: None,
+            asserted_at: "2026-10-01T00:00:00Z".into(),
+            expires_at: None,
+            delta: None,
+            label_id: id.clone(),
+            sealing_height: 2,
+        })];
+        let resumed = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations, &tuples).unwrap();
+        assert_eq!(
+            resumed.label_lookup(&id),
+            LabelLookup::Known {
+                subject: "https://example.com/a".into()
+            }
+        );
+        assert!(resumed.sealed_labels.contains(&id));
+        assert_eq!(
+            resumed.label_lookup("sha256:other"),
+            LabelLookup::Unverifiable
+        );
+        assert_eq!(Replay::new().label_lookup(&id), LabelLookup::Absent);
     }
 
     #[test]

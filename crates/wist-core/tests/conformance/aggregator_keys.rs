@@ -6,6 +6,7 @@ use wist_core::checkpoint::{self, Checkpoint};
 use wist_core::crypto::PublicKey;
 use wist_core::merkle::{self, LeafHashes};
 use wist_core::objects::{AggregatorKeyEntry, Anchor, LogAnchorEnvelope, StateEntry};
+use wist_core::registry_updates::{update_id, AcceptedUpdates};
 
 const EPOCH_CAP_BYTES: u64 = 268_435_456;
 const CADENCE_SECONDS: i64 = 3600;
@@ -45,6 +46,14 @@ fn tuple_set(registry: &Registry) -> BTreeSet<String> {
         .entries()
         .into_iter()
         .map(|entry| serde_json::to_string(&StateEntry::AggregatorKey(entry)).unwrap())
+        .collect()
+}
+
+fn update_tuples(updates: &AcceptedUpdates) -> BTreeSet<String> {
+    updates
+        .entries()
+        .into_iter()
+        .map(|entry| serde_json::to_string(&StateEntry::RegistryUpdate(entry)).unwrap())
         .collect()
 }
 
@@ -88,6 +97,7 @@ struct EpochReplay {
     codes: Vec<Option<String>>,
     valid_at: BTreeSet<String>,
     tuples: BTreeSet<String>,
+    updates: BTreeSet<String>,
     applied: bool,
     checkpoint: Option<Checkpoint>,
     sealed: Registry,
@@ -103,6 +113,7 @@ struct Replay {
 fn replay(history: &Value) -> Replay {
     let log_id = history["log_id"].as_str().unwrap().to_string();
     let mut adopted = genesis_registry(history);
+    let mut adopted_updates = AcceptedUpdates::new();
     let mut epochs = Vec::new();
     let mut leaves: Vec<[u8; 32]> = Vec::new();
     let mut head: Option<u64> = None;
@@ -137,6 +148,12 @@ fn replay(history: &Value) -> Replay {
                 other => other.code().map(str::to_string),
             })
             .collect();
+        let mut sealed_updates = adopted_updates.clone();
+        for (entry, code) in entries.iter().zip(&codes) {
+            if code.is_none() {
+                sealed_updates.accept(&update_id(&entry["body"]).unwrap(), height);
+            }
+        }
 
         let checkpoint = epoch["checkpoint"]
             .as_str()
@@ -169,6 +186,7 @@ fn replay(history: &Value) -> Replay {
                     .unwrap_or_else(|e| panic!("{where_}: {e}"));
             }
             adopted = sealed.clone();
+            adopted_updates = sealed_updates;
             head = Some(height);
             verified = Some(checkpoint.clone());
         }
@@ -178,6 +196,7 @@ fn replay(history: &Value) -> Replay {
             codes,
             valid_at: key_ids(&sealed.valid_at(height)),
             tuples: tuple_set(&adopted),
+            updates: update_tuples(&adopted_updates),
             applied: checkpoint.is_some(),
             checkpoint,
             sealed,
@@ -497,7 +516,22 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
                 .filter(|tuple| tuple[0] == "aggregator_key")
                 .map(|tuple| serde_json::to_string(tuple).unwrap())
                 .collect();
-            let complete = carried == epoch.tuples;
+            let carried_updates: BTreeSet<String> = case["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|tuple| tuple[0] == "registry_update")
+                .map(|tuple| serde_json::to_string(tuple).unwrap())
+                .collect();
+            let restored_updates: Vec<StateEntry> =
+                serde_json::from_value(case["entries"].clone()).unwrap();
+            assert_eq!(
+                update_tuples(&AcceptedUpdates::from_state(&restored_updates).unwrap()),
+                carried_updates,
+                "{name}"
+            );
+            let keys_complete = carried == epoch.tuples;
+            let complete = keys_complete && carried_updates == epoch.updates;
             assert_eq!(
                 complete,
                 case["verifies"].as_bool().unwrap(),
@@ -518,15 +552,24 @@ fn a_snapshot_state_that_omits_a_removed_keys_tuple_does_not_restore_the_registr
                 .collect();
             match Registry::from_state_tuples(&anchor(&history), head, &entries) {
                 Ok(restored) => {
-                    assert!(complete, "{name}: the resumed registry");
+                    assert!(keys_complete, "{name}: the resumed registry");
                     assert_eq!(tuple_set(&restored), epoch.tuples, "{name}");
                 }
                 Err(error) => {
-                    assert!(!complete, "{name}: the complete state file was rejected");
+                    assert!(
+                        !keys_complete,
+                        "{name}: the complete key tuples were rejected"
+                    );
                     assert_eq!(error.code(), Some("WIST3-E04"), "{name}");
                 }
             }
-            if !complete {
+            if keys_complete && !complete {
+                assert!(
+                    carried_updates.is_subset(&epoch.updates),
+                    "{name}: what the file omits is an accepted Registry Update's tuple"
+                );
+            }
+            if !keys_complete {
                 let missing: Vec<AggregatorKeyEntry> = epoch
                     .tuples
                     .difference(&carried)

@@ -31,10 +31,10 @@ pub use registry_update::{
 };
 pub use snapshot::{
     AggregatorKeyEntry, CollectionEntry, DeclarationEntry, DisputeEntry, LabelEntry,
-    ParameterEntry, PendingDeclarationEntry, RecordEntry, RecoveryWindowEntry, RemovalEntry,
-    SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope, SnapshotManifest,
-    SnapshotManifestEnvelope, SnapshotShards, SnapshotState, SnapshotStateEnvelope,
-    SnapshotStateFile, StateEntry, SuffixListEntry, WithdrawalEntry,
+    ParameterEntry, PendingDeclarationEntry, RecordEntry, RecoveryWindowEntry, RegistryUpdateEntry,
+    RemovalEntry, SnapshotFile, SnapshotIndex, SnapshotIndexEntry, SnapshotIndexEnvelope,
+    SnapshotManifest, SnapshotManifestEnvelope, SnapshotShards, SnapshotState,
+    SnapshotStateEnvelope, SnapshotStateFile, StateEntry, SuffixListEntry, WithdrawalEntry,
 };
 pub use status::{
     CollectionStatus, Deferral, PublisherState, RejectionCondition, Status, StatusRejection,

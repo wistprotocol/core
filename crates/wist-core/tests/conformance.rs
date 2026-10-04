@@ -1359,6 +1359,129 @@ fn wist4_parameter_in_force_vectors() {
     }
 }
 
+fn replay_parameter_acts(
+    schedule: &mut wist_core::parameters::Schedule,
+    updates: &mut wist_core::registry_updates::AcceptedUpdates,
+    log_key: &wist_core::crypto::PublicKey,
+    epoch: &serde_json::Value,
+) {
+    use wist_core::timestamp::log_seconds;
+    let epoch_number = epoch["epoch_number"].as_u64().unwrap();
+    let sealed_at_s = log_seconds(epoch["sealed_at"].as_str().unwrap()).unwrap();
+    for (entry_index, act) in epoch["acts"].as_array().unwrap().iter().enumerate() {
+        wist_core::envelope::verify_envelope(act, "update", log_key).unwrap();
+        let update_id = wist_core::registry_updates::update_id(act).unwrap();
+        if updates.is_accepted(&update_id) {
+            continue;
+        }
+        let update = &act["update"];
+        let amendment = wist_core::parameters::Amendment {
+            parameter: update["details"]["parameter"].as_str().unwrap().to_owned(),
+            value: update["details"]["value"].as_i64().unwrap(),
+            epoch_number,
+            entry_index: entry_index as u64,
+            sealed_at_s,
+            effective_at_s: log_seconds(update["effective_at"].as_str().unwrap()).unwrap(),
+        };
+        if schedule.try_accept(amendment).is_ok() {
+            updates.accept(&update_id, epoch_number);
+        }
+    }
+}
+
+#[test]
+fn wist4_a_resumed_consumer_reads_an_amendment_sealed_again_as_idempotent() {
+    use wist_core::objects::StateEntry;
+    use wist_core::parameters::{Amendment, Schedule};
+    use wist_core::registry_updates::AcceptedUpdates;
+    use wist_core::timestamp::log_seconds;
+
+    let vector = read_json("vectors/wist4/parameter-in-force.json");
+    let cases = vector["resume_cases"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let label = case["label"].as_str().unwrap();
+        let parameter = case["parameter"].as_str().unwrap();
+        assert_eq!(
+            Some(case["default"].as_i64().unwrap()),
+            wist_core::parameters::spec(parameter).unwrap().default,
+            "{label}"
+        );
+        let log_key = wist_core::crypto::PublicKey::from_b64u(
+            case["log_key"]["public_key"].as_str().unwrap(),
+        )
+        .unwrap();
+        let epochs = case["epochs"].as_array().unwrap();
+        let first_s = log_seconds(epochs[0]["sealed_at"].as_str().unwrap()).unwrap();
+        let query_s = log_seconds(case["query_at"].as_str().unwrap()).unwrap();
+        let snapshot_epoch = case["snapshot_epoch"].as_u64().unwrap();
+        let tuples: Vec<StateEntry> =
+            serde_json::from_value(case["snapshot_tuples"].clone()).unwrap();
+
+        let mut schedule = Schedule::new(first_s);
+        let mut updates = AcceptedUpdates::new();
+        let mut at_snapshot = None;
+        for epoch in epochs {
+            replay_parameter_acts(&mut schedule, &mut updates, &log_key, epoch);
+            if epoch["epoch_number"].as_u64() == Some(snapshot_epoch) {
+                at_snapshot = Some(updates.clone());
+            }
+        }
+        assert_eq!(
+            schedule.value_at(parameter, query_s),
+            case["replayed_value"].as_i64(),
+            "{label}: replayed"
+        );
+        assert_eq!(
+            at_snapshot.as_ref(),
+            Some(&AcceptedUpdates::from_state(&tuples).unwrap()),
+            "{label}: the snapshot's registry_update tuples"
+        );
+
+        let snapshot_s = log_seconds(
+            epochs
+                .iter()
+                .find(|epoch| epoch["epoch_number"].as_u64() == Some(snapshot_epoch))
+                .unwrap()["sealed_at"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let resume = |updates: AcceptedUpdates| {
+            let mut schedule = Schedule::new(first_s);
+            for tuple in &tuples {
+                if let StateEntry::Parameter(entry) = tuple {
+                    schedule.adopt(Amendment {
+                        parameter: entry.name.clone(),
+                        value: entry.value,
+                        epoch_number: snapshot_epoch,
+                        entry_index: 0,
+                        sealed_at_s: snapshot_s,
+                        effective_at_s: log_seconds(&entry.effective_at).unwrap(),
+                    });
+                }
+            }
+            let mut updates = updates;
+            for epoch in epochs {
+                if epoch["epoch_number"].as_u64().unwrap() > snapshot_epoch {
+                    replay_parameter_acts(&mut schedule, &mut updates, &log_key, epoch);
+                }
+            }
+            schedule.value_at(parameter, query_s)
+        };
+        assert_eq!(
+            resume(AcceptedUpdates::from_state(&tuples).unwrap()),
+            case["resumed_value"].as_i64(),
+            "{label}: resumed"
+        );
+        assert_eq!(
+            resume(AcceptedUpdates::new()),
+            case["value_resumed_without_registry_update_tuples"].as_i64(),
+            "{label}: resumed without the registry_update tuples"
+        );
+    }
+}
+
 fn parameter_default(name: &str) -> i64 {
     wist_core::parameters::spec(name).unwrap().default.unwrap()
 }
@@ -1463,6 +1586,8 @@ fn wist4_registrable_domain_vectors() {
             .unwrap();
     let log_key_id = vector["log_key"]["key_id"].as_str().unwrap();
     let mut replay = SuffixListReplay::new();
+    let mut updates: Vec<(u64, wist_core::registry_updates::AcceptedUpdates)> = Vec::new();
+    let mut accepted = wist_core::registry_updates::AcceptedUpdates::new();
     let mut codes = std::collections::BTreeSet::new();
     for case in vector["act_cases"].as_array().unwrap() {
         let label = case["label"].as_str().unwrap();
@@ -1493,7 +1618,12 @@ fn wist4_registrable_domain_vectors() {
             },
         );
         match disposition {
-            Disposition::Accepted { .. } => assert!(case["code"].is_null(), "{label}"),
+            Disposition::Accepted { .. } => {
+                assert!(case["code"].is_null(), "{label}");
+                let update_id = wist_core::registry_updates::update_id(&doc).unwrap();
+                assert!(accepted.accept(&update_id, height), "{label}");
+                updates.push((height, accepted.clone()));
+            }
             Disposition::Rejected(code) => {
                 assert_eq!(Some(code), case["code"].as_str(), "{label}");
                 codes.insert(code);
@@ -1568,13 +1698,21 @@ fn wist4_registrable_domain_vectors() {
     for row in vector["state_tuples"].as_array().unwrap() {
         let tree_size = row["tree_size"].as_u64().unwrap();
         let entry = replay.entry_at(tree_size).unwrap();
-        let tuple =
-            serde_json::to_value(wist_core::objects::StateEntry::SuffixList(entry)).unwrap();
-        assert_eq!(
-            vec![tuple],
-            *row["entries"].as_array().unwrap(),
-            "{tree_size}"
-        );
+        let held = updates
+            .iter()
+            .rev()
+            .find(|(height, _)| *height <= tree_size)
+            .map(|(_, held)| held.entries())
+            .unwrap_or_default();
+        let mut produced: Vec<serde_json::Value> =
+            vec![serde_json::to_value(wist_core::objects::StateEntry::SuffixList(entry)).unwrap()];
+        produced.extend(held.into_iter().map(|entry| {
+            serde_json::to_value(wist_core::objects::StateEntry::RegistryUpdate(entry)).unwrap()
+        }));
+        let mut expected = row["entries"].as_array().unwrap().clone();
+        produced[1..].sort_by_key(serde_json::Value::to_string);
+        expected[1..].sort_by_key(serde_json::Value::to_string);
+        assert_eq!(produced, expected, "{tree_size}");
     }
 }
 
@@ -1658,6 +1796,24 @@ fn wist2_label_vectors() {
         };
         let result =
             label::validate_label(&envelope, &judged_under, url_cap, clock.0, clock.1).map(|_| ());
+        let judged = label::judge_entry(
+            label::EntryKind::Label,
+            &envelope,
+            &label::Judging {
+                clock_s: clock.0,
+                clock_skew_seconds: clock.1,
+                url_cap_bytes: url_cap,
+            },
+            |domain| (domain == judged_under.publisher.domain).then_some(&judged_under.publisher),
+            |_| label::LabelLookup::Absent,
+        );
+        let foreign = envelope["label"]["labeler"]
+            .as_str()
+            .is_some_and(|author| author != judged_under.publisher.domain);
+        assert!(
+            judged == result || foreign && judged == Err(label::Rejection::Binding),
+            "{name}: judged as a sealed Entry, {judged:?} against {result:?}"
+        );
         assert_eq!(
             wist_core::envelope::verify_envelope(&case["envelope"], "label", &author).is_ok(),
             case["author_signature"].as_bool().unwrap(),
@@ -1742,6 +1898,57 @@ fn wist2_label_vectors() {
             case["name"]
         );
     }
+    let mut readings = std::collections::BTreeMap::new();
+    for case in vector["materialized_binding_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let records: Vec<(&str, &str, bool)> = case["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                (
+                    record["publisher"].as_str().unwrap(),
+                    record["item"].as_str().unwrap(),
+                    record["withdrawn"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        let subject = case["subject"].as_str().unwrap();
+        let self_declared = case["host_declared"].as_bool().unwrap();
+        assert_eq!(
+            wist_core::materialization::preferred(
+                wist_core::declaration::url_host(subject),
+                self_declared,
+                records
+                    .iter()
+                    .map(|(publisher, _, withdrawn)| (*publisher, *withdrawn)),
+            ),
+            case["materialized"].as_str(),
+            "{name}"
+        );
+        let applies = case["applies"].as_bool().unwrap();
+        assert_eq!(
+            label::materialized_binding_applies(
+                case["delta"].as_str(),
+                subject,
+                self_declared,
+                records.iter().copied(),
+            ),
+            applies,
+            "{name}"
+        );
+        let any_record = records
+            .iter()
+            .any(|(_, item, _)| label::binding_applies(case["delta"].as_str(), Some(item)));
+        readings
+            .entry((case["records"].to_string(), self_declared, any_record))
+            .or_insert_with(std::collections::BTreeSet::new)
+            .insert(applies);
+    }
+    assert!(
+        readings.values().any(|applies| applies.len() == 2),
+        "two cases an any-record reading cannot tell apart"
+    );
 }
 
 #[test]
@@ -1779,6 +1986,24 @@ fn wist2_dispute_vectors() {
         };
         let result =
             label::validate_dispute(&envelope, &declaration, lookup, clock.0, clock.1).map(|_| ());
+        let judged = label::judge_entry(
+            label::EntryKind::Dispute,
+            &envelope,
+            &label::Judging {
+                clock_s: clock.0,
+                clock_skew_seconds: clock.1,
+                url_cap_bytes: 2048,
+            },
+            |domain| (domain == declaration.publisher.domain).then_some(&declaration.publisher),
+            lookup,
+        );
+        let foreign = envelope["dispute"]["disputant"]
+            .as_str()
+            .is_some_and(|author| author != declaration.publisher.domain);
+        assert!(
+            judged == result || foreign && judged == Err(label::Rejection::Binding),
+            "{name}: judged as a sealed Entry, {judged:?} against {result:?}"
+        );
         let got = label_outcome(&result);
         assert_eq!(got, case["expected"].as_str().unwrap(), "{name}");
         match result {

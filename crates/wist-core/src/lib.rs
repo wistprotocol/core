@@ -31,6 +31,7 @@ pub mod parameters;
 pub mod proof;
 pub mod publisher_item;
 pub mod publisher_time;
+pub mod registry_updates;
 pub mod sealing;
 pub mod several_logs;
 pub mod snapshot;

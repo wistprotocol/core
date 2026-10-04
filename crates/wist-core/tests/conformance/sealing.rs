@@ -3,23 +3,32 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use wist_core::crypto::PublicKey;
 use wist_core::declaration::inner_hash;
-use wist_core::item::{item_id, judge_payload, SizeCaps};
+use wist_core::item::{item_id, judge_payload, Kind, SizeCaps};
 use wist_core::objects::PageItem;
 use wist_core::sealing::{Epoch, Judgment, Outcome, Parameters, Replay};
 
 fn parameters(map: &Value) -> Result<Parameters, wist_core::Error> {
-    let map = map.as_object().unwrap();
-    let mut amended: Vec<(&str, i64)> = map
+    Parameters::new(
+        map.as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_i64().unwrap())),
+    )
+}
+
+fn entry_of(named: &Value) -> Value {
+    match named["entry_json"].as_str() {
+        Some(text) => serde_json::from_str(text).unwrap(),
+        None => named["entry"].clone(),
+    }
+}
+
+fn stored_of(named: &[Value]) -> Vec<(usize, &[u8])> {
+    named
         .iter()
-        .map(|(name, value)| (name.as_str(), value.as_i64().unwrap()))
-        .collect();
-    let domain = map["domain_epoch_entries_max"].as_i64().unwrap();
-    let labeler = wist_core::parameters::spec("labeler_epoch_entries_max")
-        .unwrap()
-        .default
-        .unwrap();
-    amended.push(("labeler_epoch_entries_max", labeler.min(domain)));
-    Parameters::new(amended)
+        .enumerate()
+        .filter_map(|(index, named)| Some((index, named["entry_json"].as_str()?.as_bytes())))
+        .collect()
 }
 
 fn declaration_names(histories: &[Value]) -> BTreeMap<String, String> {
@@ -95,7 +104,69 @@ fn state(replay: &Replay, names: &BTreeMap<String, String>) -> Value {
             })
         })
         .collect();
-    json!({"declarations": declarations, "catalogs": catalogs, "records": records, "removals": removals})
+    let labels: Vec<Value> = replay
+        .labels()
+        .map(|sealed| {
+            json!({
+                "label": sealed.label_id,
+                "labeler": sealed.label.labeler,
+                "subject": sealed.label.subject,
+                "name": sealed.label.name,
+                "height": sealed.height,
+            })
+        })
+        .collect();
+    let disputes: Vec<Value> = replay
+        .disputes()
+        .map(|sealed| {
+            json!({
+                "dispute": sealed.dispute_id,
+                "label": sealed.dispute.label,
+                "disputant": sealed.dispute.disputant,
+                "height": sealed.height,
+            })
+        })
+        .collect();
+    json!({
+        "declarations": declarations,
+        "catalogs": catalogs,
+        "records": records,
+        "removals": removals,
+        "labels": labels,
+        "disputes": disputes,
+    })
+}
+
+fn assert_materialized_records_and_sealed_items(label: &str, replay: &Replay) {
+    let materialized: BTreeMap<String, (String, String)> = replay
+        .materialized()
+        .unwrap()
+        .into_iter()
+        .map(|tuple| (tuple.url, (tuple.publisher, tuple.item_id)))
+        .collect();
+    for (_, url, _) in replay.records().records() {
+        let selected = replay
+            .materialized_record(url)
+            .map(|(publisher, record)| (publisher.to_owned(), record.item_id.clone()));
+        assert_eq!(selected.as_ref(), materialized.get(url), "{label}: {url}");
+    }
+    let sealed: Vec<(&str, &str, Kind)> = replay
+        .sealed_items()
+        .sealed()
+        .map(|item| (item.item_id, item.publisher, item.kind))
+        .collect();
+    for (publisher, _, record) in replay.records().records() {
+        assert!(
+            sealed.contains(&(record.item_id.as_str(), publisher, Kind::Page)),
+            "{label}: the record's Item is sealed"
+        );
+    }
+    for (publisher, _, removal) in replay.records().removals() {
+        assert!(
+            sealed.contains(&(removal.item_id.as_str(), publisher, Kind::Removed)),
+            "{label}: the removal's Item is sealed"
+        );
+    }
 }
 
 fn assert_judgments(label: &str, named: &[Value], judged: &[Option<Judgment>], expected: &Value) {
@@ -153,20 +224,23 @@ fn catalog_sealing_histories_replay_every_epoch_judgment_and_state() {
             let height = epoch["height"].as_u64().unwrap();
             let label = format!("{label} at {height}");
             let named = epoch["entries"].as_array().unwrap();
-            let entries: Vec<Value> = named.iter().map(|named| named["entry"].clone()).collect();
+            let entries: Vec<Value> = named.iter().map(entry_of).collect();
             let parameters = parameters(&epoch["parameters"]).unwrap();
             let root = format!("height {height}");
             let sealed_at = epoch["sealed_at"].as_str().unwrap();
             let outcome = replay
-                .epoch(&Epoch {
-                    height,
-                    root: &root,
-                    sealed_at,
-                    parameters: &parameters,
-                    suffix_list: None,
-                    log_key: &log_key,
-                    entries: &entries,
-                })
+                .epoch_stored(
+                    &Epoch {
+                        height,
+                        root: &root,
+                        sealed_at,
+                        parameters: &parameters,
+                        suffix_list: None,
+                        log_key: &log_key,
+                        entries: &entries,
+                    },
+                    &stored_of(named),
+                )
                 .unwrap();
             assert_eq!(want["height"], height, "{label}");
             match outcome {
@@ -194,6 +268,7 @@ fn catalog_sealing_histories_replay_every_epoch_judgment_and_state() {
                 }
             }
             assert_eq!(state(&replay, &names), want["state"], "{label}");
+            assert_materialized_records_and_sealed_items(&label, &replay);
             if let Some(duties) = want.get("payload_duties") {
                 let produced: Vec<Value> = replay
                     .payload_duties(sealed_at)
@@ -345,19 +420,22 @@ fn replay_history(
         assert_eq!(want["height"], height, "{label}");
         let label = format!("{label} at {height}");
         let named = epoch["entries"].as_array().unwrap();
-        let entries: Vec<Value> = named.iter().map(|named| named["entry"].clone()).collect();
+        let entries: Vec<Value> = named.iter().map(entry_of).collect();
         let parameters = parameters(&epoch["parameters"]).unwrap();
         let root = format!("height {height}");
         let outcome = replay
-            .epoch(&Epoch {
-                height,
-                root: &root,
-                sealed_at: epoch["sealed_at"].as_str().unwrap(),
-                parameters: &parameters,
-                suffix_list: None,
-                log_key,
-                entries: &entries,
-            })
+            .epoch_stored(
+                &Epoch {
+                    height,
+                    root: &root,
+                    sealed_at: epoch["sealed_at"].as_str().unwrap(),
+                    parameters: &parameters,
+                    suffix_list: None,
+                    log_key,
+                    entries: &entries,
+                },
+                &stored_of(named),
+            )
             .unwrap();
         match outcome {
             Outcome::Rejected { codes } => {
@@ -486,12 +564,9 @@ fn a_replay_resumed_from_its_state_tuples_at_every_height_judges_and_holds_what_
             let mut resumed: Option<Replay> = None;
             for epoch in epochs {
                 let height = epoch["height"].as_u64().unwrap();
-                let entries: Vec<Value> = epoch["entries"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|named| named["entry"].clone())
-                    .collect();
+                let named = epoch["entries"].as_array().unwrap();
+                let entries: Vec<Value> = named.iter().map(entry_of).collect();
+                let stored = stored_of(named);
                 let parameters = parameters(&epoch["parameters"]).unwrap();
                 let root = format!("height {height}");
                 let sealed_at = epoch["sealed_at"].as_str().unwrap();
@@ -504,18 +579,17 @@ fn a_replay_resumed_from_its_state_tuples_at_every_height_judges_and_holds_what_
                     log_key: &log_key,
                     entries: &entries,
                 };
-                let outcome = full.epoch(&at).unwrap();
+                let outcome = full.epoch_stored(&at, &stored).unwrap();
                 if let Some(replay) = resumed.as_mut() {
                     let label = format!("{label}: resumed at {resume_at}, Epoch {height}");
-                    let judged = replay.epoch(&at).unwrap();
-                    if judged != outcome && judges_only_repeats(&entries, &judged, &outcome) {
-                        repeats += 1;
-                    } else if judged != outcome {
+                    let judged = replay.epoch_stored(&at, &stored).unwrap();
+                    if judged != outcome {
                         assert_breach_accepted_after_resume(&label, &entries, &judged, &outcome);
                         resumed = None;
                         breaches += 1;
                         continue;
                     }
+                    repeats += usize::from(judges_a_repeat(&entries, &judged));
                     let resumed = replay;
                     assert_eq!(
                         resumed.state_entries().len(),
@@ -551,43 +625,23 @@ fn a_replay_resumed_from_its_state_tuples_at_every_height_judges_and_holds_what_
     assert!(resumes > breaches && breaches > 0 && repeats > 0);
 }
 
-fn repeat_judged_after_resume(
-    entry: &Value,
-    resumed: &Option<Judgment>,
-    full: &Option<Judgment>,
-) -> bool {
-    let judged = match resumed {
-        Some(Judgment::Valid) => true,
-        Some(Judgment::Ignored(failures)) => failures
-            .iter()
-            .all(|f| f.condition.as_str() == "authentication" && f.code == "WIST4-E11"),
-        None => false,
-    };
-    entry["type"] == "registry_update" && full.is_none() && judged
-}
-
-fn judges_only_repeats(entries: &[Value], resumed: &Outcome, full: &Outcome) -> bool {
-    let (
-        Outcome::Accepted {
-            entries: resumed,
-            records_removed: resumed_removed,
-        },
-        Outcome::Accepted {
-            entries: full,
-            records_removed: full_removed,
-        },
-    ) = (resumed, full)
+fn judges_a_repeat(entries: &[Value], outcome: &Outcome) -> bool {
+    let Outcome::Accepted {
+        entries: judged, ..
+    } = outcome
     else {
         return false;
     };
-    resumed_removed == full_removed
-        && entries
-            .iter()
-            .zip(resumed)
-            .zip(full)
-            .all(|((entry, resumed), full)| {
-                resumed == full || repeat_judged_after_resume(entry, resumed, full)
-            })
+    entries
+        .iter()
+        .zip(judged)
+        .any(|(entry, judgment)| entry["type"] == "registry_update" && judgment.is_none())
+}
+
+fn only_failed(judgment: &Option<Judgment>, condition: &str, code: &str) -> bool {
+    matches!(judgment, Some(Judgment::Ignored(failures)) if failures
+        .iter()
+        .all(|f| f.condition.as_str() == condition && f.code == code))
 }
 
 fn assert_breach_accepted_after_resume(
@@ -596,33 +650,43 @@ fn assert_breach_accepted_after_resume(
     resumed: &Outcome,
     full: &Outcome,
 ) {
-    let (
-        Outcome::Accepted {
-            entries: resumed,
-            records_removed: resumed_removed,
-        },
-        Outcome::Accepted {
-            entries: full,
-            records_removed: full_removed,
-        },
-    ) = (resumed, full)
+    let Outcome::Accepted {
+        entries: resumed,
+        records_removed: resumed_removed,
+    } = resumed
     else {
         panic!("{label}: {resumed:?} against {full:?}");
     };
+    let (full, full_removed) = match full {
+        Outcome::Accepted {
+            entries,
+            records_removed,
+        } => (entries, records_removed),
+        Outcome::Rejected { codes } => {
+            assert_eq!(codes, &["WIST3-E03"], "{label}");
+            assert!(
+                entries.iter().any(|entry| entry["type"] == "label"),
+                "{label}: only a Label ID sealed below the Snapshot is unknown to the resumed replay"
+            );
+            return;
+        }
+    };
     assert_eq!(resumed_removed, full_removed, "{label}");
     for ((entry, resumed), full) in entries.iter().zip(resumed).zip(full) {
-        if resumed != full && !repeat_judged_after_resume(entry, resumed, full) {
-            assert_eq!(entry["type"], "registry_update", "{label}");
-            assert_eq!(*resumed, Some(Judgment::Valid), "{label}");
-            let Some(Judgment::Ignored(failures)) = full else {
-                panic!("{label}: {full:?}");
-            };
-            assert!(
-                failures
-                    .iter()
-                    .all(|f| f.condition.as_str() == "contract" && f.code == "WIST4-E04"),
-                "{label}"
-            );
+        if resumed == full {
+            continue;
+        }
+        assert_eq!(*resumed, Some(Judgment::Valid), "{label}");
+        match entry["type"].as_str() {
+            Some("registry_update") => {
+                assert!(only_failed(full, "contract", "WIST4-E04"), "{label}")
+            }
+            Some("dispute") => assert!(
+                only_failed(full, "unsealed", "WIST2-E06")
+                    || only_failed(full, "authority", "WIST2-E06"),
+                "{label}: only the Label a dispute names is unknown to the resumed replay"
+            ),
+            other => panic!("{label}: a {other:?} Entry judged apart after a resume"),
         }
     }
 }

@@ -1,6 +1,6 @@
 //! WIST-1 §4 and RFC 8785 §3.1: a repeated decoded member name at any depth is rejected, and so
 //! are arrays and objects nested deeper than 64 levels, the top-level value being level 1.
-use serde::de::{DeserializeSeed, Deserializer, Error, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Deserializer, Error, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::collections::HashSet;
 use std::fmt;
 
@@ -91,6 +91,159 @@ pub fn parse(raw: &[u8]) -> serde_json::Result<serde_json::Value> {
     serde_json::from_slice(raw)
 }
 
+#[derive(Clone, Copy)]
+struct Eligible {
+    enclosing: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for Eligible {
+    type Value = bool;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Eligible {
+    type Value = bool;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON")
+    }
+
+    fn visit_bool<E: Error>(self, _: bool) -> Result<bool, E> {
+        Ok(true)
+    }
+
+    fn visit_i64<E: Error>(self, _: i64) -> Result<bool, E> {
+        Ok(true)
+    }
+
+    fn visit_u64<E: Error>(self, _: u64) -> Result<bool, E> {
+        Ok(true)
+    }
+
+    fn visit_f64<E: Error>(self, _: f64) -> Result<bool, E> {
+        Ok(true)
+    }
+
+    fn visit_str<E: Error>(self, _: &str) -> Result<bool, E> {
+        Ok(true)
+    }
+
+    fn visit_unit<E: Error>(self) -> Result<bool, E> {
+        Ok(true)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+        let inner = Eligible {
+            enclosing: self.enclosing + 1,
+        };
+        let mut eligible = self.enclosing < NESTING_LEVELS_MAX;
+        while let Some(element) = seq.next_element_seed(inner)? {
+            eligible &= element;
+        }
+        Ok(eligible)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+        let inner = Eligible {
+            enclosing: self.enclosing + 1,
+        };
+        let mut eligible = self.enclosing < NESTING_LEVELS_MAX;
+        let mut names = HashSet::new();
+        while let Some(name) = map.next_key::<String>()? {
+            eligible &= names.insert(name);
+            eligible &= map.next_value_seed(inner)?;
+        }
+        Ok(eligible)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Member<'p> {
+    path: &'p [&'p str],
+    enclosing: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for Member<'_> {
+    type Value = Option<bool>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Option<bool>, D::Error> {
+        if self.path.is_empty() {
+            return Eligible {
+                enclosing: self.enclosing,
+            }
+            .deserialize(deserializer)
+            .map(Some);
+        }
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Member<'_> {
+    type Value = Option<bool>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON")
+    }
+
+    fn visit_bool<E: Error>(self, _: bool) -> Result<Option<bool>, E> {
+        Ok(None)
+    }
+
+    fn visit_i64<E: Error>(self, _: i64) -> Result<Option<bool>, E> {
+        Ok(None)
+    }
+
+    fn visit_u64<E: Error>(self, _: u64) -> Result<Option<bool>, E> {
+        Ok(None)
+    }
+
+    fn visit_f64<E: Error>(self, _: f64) -> Result<Option<bool>, E> {
+        Ok(None)
+    }
+
+    fn visit_str<E: Error>(self, _: &str) -> Result<Option<bool>, E> {
+        Ok(None)
+    }
+
+    fn visit_unit<E: Error>(self) -> Result<Option<bool>, E> {
+        Ok(None)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Option<bool>, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<bool>, A::Error> {
+        let inner = Member {
+            path: &self.path[1..],
+            enclosing: self.enclosing + 1,
+        };
+        let mut found = None;
+        while let Some(name) = map.next_key::<String>()? {
+            if name == self.path[0] {
+                found = map.next_value_seed(inner)?;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// WIST-1 §4: of a member repeated along `path`, the last is read, as `serde_json` reads it.
+pub fn member_eligible(raw: &[u8], path: &[&str]) -> Option<bool> {
+    let mut deserializer = serde_json::Deserializer::from_slice(raw);
+    let found = Member { path, enclosing: 0 }
+        .deserialize(&mut deserializer)
+        .ok()?;
+    deserializer.end().ok()?;
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +279,24 @@ mod tests {
 
     fn nested(levels: usize, open: &str, close: &str) -> String {
         format!("{}{}", open.repeat(levels), close.repeat(levels))
+    }
+
+    #[test]
+    fn a_member_is_judged_eligible_apart_from_its_siblings() {
+        let raw = br#"{"type":"label","body":{"label":{"a":1},"sig":{},"note":1,"note":2}}"#;
+        assert_eq!(member_eligible(raw, &[]), Some(false));
+        assert_eq!(member_eligible(raw, &["body"]), Some(false));
+        assert_eq!(member_eligible(raw, &["body", "label"]), Some(true));
+        assert_eq!(member_eligible(raw, &["body", "missing"]), None);
+        assert_eq!(member_eligible(raw, &["type", "label"]), None);
+        let inner = br#"{"body":{"label":{"a":1,"a":2}}}"#;
+        assert_eq!(member_eligible(inner, &["body", "label"]), Some(false));
+        assert_eq!(member_eligible(b"{\"a\":1,}", &["a"]), None);
+        let deep = format!("{}1{}", "[".repeat(64), "]".repeat(64));
+        assert_eq!(member_eligible(deep.as_bytes(), &[]), Some(true));
+        let past = format!("{{\"a\":{}1{}}}", "[".repeat(64), "]".repeat(64));
+        assert_eq!(member_eligible(past.as_bytes(), &[]), Some(false));
+        assert_eq!(member_eligible(past.as_bytes(), &["a"]), Some(false));
     }
 
     #[test]
