@@ -69,6 +69,14 @@ impl SealedItems {
         Ok(sealed)
     }
 
+    pub(crate) fn set_resumed(&mut self, resumed: bool) {
+        self.resumed = resumed;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.items.clear();
+    }
+
     pub fn seal(&mut self, item_id: &str, publisher: &str, kind: Kind, height: u64) {
         let sightings = self.items.entry(item_id.to_owned()).or_default();
         let by_publisher = match kind {
@@ -291,7 +299,7 @@ impl WithdrawalReplay {
 }
 
 /// WIST-4 §5.1 checks outside any action's contract.
-pub(crate) fn envelope_fields(envelope: &RegistryUpdateEnvelope) -> Result<(), &'static str> {
+pub fn envelope_fields(envelope: &RegistryUpdateEnvelope) -> Result<(), &'static str> {
     let update = &envelope.update;
     if !release_version(&update.wist_version)
         || update.wist_version.split('.').next() != Some("1")

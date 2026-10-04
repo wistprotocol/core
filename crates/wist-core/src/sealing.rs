@@ -54,6 +54,14 @@ impl Parameters {
         Ok(parameters)
     }
 
+    pub fn from_schedule(schedule: &crate::parameters::Schedule, at_s: i64) -> Result<Self, Error> {
+        Self::new(crate::parameters::PARAMS.iter().filter_map(|spec| {
+            schedule
+                .value_at(spec.name, at_s)
+                .map(|value| (spec.name, value))
+        }))
+    }
+
     pub fn get(&self, name: &str) -> i64 {
         self.values[name]
     }
@@ -507,6 +515,15 @@ pub struct Replay {
     sealed_labels: BTreeSet<String>,
     resumed_labels: BTreeMap<String, String>,
     resumed: bool,
+    walked: Walked,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Walked {
+    #[default]
+    Unstated,
+    FromFirstEpoch,
+    Above(u64),
 }
 
 struct Leaf {
@@ -553,6 +570,18 @@ fn carried_label_id(entry: &Value, leaf: &Leaf) -> Option<String> {
         return None;
     }
     label::label_id(entry["body"].get("label")?).ok()
+}
+
+/// WIST-3 §3.2: the Label IDs an Epoch's `label` Entries carry, valid or ignored.
+pub fn carried_label_ids(
+    entries: &[Value],
+    stored: &[(usize, &[u8])],
+) -> Result<Vec<String>, Error> {
+    Ok(entries
+        .iter()
+        .zip(&leaves(entries, stored)?)
+        .filter_map(|(entry, leaf)| carried_label_id(entry, leaf))
+        .collect())
 }
 
 struct Context<'a> {
@@ -655,6 +684,7 @@ impl Replay {
             sealed_labels: resumed_labels.keys().cloned().collect(),
             resumed_labels,
             resumed: true,
+            walked: Walked::Unstated,
         })
     }
 
@@ -733,18 +763,53 @@ impl Replay {
         self.withdrawals.accept_update(update_id, height)
     }
 
-    fn label_lookup(&self, label_id: &str) -> LabelLookup {
+    pub fn hold_sealed_label(&mut self, label_id: &str, subject: Option<&str>) {
+        if let Some(subject) = subject {
+            self.resumed_labels
+                .insert(label_id.to_owned(), subject.to_owned());
+        }
+        self.sealed_labels.insert(label_id.to_owned());
+    }
+
+    pub fn hold_sealed_item(&mut self, item_id: &str, publisher: &str, kind: Kind, height: u64) {
+        self.sealed.seal(item_id, publisher, kind, height);
+    }
+
+    /// WIST-3 §7: the holder has handed this Replay every Label ID and Item sealed above `floor`,
+    /// or, with `None`, every one the Log has sealed; WIST-4 §5.1: the Item sightings are then the
+    /// holder's alone, none derived from the state tuples.
+    pub fn hold_walk_floor(&mut self, floor: Option<u64>) {
+        self.walked = match floor {
+            None => Walked::FromFirstEpoch,
+            Some(floor) => Walked::Above(floor),
+        };
+        self.sealed.clear();
+        self.sealed.set_resumed(floor.is_some());
+    }
+
+    fn label_lookup(&self, label_id: &str, stated_height: Option<u64>) -> LabelLookup {
         if let Some(sealed) = self.labels.get(label_id) {
             return LabelLookup::Known {
                 subject: sealed.label.subject.clone(),
             };
         }
-        match self.resumed_labels.get(label_id) {
-            Some(subject) => LabelLookup::Known {
+        if let Some(subject) = self.resumed_labels.get(label_id) {
+            return LabelLookup::Known {
                 subject: subject.clone(),
-            },
-            None if self.resumed => LabelLookup::Unverifiable,
-            None => LabelLookup::Absent,
+            };
+        }
+        if self.sealed_labels.contains(label_id) {
+            return LabelLookup::Absent;
+        }
+        let below_walk = match self.walked {
+            Walked::Unstated => self.resumed,
+            Walked::FromFirstEpoch => false,
+            Walked::Above(floor) => stated_height.is_some_and(|height| height <= floor),
+        };
+        if below_walk {
+            LabelLookup::Unverifiable
+        } else {
+            LabelLookup::Absent
         }
     }
 
@@ -948,7 +1013,9 @@ impl Replay {
                         &entry["body"],
                         &judging,
                         |domain| context.in_force(domain),
-                        |label_id| self.label_lookup(label_id),
+                        |label_id| {
+                            self.label_lookup(label_id, entry["body"]["dispute"]["height"].as_u64())
+                        },
                     )
                 } else {
                     Err(Rejection::Fields)
@@ -1546,17 +1613,203 @@ mod tests {
         })];
         let resumed = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations, &tuples).unwrap();
         assert_eq!(
-            resumed.label_lookup(&id),
+            resumed.label_lookup(&id, None),
             LabelLookup::Known {
                 subject: "https://example.com/a".into()
             }
         );
         assert!(resumed.sealed_labels.contains(&id));
         assert_eq!(
-            resumed.label_lookup("sha256:other"),
+            resumed.label_lookup("sha256:other", None),
             LabelLookup::Unverifiable
         );
-        assert_eq!(Replay::new().label_lookup(&id), LabelLookup::Absent);
+        assert_eq!(Replay::new().label_lookup(&id, None), LabelLookup::Absent);
+    }
+
+    #[test]
+    fn a_held_label_is_known_to_disputes_and_cannot_be_sealed_again() {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(3, "root", None);
+        let label = serde_json::json!({"label": {"labeler": "a.example"}, "sig": {}});
+        let id = label::label_id(&label["label"]).unwrap();
+        let mut replay = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations, &[]).unwrap();
+        assert_eq!(replay.label_lookup(&id, None), LabelLookup::Unverifiable);
+        replay.hold_sealed_label(&id, Some("https://example.com/a"));
+        assert_eq!(
+            replay.label_lookup(&id, None),
+            LabelLookup::Known {
+                subject: "https://example.com/a".into()
+            }
+        );
+        assert_eq!(replay.labels().count(), 0);
+        let entries = [serde_json::json!({"type": "label", "body": label})];
+        let outcome = replay
+            .epoch(&empty_epoch(4, "2026-10-01T01:00:00Z", &entries))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Rejected {
+                codes: vec![EPOCH_REJECTED.to_owned()]
+            }
+        );
+    }
+
+    fn resumed_at(height: u64) -> Replay {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(height, "root", None);
+        Replay::resumed(height, "2026-10-01T00:00:00Z", declarations, &[]).unwrap()
+    }
+
+    #[test]
+    fn a_replay_walked_from_the_first_epoch_reads_unknown_labels_and_items_as_absent() {
+        let mut replay = resumed_at(8);
+        let unknown = format!("sha256:{}", "d".repeat(64));
+        assert_eq!(
+            replay
+                .sealed_items()
+                .meets_contract(&unknown, "example.com", 8),
+            None
+        );
+        replay.hold_walk_floor(None);
+        for stated in [None, Some(0), Some(8), Some(9)] {
+            assert_eq!(replay.label_lookup(&unknown, stated), LabelLookup::Absent);
+        }
+        assert_eq!(
+            replay
+                .sealed_items()
+                .meets_contract(&unknown, "example.com", 8),
+            Some(false)
+        );
+        replay.hold_sealed_item(&unknown, "example.com", Kind::Page, 3);
+        assert_eq!(
+            replay
+                .sealed_items()
+                .meets_contract(&unknown, "example.com", 8),
+            Some(true)
+        );
+    }
+
+    fn resumed_with_withdrawal_of(item_id: &str, publisher: &str, height: u64) -> Replay {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(height, "root", None);
+        let tuples = [StateEntry::Withdrawal(crate::objects::WithdrawalEntry {
+            item_id: item_id.to_owned(),
+            publisher: publisher.to_owned(),
+            sealing_height: height,
+        })];
+        Replay::resumed(height, "2026-10-01T00:00:00Z", declarations, &tuples).unwrap()
+    }
+
+    #[test]
+    fn a_walk_floor_leaves_the_replay_only_the_sightings_its_holder_hands_it() {
+        let item = format!("sha256:{}", "e".repeat(64));
+        let key = crate::crypto::SigningKey::from_seed(&[7u8; 32]);
+        let update = serde_json::json!({
+            "wist_version": "1.0.0",
+            "action": "payload_withdrawal",
+            "subject": "q.example",
+            "effective_at": "2026-10-01T00:00:00Z",
+            "details": {"delta_id": item, "legal_basis": "court order", "jurisdiction": "EU"},
+        });
+        let act = crate::envelope::sign_envelope(&update, "update", "log1", &key).unwrap();
+        let log_key = |_: &str| Some(key.public());
+        let judge = |replay: &Replay| {
+            crate::withdrawal::WithdrawalReplay::new().apply(
+                9,
+                &act,
+                log_key,
+                replay.sealed_items(),
+            )
+        };
+        let seeded = resumed_with_withdrawal_of(&item, "p.example", 8);
+        assert_eq!(
+            judge(&seeded),
+            crate::withdrawal::Disposition::Rejected("WIST4-E04")
+        );
+        let mut held = resumed_with_withdrawal_of(&item, "p.example", 8);
+        held.hold_walk_floor(Some(8));
+        assert!(matches!(
+            judge(&held),
+            crate::withdrawal::Disposition::Accepted { .. }
+        ));
+        held.hold_sealed_item(&item, "p.example", Kind::Page, 8);
+        assert_eq!(
+            judge(&held),
+            crate::withdrawal::Disposition::Rejected("WIST4-E04")
+        );
+    }
+
+    #[test]
+    fn a_walk_floor_leaves_unverifiable_only_a_label_stated_at_or_below_it() {
+        let mut replay = resumed_at(8);
+        replay.hold_walk_floor(Some(5));
+        let unknown = format!("sha256:{}", "d".repeat(64));
+        assert_eq!(
+            replay.label_lookup(&unknown, Some(4)),
+            LabelLookup::Unverifiable
+        );
+        assert_eq!(
+            replay.label_lookup(&unknown, Some(5)),
+            LabelLookup::Unverifiable
+        );
+        assert_eq!(replay.label_lookup(&unknown, Some(6)), LabelLookup::Absent);
+        assert_eq!(replay.label_lookup(&unknown, None), LabelLookup::Absent);
+        assert_eq!(
+            replay
+                .sealed_items()
+                .meets_contract(&unknown, "example.com", 8),
+            None
+        );
+    }
+
+    #[test]
+    fn an_ignored_label_held_without_a_subject_is_absent_and_cannot_be_sealed_again() {
+        let mut replay = resumed_at(3);
+        let label = serde_json::json!({"label": {"labeler": "a.example"}, "sig": {}});
+        let id = label::label_id(&label["label"]).unwrap();
+        replay.hold_sealed_label(&id, None);
+        assert_eq!(replay.label_lookup(&id, Some(1)), LabelLookup::Absent);
+        let entries = [serde_json::json!({"type": "label", "body": label})];
+        assert_eq!(carried_label_ids(&entries, &[]).unwrap(), [id]);
+        let outcome = replay
+            .epoch(&empty_epoch(4, "2026-10-01T01:00:00Z", &entries))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Rejected {
+                codes: vec![EPOCH_REJECTED.to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn parameters_from_a_schedule_read_each_value_in_force_at_the_instant() {
+        let first = log_seconds("2026-10-01T00:00:00Z").unwrap();
+        let mut schedule = crate::parameters::Schedule::new(first);
+        assert_eq!(
+            Parameters::from_schedule(&schedule, first).unwrap(),
+            Parameters::suite()
+        );
+        let amendment = |parameter: &str, value, effective_at_s| crate::parameters::Amendment {
+            parameter: parameter.into(),
+            value,
+            epoch_number: 1,
+            entry_index: 0,
+            sealed_at_s: first,
+            effective_at_s,
+        };
+        schedule.adopt(amendment("catalog_refresh_seconds", 3600, first + 100));
+        let before = Parameters::from_schedule(&schedule, first + 99).unwrap();
+        assert_eq!(before.get("catalog_refresh_seconds"), 604_800);
+        let at = Parameters::from_schedule(&schedule, first + 100).unwrap();
+        assert_eq!(at.get("catalog_refresh_seconds"), 3600);
+        assert_eq!(
+            at.get("url_cap_bytes"),
+            Parameters::suite().get("url_cap_bytes")
+        );
+        schedule.adopt(amendment("catalog_refresh_seconds", 0, first + 200));
+        assert!(Parameters::from_schedule(&schedule, first + 200).is_err());
+        assert!(Parameters::from_schedule(&schedule, first + 199).is_ok());
     }
 
     #[test]
