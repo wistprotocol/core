@@ -1,7 +1,10 @@
 //! WIST-4 §3.1: Registrable Domains under the Public Suffix List snapshot in force.
 use crate::crypto::{hex_encode, PublicKey};
 use crate::error::Error;
-use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope, SuffixListEntry};
+use crate::objects::{
+    RegistryAction, RegistryDetails, RegistryUpdateEnvelope, StateEntry, SuffixListEntry,
+};
+use crate::registry_updates::AcceptedUpdates;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -146,6 +149,10 @@ pub enum Disposition {
         in_force_height: u64,
         changed: bool,
     },
+    Repeated {
+        identifier: String,
+        accepted_height: u64,
+    },
     Rejected(&'static str),
     NotSuffixList,
 }
@@ -153,6 +160,7 @@ pub enum Disposition {
 #[derive(Debug, Clone, Default)]
 pub struct SuffixListReplay {
     accepted: Vec<(u64, String)>,
+    updates: AcceptedUpdates,
 }
 
 impl SuffixListReplay {
@@ -163,6 +171,25 @@ impl SuffixListReplay {
     /// WIST-3 §7 `suffix_list` tuple.
     pub fn adopt(&mut self, identifier: &str, height: u64) {
         self.accepted.push((height, identifier.to_string()));
+    }
+
+    /// WIST-4 §5.1: the `registry_update` tuples hold the IDs accepted up to the Snapshot.
+    pub fn from_state(entries: &[StateEntry]) -> Result<Self, Error> {
+        let mut replay = Self::new();
+        for entry in entries {
+            if let StateEntry::SuffixList(entry) = entry {
+                if !replay.accepted.is_empty() {
+                    return Err(Error::Snapshot("two suffix_list tuples".into()));
+                }
+                replay.adopt(&entry.identifier, entry.sealing_height);
+            }
+        }
+        replay.updates = AcceptedUpdates::from_state(entries)?;
+        Ok(replay)
+    }
+
+    pub fn accepted_updates(&self) -> &AcceptedUpdates {
+        &self.updates
     }
 
     pub fn apply(
@@ -189,6 +216,15 @@ impl SuffixListReplay {
             Ok(RegistryDetails::SuffixListUpdate(details)) => details,
             _ => return Disposition::Rejected("WIST4-E04"),
         };
+        let Ok(update_id) = crate::registry_updates::update_id(doc) else {
+            return Disposition::Rejected("WIST1-E05");
+        };
+        if let Some(accepted_height) = self.updates.accepted_height(&update_id) {
+            return Disposition::Repeated {
+                identifier: details.sha256,
+                accepted_height,
+            };
+        }
         let Some(key) = log_key(&envelope.sig.key_id) else {
             return Disposition::Rejected("WIST4-E11");
         };
@@ -203,6 +239,7 @@ impl SuffixListReplay {
             }
             HeldFile::Bytes(_) => {}
         }
+        self.updates.accept(&update_id, height);
         if let Some((current, in_force_height)) = self.in_force_after(height) {
             if current == details.sha256 {
                 return Disposition::Accepted {
@@ -338,6 +375,138 @@ mod tests {
         assert_eq!(replay.in_force_at_epoch(3), Some(("sha256:a", 0)));
         assert_eq!(replay.in_force_at_epoch(4), Some(("sha256:b", 3)));
         assert_eq!(replay.entry_at(3).unwrap().sealing_height, 3);
+    }
+
+    fn log_key() -> crate::crypto::SigningKey {
+        crate::crypto::SigningKey::from_seed(&[7; 32])
+    }
+
+    fn snapshot(octets: &str) -> String {
+        identifier(octets.as_bytes())
+    }
+
+    fn pin(octets: &str) -> Value {
+        let update = serde_json::json!({
+            "wist_version": "1.0.0",
+            "action": "suffix_list_update",
+            "subject": snapshot(octets),
+            "effective_at": "2026-08-05T12:00:00Z",
+            "details": {"sha256": snapshot(octets), "bytes": octets.len()}
+        });
+        crate::envelope::sign_envelope(&update, "update", "log", &log_key()).unwrap()
+    }
+
+    fn unverified(mut act: Value) -> Value {
+        act["sig"]["value"] =
+            serde_json::json!(crate::crypto::SigningKey::from_seed(&[8; 32]).sign(b"other"));
+        act
+    }
+
+    fn apply(replay: &mut SuffixListReplay, height: u64, act: &Value) -> Disposition {
+        let key = log_key().public();
+        replay.apply(
+            height,
+            act,
+            |key_id| (key_id == "log").then(|| key.clone()),
+            |id| {
+                ["com\n", "org\n"]
+                    .into_iter()
+                    .find(|octets| snapshot(octets) == id)
+                    .map_or(HeldFile::Absent, |octets| {
+                        HeldFile::Bytes(octets.len() as u64)
+                    })
+            },
+        )
+    }
+
+    #[test]
+    fn an_act_sealed_again_after_another_snapshot_applies_nothing() {
+        let mut replay = SuffixListReplay::new();
+        assert!(matches!(
+            apply(&mut replay, 0, &pin("com\n")),
+            Disposition::Accepted { changed: true, .. }
+        ));
+        assert!(matches!(
+            apply(&mut replay, 1, &pin("org\n")),
+            Disposition::Accepted { changed: true, .. }
+        ));
+        assert_eq!(
+            apply(&mut replay, 2, &pin("com\n")),
+            Disposition::Repeated {
+                identifier: snapshot("com\n"),
+                accepted_height: 0,
+            }
+        );
+        assert_eq!(
+            replay.in_force_after(2),
+            Some((snapshot("org\n").as_str(), 1))
+        );
+        assert_eq!(replay.accepted_updates().entries().len(), 2);
+    }
+
+    #[test]
+    fn an_act_sealed_again_in_its_own_epoch_is_idempotent() {
+        let mut replay = SuffixListReplay::new();
+        apply(&mut replay, 4, &pin("com\n"));
+        assert_eq!(
+            apply(&mut replay, 4, &pin("com\n")),
+            Disposition::Repeated {
+                identifier: snapshot("com\n"),
+                accepted_height: 4,
+            }
+        );
+        assert_eq!(replay.accepted().len(), 1);
+    }
+
+    #[test]
+    fn an_act_sealed_again_rejects_nothing_whatever_its_signature() {
+        let mut replay = SuffixListReplay::new();
+        apply(&mut replay, 0, &pin("com\n"));
+        assert_eq!(
+            apply(&mut replay, 3, &unverified(pin("com\n"))),
+            Disposition::Repeated {
+                identifier: snapshot("com\n"),
+                accepted_height: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn an_act_sealed_again_that_fails_field_validation_keeps_its_diagnostic() {
+        let mut replay = SuffixListReplay::new();
+        apply(&mut replay, 0, &pin("com\n"));
+        let mut malformed = pin("com\n");
+        malformed["sig"]["alg"] = serde_json::json!("Ed448");
+        assert_eq!(
+            apply(&mut replay, 1, &malformed),
+            Disposition::Rejected("WIST4-E11")
+        );
+    }
+
+    #[test]
+    fn a_replay_resumed_from_registry_update_tuples_reads_a_sealing_again_as_repeated() {
+        let tuples = [
+            StateEntry::SuffixList(SuffixListEntry {
+                identifier: snapshot("org\n"),
+                sealing_height: 1,
+            }),
+            StateEntry::RegistryUpdate(crate::objects::RegistryUpdateEntry {
+                update_id: crate::registry_updates::update_id(&pin("com\n")).unwrap(),
+                sealing_height: 0,
+            }),
+        ];
+        let mut replay = SuffixListReplay::from_state(&tuples).unwrap();
+        assert_eq!(
+            apply(&mut replay, 5, &pin("com\n")),
+            Disposition::Repeated {
+                identifier: snapshot("com\n"),
+                accepted_height: 0,
+            }
+        );
+        assert_eq!(
+            replay.in_force_after(5),
+            Some((snapshot("org\n").as_str(), 1))
+        );
     }
 
     #[test]

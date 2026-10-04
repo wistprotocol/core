@@ -1628,6 +1628,11 @@ fn wist4_registrable_domain_vectors() {
                 assert_eq!(Some(code), case["code"].as_str(), "{label}");
                 codes.insert(code);
             }
+            Disposition::Repeated { .. } => {
+                assert!(case["code"].is_null(), "{label}");
+                let update_id = wist_core::registry_updates::update_id(&doc).unwrap();
+                assert!(!accepted.accept(&update_id, height), "{label}");
+            }
             Disposition::NotSuffixList => panic!("{label}: not a suffix_list_update"),
         }
         assert_eq!(
