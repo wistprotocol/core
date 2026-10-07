@@ -1,18 +1,21 @@
 # wist-core
 
-The signed Delta format targets [WIST specification revision `0127b0f2e5420e167a15d3f7afae6ed81030e158`](https://github.com/wistprotocol/spec/tree/0127b0f2e5420e167a15d3f7afae6ed81030e158). Object version `1.0.0` alone does not identify a compatible draft.
+The publication format — Declarations, Collections, Catalogs, Items and Payloads — targets [WIST specification revision `f4acfefbe7d3cdb8e82ed34053377159d8782890`](https://github.com/wistprotocol/spec/tree/f4acfefbe7d3cdb8e82ed34053377159d8782890). Object version `1.0.0` alone does not identify a compatible draft.
 
-Delta Envelopes require a canonical `publisher` inside the signed and hashed object. The typed object and `delta::publisher` reject missing or noncanonical identities without rewriting signed bytes. Signature/key-history and `(publisher, url)` chain validation remain caller obligations.
+Items require a canonical `publisher` inside the hashed object. `item::check_form` rejects a missing or noncanonical one as `WIST1-E14` without rewriting the Item, and `item::judge` rejects one that differs from its Catalog's `publisher` as `WIST2-E03`.
 
-Rust implementation of the WIST Protocol's primitives: JCS canonicalization,
-Ed25519 envelopes, delta identity, Key Set resolution, chain tips, the
-Logbook's RFC 6962 Merkle tree with its Inclusion and Consistency Proofs,
-C2SP Checkpoints with their Witness Cosignatures, the tiles and entry
-bundles the tree is served as, Epoch verification against a Checkpoint,
-snapshot digests and state tuples, WIST-2 link/text extraction, the WIST-1
-§5.2 Declaration and recovery-window replay, and the WIST-4 Parameter
-Registry with its schedule replay. The [specification](../spec/README.md)
-defines conformance; `crates/wist-core/tests/conformance.rs` exercises its
+Rust implementation of the WIST Protocol's primitives: JCS
+canonicalization, Ed25519 envelopes, Item and Catalog identity,
+Collections with their Scopes and keys, Catalog tree files with their
+Inclusion Proofs, change lists, the replay of sealed Catalogs, Items and
+withdrawals, Key Set resolution, the Logbook's RFC 6962 Merkle tree with
+its Inclusion and Consistency Proofs, C2SP Checkpoints with their
+Witness Cosignatures, the tiles and entry bundles the tree is served as,
+Epoch verification against a Checkpoint, snapshot digests and state
+tuples, WIST-2 link/text extraction, the WIST-1 §5.2 Declaration and
+recovery-window replay, and the WIST-4 Parameter Registry with its
+schedule replay. The [specification](../spec/README.md) defines
+conformance; `crates/wist-core/tests/conformance.rs` exercises its
 vectors.
 
 ## Build & test
@@ -107,7 +110,7 @@ a verified Checkpoint's root; and the `TILE_MAX_BYTES`,
 reading at, equality permitted.
 
 `epoch::verify_epoch` checks an Epoch's Entries against Checkpoint N: the
-five Entry types, the canonical order, each Entry's JCS within 65 535
+six Entry types, the canonical order, each Entry's JCS within 65 535
 octets, the Epoch's entry-bundle octets against the cap in force, and that
 the leaf hashes occupy `[size(N-1), size(N))` in the tree whose root the
 Checkpoint states, recomputed from the prefix already verified.
@@ -125,14 +128,14 @@ Checkpoint contradicts is the divergence `WIST3-E02`.
 ## Registry Updates
 
 `objects::RegistryUpdate` carries the five WIST-4 §3 governance acts.
-`typed_details` parses `details` under the act's §5.1 contract and checks
-the `subject` shape, key fields, parameter identifier and bounds, and the
-withdrawal's Delta ID and Canonical Host, and the suffix-list snapshot's
-identifier and byte count; a violation is WIST4-E04.
+`typed_details` parses `details` under the act's §5.1 contract and
+checks the `subject` shape, key fields, parameter identifier and bounds,
+and the withdrawal's Item ID and Canonical Host, and the suffix-list
+snapshot's identifier and byte count; a violation is WIST4-E04.
 `aggregator_keys::authenticate` verifies one act's Envelope against an
 explicit key set, naming its signer by `sig.key_id`; a failure is
-WIST4-E11. The grace period and the Delta a withdrawal names remain
-caller checks.
+WIST4-E11. The grace period remains a caller check;
+`withdrawal::WithdrawalReplay` judges the Item a withdrawal names.
 
 ## The Aggregator key registry
 
@@ -140,13 +143,13 @@ caller checks.
 shared by every party that verifies a Checkpoint or a governance act. It
 holds every key the Log ever admitted — `key_id`, public key,
 `added_height` and `removed_height` — built by `from_genesis` from the
-Anchor's genesis key at height 0 or by `from_entries` from the WIST-3 §7
-`aggregator_key` tuples, retired keys included, which `entries` writes
-back. `valid_at` returns the keys a Checkpoint at a height may be signed
-under: admitted at or below it and retired above it, removal being
-permanent and the genesis key removable like any other;
-`public_key_at` resolves one `key_id` at a height for the other acts of
-that Epoch.
+Anchor's genesis key at height 0 or by `from_state_tuples` from a
+Snapshot's WIST-3 §7 `aggregator_key` tuples, retired keys included,
+authenticated from the Anchor, which `entries` writes back. `valid_at`
+returns the keys a Checkpoint at a height may be signed under: admitted
+at or below it and retired above it, removal being permanent and the
+genesis key removable like any other; `public_key_at` resolves one
+`key_id` at a height for the other acts of that Epoch.
 
 `apply_epoch` replays an Epoch's `aggregator_key_add` and
 `aggregator_key_remove` acts in canonical Entry order and returns one
@@ -167,38 +170,41 @@ own height.
 ## Withdrawal replay
 
 `withdrawal::WithdrawalReplay::apply` replays one `payload_withdrawal`
-act at a height under WIST-4 §5.1: raw JSON eligibility (WIST1-E05),
-the field partition between WIST4-E11 and WIST4-E04, authentication
-under the Log key the caller resolves for `sig.key_id` at that Epoch,
-and the sealed-Delta contract the caller answers with `SealedDelta`
-(`Known` with the signed publisher and height, `Absent`, or
-`Unverifiable` for a Delta below what the party holds, which is read as
-consistent). The earliest accepted withdrawal's height is kept for a
-repeated act, `entries` yields the WIST-3 §7 withdrawal tuples and
-`adopt` seeds the replay from tuples or a store. The conformance test
-consumes `vectors/wist4/withdrawal.json`.
+act at a height under WIST-4 §5.1: raw JSON eligibility (WIST1-E05), the
+field partition between WIST4-E11 and WIST4-E04, authentication under
+the Log key the caller resolves for `sig.key_id` at that Epoch, and the
+sealed-Item contract against the `SealedItems` the caller holds: the act
+names a `page` Item sealed at or below its height under its `subject`,
+and any other Item is WIST4-E04 except one that nothing a resumed holder
+(`SealedItems::resumed` or `from_state`) holds shows. An act sealed
+again under an accepted Registry Update ID is `Repeated` and changes
+nothing. The earliest accepted withdrawal's height is kept for an Item
+withdrawn again, `entries` yields the WIST-3 §7 withdrawal tuples and
+`adopt` and `from_state` seed the replay from tuples or a store. The
+conformance test consumes `vectors/wist4/withdrawal.json`.
 
 ## Labels, disputes and definitions
 
 `label::validate_label` checks one Label Envelope under the Labeler's
 Declaration and the `url_cap_bytes` in force: fields, version, the
-subject's normalization and cap, the WIST-4 §6 name form with the
-`wist` terms, `expires_at` after `asserted_at`, `delta` only with a URL
-subject, self-labeling against the declared scope, and the signature
-under the named signing entry valid at `asserted_at`; the rejection
-carries its `WIST2-E06`, `WIST1-E02` or `WIST1-E01` code.
+subject's normalization and cap, the WIST-4 §6 name form with the `wist`
+terms, `expires_at` after `asserted_at`, `delta` only with a URL subject
+and as an Item ID, self-labeling against the declared scope, and the
+signature under the named signing entry valid at `asserted_at`; the
+rejection carries its `WIST2-E06`, `WIST1-E02` or `WIST1-E01` code.
 `validate_dispute` adds the sealed-Label and subject-authority checks
 and `validate_definition` the description and treatment. `label_id`,
 `dispute_id` and `definition_path` derive identifiers; `current_label`
 and `current_dispute` pick the current object of a triple or pair by
-`asserted_at` and Log order; `label_tuple` and `dispute_tuple` yield
-the WIST-3 §7 tuples, none for a retracted or expired Label;
-`binding_applies` reads a Label's `delta` against a record's anchor;
-`labeler_rows` computes `tier1/labelers.parquet`; `counted_at` and
-`labeler_active` are WIST-4 §6's recommended default profile. The
-conformance tests consume `vectors/wist2/labels.json`,
-`disputes.json`, `label-definitions.json` and
-`vectors/wist3/label-tables.json`.
+`asserted_at` and Log order; `label_tuple` and `dispute_tuple` yield the
+WIST-3 §7 tuples, none for a retracted or expired Label;
+`binding_applies` reads a Label's `delta` against a record's Item ID and
+`materialized_binding_applies` against the Item of the record
+materialization prefers; `labeler_rows` computes
+`tier1/labelers.parquet`; `counted_at` and `labeler_active` are WIST-4
+§6's recommended default profile. The conformance tests consume
+`vectors/wist2/labels.json`, `disputes.json`, `label-definitions.json`
+and `vectors/wist3/label-tables.json`.
 
 ## Suffix lists and the Registrable Domain
 
@@ -213,11 +219,11 @@ named file's octet count the caller answers with; an accepted act is in
 force from the Epoch after its sealing Epoch, a repeated pin of the
 snapshot in force changes nothing, and `entry_at` yields the WIST-3 §7
 `suffix_list` tuple. `check_epoch_capacity` counts an Epoch's
-`publisher_delta`, `label` and `dispute` Entries per Registrable Domain
-against `domain_epoch_entries_max` and its `label` and `dispute` Entries
-against `labeler_epoch_entries_max` (WIST-3 §3.2). The conformance test
-consumes `vectors/wist4/registrable-domain.json`, the Public Suffix List
-project's own cases included.
+`publisher_catalog`, `publisher_item`, `label` and `dispute` Entries per
+Registrable Domain against `domain_epoch_entries_max` and its `label`
+and `dispute` Entries against `labeler_epoch_entries_max` (WIST-3 §3.2).
+The conformance test consumes `vectors/wist4/registrable-domain.json`,
+the Public Suffix List project's own cases included.
 
 ## Parameter validation
 
@@ -249,27 +255,7 @@ After all candidates, callers reject an Epoch whose running size maximum
 exceeds the minimum. The maximum bounds decompression from a verified
 prefix; it does not authorize an Epoch before an increase takes effect.
 
-## Recovery settlement
-
-`recovery::settle` consumes accepted Declarations in application order.
-Each `WindowDeclaration.label` is its inner-object hash, `predecessor` is its
-named predecessor hash, and `signer` is the authenticated public key, not its
-identifier. Callers establish sequence, predecessor eligibility, signatures,
-recovery-key protection and window ownership before constructing these inputs.
-The helper follows only replacements naming the current recovery-chain head
-and signed by a public key in that head's signing or recovery set.
-
-Queue admission and settlement receive a verification callback over the full
-signed Delta Envelope and complete `PublisherKey` entries. The callback must
-check the named binding, canonical signature and parsed `observed_at` against
-`valid_from`; key-identifier membership alone is insufficient. Admission tries
-the frozen pre-recovery and opening sets independently. Settlement returns
-signature-eligible survivors in acceptance order and rejected queued copies;
-it establishes no Payload availability, quota eligibility or Epoch inclusion.
-A rejected Delta ID is not permanently barred. History restoration, due-process
-admission and durable queue/status effects remain service responsibilities.
-The settlement conformance fixtures restrict timestamp comparisons to
-whole-second literal-Z values; their callback is not a general RFC 3339 parser.
+## Declaration replay
 
 `declarations::Declarations` replays Declarations Epoch by Epoch, each
 Epoch named by its number and the root hash its Checkpoint states: the
