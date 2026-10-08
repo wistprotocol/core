@@ -247,10 +247,10 @@ fn verify_with(doc: &Value, key: &PublisherKey) -> bool {
 pub fn evaluate_initial(doc: &Value, limits: &Limits) -> Result<Publisher, Rejection> {
     let envelope = validate_fields(doc, Some(limits))?;
     let publisher = envelope.publisher;
-    if publisher.seq != 0 || publisher.prev_declaration.is_some() {
+    if (publisher.seq == 0) != publisher.prev_declaration.is_none() {
         return Err((
             "WIST1-E08",
-            "first Declaration must start at seq 0 without a predecessor".into(),
+            "prev_declaration must be present exactly when seq exceeds 0".into(),
         ));
     }
     resolve_signer(doc, &publisher, None)?;
@@ -477,6 +477,45 @@ mod tests {
             })
         };
         result.unwrap_or_else(|(code, _)| code).to_string()
+    }
+
+    fn signed_declaration(seq: u64, prev_declaration: Option<&str>) -> Value {
+        let sk = crate::crypto::SigningKey::from_seed(&[1; 32]);
+        let key = PublisherKey::new(&sk.public().to_b64u(), 1_786_233_600, None);
+        let mut publisher = serde_json::json!({
+            "wist_version": "1.0.0", "domain": "example.com", "seq": seq, "keys": [key],
+        });
+        if let Some(prev) = prev_declaration {
+            publisher["prev_declaration"] = prev.into();
+        }
+        crate::envelope::sign_envelope(&publisher, "publisher", &key.kid, &sk).unwrap()
+    }
+
+    #[test]
+    fn an_initial_declaration_is_accepted_at_any_seq_that_names_a_predecessor() {
+        let prev = format!("sha256:{}", "ab".repeat(32));
+        for seq in [1, 2, 9_007_199_254_740_991] {
+            let doc = signed_declaration(seq, Some(&prev));
+            assert_eq!(evaluate_initial(&doc, &Limits::suite()).unwrap().seq, seq);
+        }
+        let doc = signed_declaration(0, None);
+        assert_eq!(evaluate_initial(&doc, &Limits::suite()).unwrap().seq, 0);
+    }
+
+    #[test]
+    fn an_initial_declaration_whose_prev_declaration_presence_disagrees_with_its_seq_is_wist1_e08()
+    {
+        let prev = format!("sha256:{}", "ab".repeat(32));
+        for doc in [
+            signed_declaration(1, None),
+            signed_declaration(2, None),
+            signed_declaration(0, Some(&prev)),
+        ] {
+            assert_eq!(
+                evaluate_initial(&doc, &Limits::suite()).unwrap_err().0,
+                "WIST1-E08"
+            );
+        }
     }
 
     #[test]

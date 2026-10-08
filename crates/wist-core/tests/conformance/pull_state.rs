@@ -352,10 +352,6 @@ fn state_pull_cases_replay_through_the_pull_projection() {
         let name = case["name"].as_str().unwrap();
         let expected = &case["expected"];
         let fetched_label = &case["pull"]["fetched"];
-        if fetched_label.is_null() {
-            assert_eq!(expected["acceptance"], "not_fetched", "{name}");
-            continue;
-        }
         let envelopes = &case["declarations"];
         let labels = Labels::of(envelopes);
         let history = &case["history_parameters"];
@@ -407,6 +403,20 @@ fn state_pull_cases_replay_through_the_pull_projection() {
             }
         }
         let view = project(&admitted, &unbounded()).unwrap();
+        let first_contact = !view.domains().contains_key(DOMAIN);
+        let stopped = if first_contact {
+            "WIST2-E04"
+        } else {
+            "WIST2-E01"
+        };
+        if fetched_label.is_null() {
+            assert_eq!(expected["acceptance"], "not_fetched", "{name}");
+            assert_eq!(expected["proceeds"], false, "{name}");
+            assert_eq!(expected["disposition"], stopped, "{name}");
+            assert_eq!(expected["noise"], first_contact, "{name}");
+            replayed += 1;
+            continue;
+        }
         let fetched = &envelopes[fetched_label.as_str().unwrap()];
         let fetched_hash = hash(fetched);
         let outcome = match view.domains().get(DOMAIN).map(heads) {
@@ -440,10 +450,14 @@ fn state_pull_cases_replay_through_the_pull_projection() {
                 let (sources, collections) = pulled_sources(&labels, &domain);
                 assert_eq!(expected["sources"], json!(sources), "{name}");
                 assert_eq!(expected["collections_pulled"], json!(collections), "{name}");
+                assert_eq!(expected["disposition"], Value::Null, "{name}");
+                assert_eq!(expected["noise"], false, "{name}");
             }
             Err(code) => {
                 assert_eq!(expected["acceptance"], code, "{name}");
                 assert_eq!(expected["proceeds"], false, "{name}");
+                assert_eq!(expected["disposition"], stopped, "{name}");
+                assert_eq!(expected["noise"], first_contact, "{name}");
             }
         }
         replayed += 1;
