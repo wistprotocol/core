@@ -1668,6 +1668,7 @@ mod tests {
             name: "wist:spam".into(),
             value: None,
             asserted_at: "2026-10-01T00:00:00Z".into(),
+            retracted: false,
             expires_at: None,
             delta: None,
             label_id: id.clone(),

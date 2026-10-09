@@ -1865,11 +1865,8 @@ fn wist2_label_vectors() {
         feed["feed"]["deltas"],
         serde_json::json!([label::label_id(&example["label"]).unwrap()])
     );
-    let mut dropped = 0;
-    for case in vector["current_cases"].as_array().unwrap() {
-        let name = case["name"].as_str().unwrap();
-        let sealed: Vec<SealedLabel> = case["sealed"]
-            .as_array()
+    let sealed_labels = |list: &serde_json::Value| -> Vec<SealedLabel> {
+        list.as_array()
             .unwrap()
             .iter()
             .map(|s| SealedLabel {
@@ -1878,19 +1875,78 @@ fn wist2_label_vectors() {
                 height: s["height"].as_u64().unwrap(),
                 entry_index: s["entry_index"].as_u64().unwrap(),
             })
-            .collect();
+            .collect()
+    };
+    let (mut retracted, mut expired) = (false, false);
+    for case in vector["current_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let sealed = sealed_labels(&case["sealed"]);
         let current = label::current_label(&sealed).unwrap();
         assert_eq!(current.label_id, case["current"], "{name}");
-        let tuple = label::label_tuple(current, case["sealed_at"].as_str().unwrap())
-            .map(|t| serde_json::to_value(wist_core::objects::StateEntry::Label(t)).unwrap());
+        let entry = label::label_tuple(current);
+        retracted |= entry.retracted;
+        expired |=
+            !entry.retracted && !label::applies_at(&entry, case["sealed_at"].as_str().unwrap());
         assert_eq!(
-            tuple.unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(wist_core::objects::StateEntry::Label(entry)).unwrap(),
             case["state_tuple"],
             "{name}"
         );
-        dropped += usize::from(case["state_tuple"].is_null());
     }
-    assert!(dropped >= 2);
+    assert!(retracted && expired);
+    let mut resume_shapes = (false, false);
+    for case in vector["resume_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let sealed = sealed_labels(&case["sealed"]);
+        let later = sealed_labels(&case["later"]);
+        let snapshot_height = case["snapshot_height"].as_u64().unwrap();
+        assert!(sealed.iter().all(|s| s.height <= snapshot_height), "{name}");
+        assert!(later.iter().all(|s| s.height > snapshot_height), "{name}");
+        let replayed = label::current_label(sealed.iter().chain(&later)).unwrap();
+        assert_eq!(replayed.label_id, case["current"], "{name}");
+        let held = label::label_tuple(label::current_label(&sealed).unwrap());
+        let wist_core::objects::StateEntry::Label(tuple) =
+            serde_json::from_value(case["state_tuple"].clone()).unwrap()
+        else {
+            panic!("{name}: state_tuple is not a label tuple");
+        };
+        assert_eq!(
+            serde_json::to_value(wist_core::objects::StateEntry::Label(tuple.clone())).unwrap(),
+            serde_json::to_value(wist_core::objects::StateEntry::Label(held)).unwrap(),
+            "{name}"
+        );
+        assert!(
+            later.iter().all(|s| s.height > tuple.sealing_height),
+            "{name}"
+        );
+        let resumed = SealedLabel {
+            label: wist_core::objects::Label {
+                wist_version: "1.0.0".into(),
+                labeler: tuple.labeler.clone(),
+                subject: tuple.subject.clone(),
+                name: tuple.name.clone(),
+                value: tuple.value.map(|value| i64::try_from(value).unwrap()),
+                asserted_at: tuple.asserted_at.clone(),
+                retracted: tuple.retracted.then_some(true),
+                expires_at: tuple.expires_at.clone(),
+                delta: tuple.delta.clone(),
+            },
+            label_id: tuple.label_id.clone(),
+            height: tuple.sealing_height,
+            entry_index: 0,
+        };
+        let walked = label::current_label(std::iter::once(&resumed).chain(&later)).unwrap();
+        assert_eq!(walked.label_id, case["current"], "{name}");
+        let probe = case["probe_sealed_at"].as_str().unwrap();
+        assert_eq!(
+            label::applies_at(&label::label_tuple(replayed), probe),
+            case["applies"].as_bool().unwrap(),
+            "{name}"
+        );
+        resume_shapes.0 |= walked.label_id == tuple.label_id;
+        resume_shapes.1 |= walked.label_id != tuple.label_id;
+    }
+    assert!(resume_shapes.0 && resume_shapes.1);
     for case in vector["binding_cases"].as_array().unwrap() {
         assert_eq!(
             label::binding_applies(case["delta"].as_str(), case["record_item"].as_str()),

@@ -180,6 +180,7 @@ pub struct LabelEntry {
     pub name: String,
     pub value: Option<u64>,
     pub asserted_at: String,
+    pub retracted: bool,
     pub expires_at: Option<String>,
     pub delta: Option<String>,
     pub label_id: String,
@@ -341,17 +342,18 @@ impl<'de> Deserialize<'de> for StateEntry {
                 }))
             }
             "label" => {
-                check_arity::<D::Error>(&kind, tail, 9)?;
+                check_arity::<D::Error>(&kind, tail, 10)?;
                 Ok(StateEntry::Label(LabelEntry {
                     labeler: field(tail, 0)?,
                     subject: field(tail, 1)?,
                     name: field(tail, 2)?,
                     value: field(tail, 3)?,
                     asserted_at: field(tail, 4)?,
-                    expires_at: field(tail, 5)?,
-                    delta: field(tail, 6)?,
-                    label_id: field(tail, 7)?,
-                    sealing_height: field(tail, 8)?,
+                    retracted: field(tail, 5)?,
+                    expires_at: field(tail, 6)?,
+                    delta: field(tail, 7)?,
+                    label_id: field(tail, 8)?,
+                    sealing_height: field(tail, 9)?,
                 }))
             }
             "dispute" => {
@@ -448,6 +450,7 @@ impl Serialize for StateEntry {
                 e.name,
                 e.value,
                 e.asserted_at,
+                e.retracted,
                 e.expires_at,
                 e.delta,
                 e.label_id,
@@ -519,6 +522,7 @@ mod tests {
                 "wist:spam",
                 Value::Null,
                 "2026-08-02T12:00:00Z",
+                true,
                 "2026-09-02T12:00:00Z",
                 id,
                 id,
@@ -585,6 +589,32 @@ mod tests {
             ]),
             serde_json::json!([]),
             serde_json::json!(["aggregator_key", "key-1", "pk", 10, Value::Null]),
+        ] {
+            assert!(serde_json::from_value::<StateEntry>(tuple).is_err());
+        }
+    }
+
+    #[test]
+    fn label_tuple_without_a_boolean_retracted_is_rejected() {
+        let id = format!("sha256:{}", "a".repeat(64));
+        let tail = |retracted: Option<Value>| {
+            let mut tuple = vec![
+                Value::from("label"),
+                "labeler.example.net".into(),
+                "https://example.com/blog/post-1".into(),
+                "wist:spam".into(),
+                Value::Null,
+                "2026-08-02T12:00:00Z".into(),
+            ];
+            tuple.extend(retracted);
+            tuple.extend([Value::Null, Value::Null, id.as_str().into(), 12.into()]);
+            Value::Array(tuple)
+        };
+        assert!(serde_json::from_value::<StateEntry>(tail(Some(false.into()))).is_ok());
+        for tuple in [
+            tail(None),
+            tail(Some(Value::Null)),
+            tail(Some("false".into())),
         ] {
             assert!(serde_json::from_value::<StateEntry>(tuple).is_err());
         }

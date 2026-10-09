@@ -282,28 +282,34 @@ pub fn current_label<'a>(
 }
 
 pub fn expired_at(label: &Label, sealed_at: &str) -> bool {
-    label.expires_at.as_deref().is_some_and(|expires_at| {
+    expired(label.expires_at.as_deref(), sealed_at)
+}
+
+fn expired(expires_at: Option<&str>, sealed_at: &str) -> bool {
+    expires_at.is_some_and(|expires_at| {
         publisher_time::compare(expires_at, sealed_at) != Some(Ordering::Greater)
     })
 }
 
-/// WIST-3 §7: none when retracted or expired.
-pub fn label_tuple(current: &SealedLabel, sealed_at: &str) -> Option<LabelEntry> {
+pub fn applies_at(entry: &LabelEntry, sealed_at: &str) -> bool {
+    !entry.retracted && !expired(entry.expires_at.as_deref(), sealed_at)
+}
+
+/// WIST-3 §7: the current Label's tuple, retracted and expired included.
+pub fn label_tuple(current: &SealedLabel) -> LabelEntry {
     let label = &current.label;
-    if label.retracted == Some(true) || expired_at(label, sealed_at) {
-        return None;
-    }
-    Some(LabelEntry {
+    LabelEntry {
         labeler: label.labeler.clone(),
         subject: label.subject.clone(),
         name: label.name.clone(),
         value: label.value.map(|value| value as u64),
         asserted_at: label.asserted_at.clone(),
+        retracted: label.retracted == Some(true),
         expires_at: label.expires_at.clone(),
         delta: label.delta.clone(),
         label_id: current.label_id.clone(),
         sealing_height: current.height,
-    })
+    }
 }
 
 /// WIST-2 §3.3.
