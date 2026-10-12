@@ -491,6 +491,13 @@ pub fn check_sequence(
     }
 }
 
+pub fn check_genesis(offered: &Checkpoint) -> Result<(), Error> {
+    let cadence = crate::parameters::spec("epoch_cadence_seconds")
+        .and_then(|spec| spec.default)
+        .expect("the Registry defaults epoch_cadence_seconds");
+    check_sequence(None, offered, cadence)
+}
+
 pub fn check_sequence_at_head(
     previous: &Checkpoint,
     offered: &Checkpoint,
@@ -738,6 +745,19 @@ mod tests {
         assert_eq!(err.code(), Some("WIST3-E01"));
         assert!(err.to_string().contains("Epoch 1"));
         assert_eq!(absent_checkpoint(1).to_string(), err.to_string());
+    }
+
+    #[test]
+    fn epoch_0_of_a_log_without_predecessor_lands_on_the_default_cadence_grid() {
+        let (on_grid, _) = signed(0, "2026-08-02T13:00:00Z", ROOT);
+        check_genesis(&on_grid).unwrap();
+        let (off_grid, _) = signed(0, "2026-08-02T12:30:00Z", ROOT);
+        assert_eq!(
+            check_genesis(&off_grid).unwrap_err().code(),
+            Some("WIST3-E03")
+        );
+        let (later, _) = signed(1, "2026-08-02T13:00:00Z", ROOT);
+        assert!(check_genesis(&later).is_err());
     }
 
     #[test]

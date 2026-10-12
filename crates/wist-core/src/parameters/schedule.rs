@@ -42,6 +42,7 @@ pub enum Disposition {
 #[derive(Debug, Clone)]
 pub struct Schedule {
     first_epoch_s: i64,
+    successor: bool,
     accepted: Vec<Amendment>,
     last_position: Option<(u64, u64)>,
     updates: AcceptedUpdates,
@@ -63,16 +64,36 @@ impl Schedule {
     pub fn new(first_epoch_s: i64) -> Self {
         Self {
             first_epoch_s,
+            successor: false,
             accepted: Vec::new(),
             last_position: None,
             updates: AcceptedUpdates::new(),
         }
     }
 
+    pub fn successor(first_epoch_s: i64) -> Self {
+        Self {
+            successor: true,
+            ..Self::new(first_epoch_s)
+        }
+    }
+
+    pub fn is_successor(&self) -> bool {
+        self.successor
+    }
+
     pub fn replay(first_epoch_s: i64, amendments: &[Amendment]) -> ScheduleReplay {
+        Self::new(first_epoch_s).replay_from(amendments)
+    }
+
+    pub fn replay_successor(first_epoch_s: i64, amendments: &[Amendment]) -> ScheduleReplay {
+        Self::successor(first_epoch_s).replay_from(amendments)
+    }
+
+    fn replay_from(self, amendments: &[Amendment]) -> ScheduleReplay {
         let mut order: Vec<usize> = (0..amendments.len()).collect();
         order.sort_by_key(|&i| (amendments[i].epoch_number, amendments[i].entry_index));
-        let mut schedule = Self::new(first_epoch_s);
+        let mut schedule = self;
         let mut rejected = Vec::new();
         for i in order {
             if schedule.try_accept(amendments[i].clone()).is_err() {
@@ -158,9 +179,12 @@ impl Schedule {
                 "recovery_window_days would end a window past the Log timestamp range".into(),
             ));
         }
-        let grace = self
-            .value_at("param_grace_days", amendment.sealed_at_s)
-            .unwrap();
+        let grace = if amendment.epoch_number == 0 && !self.successor {
+            0
+        } else {
+            self.value_at("param_grace_days", amendment.sealed_at_s)
+                .unwrap()
+        };
         if i128::from(amendment.effective_at_s) - i128::from(amendment.sealed_at_s)
             < i128::from(grace) * 86_400
         {
@@ -319,6 +343,45 @@ mod tests {
             ],
         );
         assert_eq!(raised.rejected, [1]);
+    }
+
+    #[test]
+    fn a_genesis_amendment_is_in_force_from_its_sealing_instant() {
+        let replay = Schedule::replay(
+            0,
+            &[
+                change("quota_base", 101, 0, 3600, 3600),
+                Amendment {
+                    entry_index: 1,
+                    ..change("links_cap_bytes", 5000, 0, 3600, 3599)
+                },
+            ],
+        );
+        assert_eq!(replay.rejected, [1]);
+        assert_eq!(replay.schedule.value_at("quota_base", 3600), Some(101));
+        assert_eq!(replay.schedule.value_at("quota_base", 3599), Some(1000));
+    }
+
+    #[test]
+    fn the_genesis_exemption_does_not_reach_epoch_1() {
+        let replay = Schedule::replay(0, &[change("quota_base", 101, 1, 3600, 3600 + 6 * DAY)]);
+        assert_eq!(replay.rejected, [0]);
+    }
+
+    #[test]
+    fn a_successor_epoch_0_keeps_the_grace_period() {
+        let later = Amendment {
+            entry_index: 1,
+            ..change("quota_base", 102, 0, 0, 7 * DAY)
+        };
+        let replay = Schedule::replay_successor(0, &[change("quota_base", 101, 0, 0, 0), later]);
+        assert_eq!(replay.rejected, [0]);
+        assert!(replay.schedule.is_successor());
+        assert!(!Schedule::new(0).is_successor());
+        let mut schedule = Schedule::successor(0);
+        assert!(schedule
+            .try_accept(change("quota_base", 101, 0, 0, 7 * DAY - 1))
+            .is_err());
     }
 
     #[test]
@@ -536,7 +599,7 @@ mod tests {
         assert!(matches!(
             apply(
                 &mut schedule,
-                0,
+                1,
                 &act("quota_base", 101, "1970-01-02T00:00:00Z")
             ),
             Disposition::Rejected {

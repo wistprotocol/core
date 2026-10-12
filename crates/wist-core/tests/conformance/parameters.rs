@@ -24,7 +24,11 @@ fn prospective_schedule() {
                 effective_at_s: c["effective_at_s"].as_i64().unwrap(),
             })
             .collect();
-        let replay = Schedule::replay(0, &changes);
+        let replay = if case["successor"].as_bool().unwrap_or(false) {
+            Schedule::replay_successor(0, &changes)
+        } else {
+            Schedule::replay(0, &changes)
+        };
         let rejected: Vec<_> = case["rejected_indices"]
             .as_array()
             .unwrap()
@@ -39,7 +43,11 @@ fn prospective_schedule() {
             );
         }
         for probe in case["maps"].as_array().unwrap() {
-            for (name, value) in probe["values"].as_object().unwrap() {
+            let values = probe["values"].as_object().unwrap();
+            for key in ["param_grace_days", "epoch_cadence_seconds"] {
+                assert!(values.contains_key(key), "{}: {key}", case["label"]);
+            }
+            for (name, value) in values {
                 assert_eq!(
                     replay
                         .schedule

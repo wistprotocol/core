@@ -75,7 +75,8 @@ an acceptance with no trusted Cosignature as unwitnessed. `progression`
 is §5's rollback rule, `equivocation` and `prefix_equivocation` its three
 equivocation forms, `check_sequence` §3.1's Epoch-to-Epoch rules
 (sequential number, a tree that never shrinks, a strictly increasing
-`sealed_at` on the cadence grid), `check_consistency` the Consistency
+`sealed_at` on the cadence grid; `check_genesis` judges Checkpoint 0 with
+no previous one against the default cadence), `check_consistency` the Consistency
 Proof between two Checkpoints, and `archive_path`/`check_archive_path`
 §6's per-Epoch archive path. §3.1 fixes each sequence failure's
 disposition: a `sealed_at` that does not advance or sits off the grid is
@@ -235,8 +236,10 @@ combination rules involving its identifier, using an otherwise-valid map.
 map. Intermediate calculations use 128-bit integers.
 
 `parameters::Schedule::replay` processes amendments in canonical Log order,
-enforces the grace period in force when each candidate seals, and checks
-every prospective effective-time map. `try_accept` provides incremental
+enforces the grace period in force when each candidate seals (none for an
+Epoch 0 amendment of a Log without a predecessor; `replay_successor` and
+`Schedule::successor` keep it for a successor Log), and checks every
+prospective effective-time map. `try_accept` provides incremental
 admission in the same order and rejects repeated or out-of-order positions.
 Rejected candidates leave accepted values unchanged and are never retried.
 `ScheduleReplay::error_at` identifies rejected amendments as WIST4-E03.

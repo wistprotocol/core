@@ -67,13 +67,6 @@ fn the_sequence_rules_at_a_verified_head_select_the_documented_code() {
     let mut outcomes = std::collections::BTreeSet::new();
     for case in vector["sequence_cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
-        let head = verified(case["verified_checkpoint"].as_str().unwrap(), &[])
-            .unwrap_or_else(|code| panic!("{name}: the head Checkpoint verifies, got {code}"));
-        assert_eq!(
-            head.epoch_number(),
-            case["verified_head_epoch_number"].as_u64().unwrap(),
-            "{name}"
-        );
         let offered = Checkpoint::parse(case["offered_checkpoint"].as_str().unwrap())
             .unwrap_or_else(|e| panic!("{name}: the offered note parses, got {e}"));
         let signature_verifies =
@@ -81,6 +74,36 @@ fn the_sequence_rules_at_a_verified_head_select_the_documented_code() {
         assert_eq!(
             signature_verifies,
             case["signature_verifies"].as_bool().unwrap(),
+            "{name}"
+        );
+        if case["verified_checkpoint"].is_null() {
+            assert!(case["verified_head_epoch_number"].is_null(), "{name}");
+            for absent in [
+                "unobtainable_epoch_number",
+                "evidence",
+                "larger_tree_leaf_hashes",
+            ] {
+                assert!(case[absent].is_null(), "{name}: {absent}");
+            }
+            let outcome = match checkpoint::check_genesis(&offered) {
+                Ok(()) if signature_verifies => "valid".to_string(),
+                Ok(()) => "WIST3-E03".to_string(),
+                Err(error) => error.code().unwrap().to_string(),
+            };
+            assert_eq!(case["expected"], outcome, "{name}");
+            assert_eq!(
+                case["expected_head_epoch_number"].as_u64(),
+                (outcome == "valid").then(|| offered.epoch_number()),
+                "{name}"
+            );
+            outcomes.insert(outcome);
+            continue;
+        }
+        let head = verified(case["verified_checkpoint"].as_str().unwrap(), &[])
+            .unwrap_or_else(|code| panic!("{name}: the head Checkpoint verifies, got {code}"));
+        assert_eq!(
+            head.epoch_number(),
+            case["verified_head_epoch_number"].as_u64().unwrap(),
             "{name}"
         );
 
@@ -190,7 +213,7 @@ fn each_epoch_of_the_vector_log_states_its_cumulative_tree() {
                     .unwrap();
             checkpoint::check_consistency(previous, &checkpoint, &path).unwrap();
         } else {
-            checkpoint::check_sequence(None, &checkpoint, cadence).unwrap();
+            checkpoint::check_genesis(&checkpoint).unwrap();
         }
         previous = Some(checkpoint);
     }
