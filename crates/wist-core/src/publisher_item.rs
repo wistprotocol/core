@@ -3,6 +3,7 @@ use crate::crypto::hex_encode;
 use crate::error::Error;
 use crate::item::{hash_formed, leaf, members};
 use crate::objects::Catalog;
+use crate::tiles::TileSet;
 use serde_json::{json, Value};
 
 pub fn check_form(body: &Value) -> Result<(), &'static str> {
@@ -34,9 +35,32 @@ pub fn verify(body: &Value, catalog: &Catalog) -> Result<(), &'static str> {
     crate::proof::verify(&body["item"], &body["proof"], catalog)
 }
 
+pub struct ListTree {
+    size: u64,
+    tiles: TileSet,
+}
+
+impl ListTree {
+    pub fn of(items: &[Value]) -> Result<Self, Error> {
+        let leaves = items.iter().map(leaf).collect::<Result<Vec<_>, Error>>()?;
+        Ok(ListTree {
+            size: leaves.len() as u64,
+            tiles: TileSet::build(&leaves),
+        })
+    }
+}
+
 pub fn build(items: &[Value], index: u64, catalog: &Catalog) -> Result<Value, Error> {
-    let leaves = items.iter().map(leaf).collect::<Result<Vec<_>, Error>>()?;
-    let path = crate::merkle::inclusion_proof(index, &leaves)?;
+    build_with(&ListTree::of(items)?, items, index, catalog)
+}
+
+pub fn build_with(
+    tree: &ListTree,
+    items: &[Value],
+    index: u64,
+    catalog: &Catalog,
+) -> Result<Value, Error> {
+    let path = crate::merkle::inclusion_proof_from(&tree.tiles, index, tree.size)?;
     let inner =
         serde_json::to_value(catalog).map_err(|error| Error::Envelope(error.to_string()))?;
     let body = json!({
@@ -98,6 +122,30 @@ mod tests {
                 assert_eq!(verify(&body, &catalog), Ok(()), "{size} {index}");
                 assert_eq!(body["proof"]["index"], index);
                 assert_eq!(body["item"], items[index as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn build_with_matches_build_and_the_linear_proof_at_every_index() {
+        for size in [1, 7, 8] {
+            let items = ordered(size);
+            let catalog = catalog_of(&items);
+            let tree = ListTree::of(&items).unwrap();
+            let leaves: Vec<_> = items.iter().map(|item| leaf(item).unwrap()).collect();
+            for index in 0..size as u64 {
+                let body = build_with(&tree, &items, index, &catalog).unwrap();
+                assert_eq!(
+                    body,
+                    build(&items, index, &catalog).unwrap(),
+                    "{size} {index}"
+                );
+                let linear: Vec<_> = crate::merkle::inclusion_proof(index, &leaves)
+                    .unwrap()
+                    .iter()
+                    .map(|hash| hex_encode(hash))
+                    .collect();
+                assert_eq!(body["proof"]["path"], json!(linear), "{size} {index}");
             }
         }
     }
