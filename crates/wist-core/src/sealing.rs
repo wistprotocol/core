@@ -4,7 +4,7 @@ use crate::constants::REMOVAL_RETENTION_DAYS;
 use crate::crypto::PublicKey;
 use crate::declaration::publisher_of;
 use crate::declaration::url_host;
-use crate::declarations::Declarations;
+use crate::declarations::{Declarations, Effects};
 use crate::error::Error;
 use crate::item::{self, Kind, SizeCaps};
 use crate::label::{self, EntryKind, Judging, LabelLookup, Rejection, SealedDispute, SealedLabel};
@@ -503,6 +503,7 @@ struct Duty {
 #[derive(Debug, Clone, Default)]
 pub struct Replay {
     declarations: Declarations,
+    last_effects: Effects,
     next_height: u64,
     sealed_at_s: Option<i64>,
     latest: BTreeMap<(String, String), LatestCatalog>,
@@ -672,6 +673,7 @@ impl Replay {
         }
         Ok(Replay {
             declarations,
+            last_effects: Effects::default(),
             next_height: epoch_number + 1,
             sealed_at_s: Some(log_seconds(sealed_at)?),
             latest,
@@ -830,6 +832,10 @@ impl Replay {
         &self.declarations
     }
 
+    pub fn last_effects(&self) -> &Effects {
+        &self.last_effects
+    }
+
     pub fn latest(&self, publisher: &str, collection: &str) -> Option<&LatestCatalog> {
         self.latest
             .get(&(publisher.to_owned(), collection.to_owned()))
@@ -890,6 +896,7 @@ impl Replay {
         epoch: &Epoch<'_>,
         stored: &[(usize, &[u8])],
     ) -> Result<Outcome, Error> {
+        self.last_effects = Effects::default();
         let sealed_at_s = log_seconds(epoch.sealed_at)?;
         self.check_next(epoch.height, sealed_at_s)?;
         let limits = epoch.parameters.limits()?;
@@ -936,6 +943,7 @@ impl Replay {
                 );
             }
         }
+        self.last_effects = effects;
         let mut in_force = BTreeMap::new();
         let mut windows = BTreeSet::new();
         for (domain, state) in self.declarations.domains() {
@@ -1046,6 +1054,7 @@ impl Replay {
     }
 
     fn rejected(&mut self, epoch: &Epoch<'_>, sealed_at_s: i64, codes: Vec<String>) -> Outcome {
+        self.last_effects = Effects::default();
         self.declarations
             .seed_head(epoch.height, epoch.root, Some(sealed_at_s));
         self.next_height = epoch.height + 1;
@@ -1594,6 +1603,39 @@ mod tests {
             .epoch(&empty_epoch(1, "2026-10-01T01:00:00Z", &[]))
             .unwrap();
         assert!(matches!(next, Outcome::Accepted { .. }));
+    }
+
+    #[test]
+    fn last_effects_hold_the_last_accepted_epochs_declarations_effects_and_clear_on_rejection() {
+        let sk = crate::crypto::SigningKey::from_seed(&[1; 32]);
+        let key = crate::objects::PublisherKey::new(&sk.public().to_b64u(), 1_786_233_600, None);
+        let publisher = serde_json::json!({
+            "wist_version": "1.0.0", "domain": "example.com", "seq": 0, "keys": [key],
+        });
+        let envelope =
+            crate::envelope::sign_envelope(&publisher, "publisher", &key.kid, &sk).unwrap();
+        let entries = [serde_json::json!({"type": "publisher_declaration", "body": envelope})];
+        let mut replay = Replay::new();
+        assert!(replay.last_effects().installations.is_empty());
+        let outcome = replay
+            .epoch(&empty_epoch(0, "2026-10-01T00:00:00Z", &entries))
+            .unwrap();
+        assert!(matches!(outcome, Outcome::Accepted { .. }));
+        let installed = &replay.last_effects().installations;
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].declaration.envelope(), &envelope);
+        replay
+            .reject_epoch(
+                &empty_epoch(1, "2026-10-01T01:00:00Z", &[]),
+                vec![EPOCH_REJECTED.to_owned()],
+            )
+            .unwrap();
+        assert!(replay.last_effects().installations.is_empty());
+        replay
+            .epoch(&empty_epoch(2, "2026-10-01T02:00:00Z", &entries))
+            .unwrap();
+        assert!(replay.last_effects().installations.is_empty());
+        assert_eq!(replay.last_effects().transitions.len(), 1);
     }
 
     #[test]
