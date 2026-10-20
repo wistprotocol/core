@@ -19,6 +19,7 @@ use crate::suffix_list::{check_epoch_capacity, EpochCaps, SuffixList};
 use crate::timestamp::{instant, log_seconds};
 use crate::withdrawal::{self, SealedItems, WithdrawalReplay};
 use serde_json::Value;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 const DAY_SECONDS: i64 = 86_400;
@@ -310,6 +311,15 @@ fn state_error(message: String) -> Error {
 
 impl Records {
     pub fn from_state(entries: &[StateEntry]) -> Result<Self, Error> {
+        Self::from_state_owned(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, StateEntry::Record(_) | StateEntry::Removal(_)))
+                .cloned(),
+        )
+    }
+
+    pub fn from_state_owned(entries: impl IntoIterator<Item = StateEntry>) -> Result<Self, Error> {
         let mut records = Records::default();
         for entry in entries {
             match entry {
@@ -322,33 +332,57 @@ impl Records {
                             entry.publisher, entry.url
                         )));
                     }
+                    let item_id = item::item_id(&entry.item)?;
+                    let RecordEntry {
+                        publisher,
+                        url,
+                        item,
+                        collection,
+                        catalog_id,
+                        generated_at,
+                    } = entry;
                     let record = Record {
-                        item: entry.item.clone(),
-                        item_id: item::item_id(&entry.item)?,
-                        collection: entry.collection.clone(),
-                        catalog: entry.catalog_id.clone(),
-                        generated_at: entry.generated_at.clone(),
+                        item,
+                        item_id,
+                        collection,
+                        catalog: catalog_id,
+                        generated_at,
                     };
-                    let slot = (entry.publisher.clone(), entry.url.clone());
-                    if records.records.insert(slot, record).is_some() {
-                        return Err(state_error(format!(
-                            "two record tuples of {} {}",
-                            entry.publisher, entry.url
-                        )));
+                    match records.records.entry((publisher, url)) {
+                        Entry::Occupied(held) => {
+                            let (publisher, url) = held.key();
+                            return Err(state_error(format!(
+                                "two record tuples of {publisher} {url}"
+                            )));
+                        }
+                        Entry::Vacant(slot) => {
+                            slot.insert(record);
+                        }
                     }
                 }
                 StateEntry::Removal(entry) => {
+                    let RemovalEntry {
+                        publisher,
+                        url,
+                        item_id,
+                        catalog_id,
+                        generated_at,
+                    } = entry;
                     let removal = Removal {
-                        item_id: entry.item_id.clone(),
-                        catalog: entry.catalog_id.clone(),
-                        generated_at: entry.generated_at.clone(),
+                        item_id,
+                        catalog: catalog_id,
+                        generated_at,
                     };
-                    let slot = (entry.publisher.clone(), entry.url.clone());
-                    if records.removals.insert(slot, removal).is_some() {
-                        return Err(state_error(format!(
-                            "two removal tuples of {} {}",
-                            entry.publisher, entry.url
-                        )));
+                    match records.removals.entry((publisher, url)) {
+                        Entry::Occupied(held) => {
+                            let (publisher, url) = held.key();
+                            return Err(state_error(format!(
+                                "two removal tuples of {publisher} {url}"
+                            )));
+                        }
+                        Entry::Vacant(slot) => {
+                            slot.insert(removal);
+                        }
                     }
                 }
                 _ => {}
@@ -634,6 +668,15 @@ impl Replay {
         declarations: Declarations,
         entries: &[StateEntry],
     ) -> Result<Self, Error> {
+        Self::resumed_owned(epoch_number, sealed_at, declarations, entries.to_vec())
+    }
+
+    pub fn resumed_owned(
+        epoch_number: u64,
+        sealed_at: &str,
+        declarations: Declarations,
+        entries: Vec<StateEntry>,
+    ) -> Result<Self, Error> {
         if declarations.head().map(|(height, _)| height) != Some(epoch_number) {
             return Err(Error::History(format!(
                 "a Replay resumed at Epoch {epoch_number} needs Declarations headed there"
@@ -641,7 +684,7 @@ impl Replay {
         }
         let mut latest = BTreeMap::new();
         let mut resumed_labels = BTreeMap::new();
-        for entry in entries {
+        for entry in &entries {
             if let StateEntry::Label(entry) = entry {
                 resumed_labels.insert(entry.label_id.clone(), entry.subject.clone());
             }
@@ -671,15 +714,27 @@ impl Replay {
                 }
             }
         }
+        let sealed_at_s = log_seconds(sealed_at)?;
+        let (held, rest): (Vec<StateEntry>, Vec<StateEntry>) = entries
+            .into_iter()
+            .partition(|entry| matches!(entry, StateEntry::Record(_) | StateEntry::Removal(_)));
+        let records = Records::from_state_owned(held)?;
+        let mut sealed = SealedItems::from_state(epoch_number, &rest)?;
+        for (publisher, _, record) in records.records() {
+            sealed.seal(&record.item_id, publisher, Kind::Page, epoch_number);
+        }
+        for (publisher, _, removal) in records.removals() {
+            sealed.seal(&removal.item_id, publisher, Kind::Removed, epoch_number);
+        }
         Ok(Replay {
             declarations,
             last_effects: Effects::default(),
             next_height: epoch_number + 1,
-            sealed_at_s: Some(log_seconds(sealed_at)?),
+            sealed_at_s: Some(sealed_at_s),
             latest,
-            records: Records::from_state(entries)?,
-            sealed: SealedItems::from_state(epoch_number, entries)?,
-            withdrawals: WithdrawalReplay::from_state(entries)?,
+            records,
+            sealed,
+            withdrawals: WithdrawalReplay::from_state(&rest)?,
             duties: BTreeMap::new(),
             labels: BTreeMap::new(),
             disputes: BTreeMap::new(),
@@ -830,6 +885,10 @@ impl Replay {
 
     pub fn declarations(&self) -> &Declarations {
         &self.declarations
+    }
+
+    pub fn next_height(&self) -> u64 {
+        self.next_height
     }
 
     pub fn last_effects(&self) -> &Effects {
@@ -1537,6 +1596,77 @@ mod tests {
             vec![record_tuple(url, "https://example.com/other")],
         ] {
             assert!(Records::from_state(&tuples).is_err(), "{tuples:?}");
+        }
+    }
+
+    fn resumption_of(tuples: Vec<StateEntry>) -> Result<(Replay, Replay), Error> {
+        let mut declarations = Declarations::default();
+        declarations.seed_head(3, "root", None);
+        let borrowed = Replay::resumed(3, "2026-10-01T00:00:00Z", declarations.clone(), &tuples)?;
+        let owned = Replay::resumed_owned(3, "2026-10-01T00:00:00Z", declarations, tuples)?;
+        Ok((borrowed, owned))
+    }
+
+    fn sightings(replay: &Replay) -> Vec<(String, String, Kind, u64)> {
+        replay
+            .sealed_items()
+            .sealed()
+            .map(|sealed| {
+                (
+                    sealed.item_id.to_owned(),
+                    sealed.publisher.to_owned(),
+                    sealed.kind,
+                    sealed.height,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_owned_resumption_holds_what_a_borrowed_one_holds() {
+        let (borrowed, owned) = resumption_of(vec![
+            StateEntry::RegistryUpdate(crate::objects::RegistryUpdateEntry {
+                update_id: "sha256:a".into(),
+                sealing_height: 2,
+            }),
+            record_tuple("https://example.com/a", "https://example.com/a"),
+            removal_tuple("https://example.com/b"),
+            StateEntry::Withdrawal(crate::objects::WithdrawalEntry {
+                item_id: format!("sha256:{}", "c".repeat(64)),
+                publisher: "example.com".into(),
+                sealing_height: 2,
+            }),
+        ])
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(owned.state_entries()).unwrap(),
+            serde_json::to_value(borrowed.state_entries()).unwrap()
+        );
+        assert_eq!(owned.state_entries().len(), 4);
+        assert_eq!(sightings(&owned), sightings(&borrowed));
+        assert_eq!(sightings(&owned).len(), 3);
+        assert_eq!(
+            owned.registry_updates().accepted_height("sha256:a"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn an_owned_resumption_refuses_the_tuples_a_borrowed_one_refuses() {
+        let url = "https://example.com/a";
+        for tuples in [
+            vec![record_tuple(url, url), removal_tuple(url)],
+            vec![removal_tuple(url), removal_tuple(url)],
+            vec![record_tuple(url, url), record_tuple(url, url)],
+            vec![record_tuple(url, "https://example.com/other")],
+        ] {
+            let mut declarations = Declarations::default();
+            declarations.seed_head(3, "root", None);
+            assert!(
+                Replay::resumed_owned(3, "2026-10-01T00:00:00Z", declarations, tuples.clone())
+                    .is_err(),
+                "{tuples:?}"
+            );
         }
     }
 
