@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::objects::{RegistryUpdateEntry, StateEntry};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -10,7 +11,7 @@ pub fn update_id(act: &Value) -> Result<String, Error> {
     crate::item::sha256_hex("sha256:", update)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedUpdates {
     accepted: BTreeMap<String, u64>,
 }

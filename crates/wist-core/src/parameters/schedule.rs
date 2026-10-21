@@ -3,12 +3,13 @@ use crate::crypto::PublicKey;
 use crate::objects::{RegistryAction, RegistryDetails, RegistryUpdateEnvelope};
 use crate::registry_updates::AcceptedUpdates;
 use crate::Error;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
 pub use crate::timestamp::LOG_TIMESTAMP_MAX_S;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Amendment {
     pub parameter: String,
     pub value: i64,
@@ -39,7 +40,7 @@ pub enum Disposition {
     NotParameterChange,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
     first_epoch_s: i64,
     successor: bool,
@@ -643,5 +644,28 @@ mod tests {
             ],
         );
         assert_eq!(replay.rejected, [1, 2]);
+    }
+
+    #[test]
+    fn a_schedule_restored_from_its_serialization_keeps_its_amendments_position_and_updates() {
+        let mut schedule = Schedule::replay(
+            0,
+            &[
+                change("quota_base", 101, 0, 3600, 3600),
+                change("quota_base", 102, 1, 3600, 3601),
+            ],
+        )
+        .schedule;
+        schedule.updates.accept("sha256:00", 1);
+        let restored: Schedule =
+            serde_json::from_slice(&serde_json::to_vec(&schedule).unwrap()).unwrap();
+        assert_eq!(restored.accepted(), schedule.accepted());
+        assert_eq!(restored.accepted_updates(), schedule.accepted_updates());
+        assert_eq!(restored.first_epoch_s(), 0);
+        assert_eq!(restored.value_at("quota_base", 3600), Some(101));
+        let mut restored = restored;
+        assert!(restored
+            .try_accept(change("quota_base", 103, 1, 3600, 3600 + 30 * DAY))
+            .is_err());
     }
 }
